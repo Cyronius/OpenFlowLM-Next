@@ -927,3 +927,88 @@ with corr >= 0.9999 against N sequential `forward` calls and the same KV rows
 within bf16, and a TTFT on a 500-token prompt at most a tenth of
 decode-as-prefill's. The dense families first; DeltaNet and MoE prefill are a
 separate plan.
+
+### OPEN-GEMM-Q4: a tiled matmul over q4_1 pool chunks
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_q4/`)
+**Test category:** manual (needs the NPU; `designs/gemm_q4/make_test.py` builds the fixture and compares)
+
+`Y[M, N] = X[M, K] . W[N, K]^T` with W in the pool's q4_1 chunk layout shall run
+on the whole array as a bf16 matmul, each core dequantizing the chunk it is
+handed (`dequant_q4.cc`: nib and d / m into the (r, s, t) = (4, 8, 8) B tile,
+one bf16 rounding per weight) and accumulating in fp32. It is the batched
+prefill's building block: the weight bytes stream once per token block
+instead of once per token.
+
+**Acceptance criteria:**
+- Against `x . dequant(W)^T` with the dequantized weights rounded to bf16 once (`q4_1_pack.dequant_pool`), corr > 0.9999 and max error below 1% of the largest output; every element finite.
+- Sustains >= 1 TFLOPS at M = 128 on Qwen3-4B's projection shapes (K 2560 / N 4096, K 9728 / N 2560) -- the plan's go / no-go for writing the driver.
+
+**Procedure:** `python designs/gemm_q4/make_test.py --out DIR [--m --k --n]`;
+build with `GEMM_M/K/N` set; `harness/out/run_kernel.exe DIR/run.cfg`;
+`make_test.py --compare --out DIR`.
+
+**Result 2026-09-08:** M 128 / K 2560 / N 4096: corr 1.00000000, max error
+1.1e-6 of max, 2.35 ms (1.14 TFLOPS); M 192: 3.07 ms (1.31 TFLOPS); K 9728 /
+N 2560: 5.25 ms (1.21 TFLOPS). The first build's odd rows were wrong (the high
+nibble does not fit the bf16 magic-number mantissa), fixed by shifting after
+widening to 16 bits.
+
+### OPEN-VISION-VIT-REF: the vision tower, reference and host port
+**Applies to:** openflowlm-next (`open_kernels/model/replica_vit.py`, `src/open_qwen36/vision/`)
+**Test category:** unit (`tests/test_vision_vit.py`; the transformers comparison needs the container and torch and skips without them); the C++ port is checked by `vit_test.exe` (procedure below)
+
+The shipped `vision_weight.q4nx` -- every linear pre-tiled for the closed
+engine's `vision_mm` as `[n/64][k/256][64][256]` bf16, zero-padded -- shall be
+un-tiled and run as Qwen3-VL's vision tower: patch embed + bilinearly
+interpolated positions, 2-D RoPE attention over the whole image, GELU-tanh
+MLP, the 2x2 merger. The numpy forward matches transformers'
+`Qwen3VLVisionModel` loaded with the same weights; the host C++ port matches the
+numpy forward. Both key prefixes (`QWEN3_6_MOE_*`, `QWEN3_5_*`) are read.
+
+**Acceptance criteria:**
+- numpy vs transformers on a random 8 x 8 (unit) / 16 x 16 grid: corr > 0.99999, max error < 1e-3 of max.
+- The patch order is merge-block-major; a 48 x 48 grid samples the position table exactly.
+- `vit_test.exe <model_dir> <fixture>`: corr > 0.99999, max error < 1e-3 of max against `replica_vit.py --fixture`.
+
+**Result 2026-09-08 (35B tower, 27 blocks):** numpy vs transformers corr
+1.00000000, rel 8.7e-6; C++ vs numpy corr 1.00000000, rel 4.0e-6, 16 x 16
+patches in 1.02 s (numpy 11.5 s).
+
+### OPEN-VISION-EMBED: the open engine takes an image payload
+**Applies to:** openflowlm-next (`src/open_qwen36/engine.cpp`, `core.cpp`, `pools.cpp`, `src/common/AutoModel/modeling_qwen3_6_moe*.cpp`, `modeling_qwen3_5vl*.cpp`)
+**Test category:** e2e (`utilities/flm-test --vision --model <vlm>` through `flm serve` with the open engine)
+
+`Engine::prefill(ids, payload)` with an image payload shall run the vision
+tower on each image and step each merged patch's row through the model as a
+hidden vector (`Core::step_embed`) at its M-RoPE position (t, h, w) = (c, c +
+row, c + col), text tokens after an image continuing from the same counter
+(`rope_parameters.mrope_section`, interleaved), later prefill chunks and
+generated tokens inheriting it; a request without images is the unchanged
+text path. The model classes read their preprocessing constants from
+`config.json` and no longer require the closed engine for images.
+
+**Acceptance criteria (e2e):**
+- `flm-test --vision --model qwen3.6-moe:35b` (and a Qwen3.5 VL size) passes on the open engine with the answer on the fixed test image matching the closed engine's.
+- A text-only request after an image request answers as before (the position records are restored on `clear_context`).
+
+**Result 2026-09-08:** runs end to end through `flm serve` on Qwen3.5-0.8B and
+on the 35B (tower resident in 2.2 s, a 30 x 44-patch image -> 330 tokens in
+14.8 s on the CPU, prefill 516 tokens, the answer describes the image
+correctly, follow-up turns continue from the same (t, h, w) counter). The
+suite's other two images are dropped by the app's own reader before either
+engine. **The closed-engine comparison did not run**: the closed 1.0.4 DLL
+segfaults on the local 1.0.2 / 0.9.45 containers (it expects the Q4_K branch),
+so on this box only the open engine can serve these files. Log:
+`.claude/plans/issue-16-hw-results.md`.
+
+### OPEN-PREFILL-BATCH: a multi-token prefill dispatch
+**Applies to:** openflowlm-next (`src/open_qwen36/`, `open_kernels/designs/`)
+**Test category:** integration (needs the NPU)
+
+Not implemented. `Engine::prefill` shall run a prompt in blocks through a
+batched dispatch built on OPEN-GEMM-Q4 -- one weight stream per block, the
+existing attention kernel per row -- producing, at the last position, logits
+with corr >= 0.9999 against N sequential `forward` calls and the same KV rows
+within bf16, and a TTFT on a 500-token prompt at most a tenth of
+decode-as-prefill's. The dense families first; DeltaNet and MoE prefill are a
+separate plan.
