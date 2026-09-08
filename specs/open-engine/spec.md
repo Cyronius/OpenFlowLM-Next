@@ -890,3 +890,40 @@ build; see OPEN-QUANT-Q8. The kernel sets went to
 `src/xclbins/<model>/open_kernels_q8`, beside each size's untouched q4_1 baseline, and
 `recipes/catalogue.py` did not move -- the q8 GEMV's K here is `lin_value_width`, 4096 or
 2048, both already validated. Log: `.claude/plans/q8m-hw-results.md`.
+
+### OPEN-GEMM-Q4: a tiled matmul over q4_1 pool chunks
+**Applies to:** openflowlm-next (`open_kernels/designs/gemm_q4/`)
+**Test category:** manual (needs the NPU; `designs/gemm_q4/make_test.py` builds the fixture and compares)
+
+`Y[M, N] = X[M, K] . W[N, K]^T` with W in the pool's q4_1 chunk layout shall run
+on the whole array as a bf16 matmul, each core dequantizing the chunk it is
+handed (`dequant_q4.cc`: nib and d / m into the (r, s, t) = (4, 8, 8) B tile,
+one bf16 rounding per weight) and accumulating in fp32. It is the batched
+prefill's building block: the weight bytes stream once per token block
+instead of once per token.
+
+**Acceptance criteria:**
+- Against `x . dequant(W)^T` with the dequantized weights rounded to bf16 once (`q4_1_pack.dequant_pool`), corr > 0.9999 and max error below 1% of the largest output; every element finite.
+- Sustains >= 1 TFLOPS at M = 128 on Qwen3-4B's projection shapes (K 2560 / N 4096, K 9728 / N 2560) -- the plan's go / no-go for writing the driver.
+
+**Procedure:** `python designs/gemm_q4/make_test.py --out DIR [--m --k --n]`;
+build with `GEMM_M/K/N` set; `harness/out/run_kernel.exe DIR/run.cfg`;
+`make_test.py --compare --out DIR`.
+
+**Result 2026-09-08:** M 128 / K 2560 / N 4096: corr 1.00000000, max error
+1.1e-6 of max, 2.35 ms (1.14 TFLOPS); M 192: 3.07 ms (1.31 TFLOPS); K 9728 /
+N 2560: 5.25 ms (1.21 TFLOPS). The first build's odd rows were wrong (the high
+nibble does not fit the bf16 magic-number mantissa), fixed by shifting after
+widening to 16 bits.
+
+### OPEN-PREFILL-BATCH: a multi-token prefill dispatch
+**Applies to:** openflowlm-next (`src/open_qwen36/`, `open_kernels/designs/`)
+**Test category:** integration (needs the NPU)
+
+Not implemented. `Engine::prefill` shall run a prompt in blocks through a
+batched dispatch built on OPEN-GEMM-Q4 -- one weight stream per block, the
+existing attention kernel per row -- producing, at the last position, logits
+with corr >= 0.9999 against N sequential `forward` calls and the same KV rows
+within bf16, and a TTFT on a 500-token prompt at most a tenth of
+decode-as-prefill's. The dense families first; DeltaNet and MoE prefill are a
+separate plan.

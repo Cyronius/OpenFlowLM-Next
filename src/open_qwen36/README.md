@@ -537,9 +537,13 @@ on a memory-starved box, not the kernels.
 ## What is still not closed
 
 - **Batched prefill.** Prompt tokens go through the decode step one at a time.
-  Exact, but 124 ms each: a 500-token prompt is a minute. The closed engine
-  has batch kernels; nobody has written open ones (phlegm's plan called it
-  "weeks, gated on one experiment").
+  Exact, but ~120 ms each: a 500-token prompt is a minute. The experiment that
+  gates the driver has passed (2026-09-08): `open_kernels/designs/gemm_q4`, a
+  whole-array bf16 matmul over q4_1 chunks dequantized on the core, runs
+  Qwen3-4B's projections at 1.1-1.3 TFLOPS, exact to the bf16-rounded reference
+  (spec OPEN-GEMM-Q4). What is left is the block-mode dispatch and the driver
+  (OPEN-PREFILL-BATCH) -- dense families first; the DeltaNet and MoE layers
+  need two more kernels.
 - **Long-context attention cost -- closed on the dense families and Qwen3.5,
   the 35B in progress** (2026-09-08, spec OPEN-ATTN-CONTEXT). The attention
   kernel now batches its softmax exponentials on the vector unit, splits the
