@@ -152,6 +152,7 @@ std::vector<int> request(Core& core, const Args& a) {
     if (a.gemm_block) {
         size_t GT = core.gemm_block_t();
         if (GT == 0) { std::fprintf(stderr, "ERROR: --gemm-block given but this kernel set has no gemm_block program\n"); std::exit(2); }
+        core.set_block_logits_all(a.prefill_logits && !a.dump_prefix.empty());
         while (i < a.ids.size()) {
             size_t t_real = std::min(GT, a.ids.size() - i);
             std::vector<int> blk(a.ids.begin() + static_cast<long>(i), a.ids.begin() + static_cast<long>(i + t_real));
@@ -160,10 +161,14 @@ std::vector<int> request(Core& core, const Args& a) {
             core.step_gemm_block(blk, t_real, want);
             {
                 const auto& tm = core.last_timing();
-                std::fprintf(stderr, "  gemm-block [%zu,%zu) t_real=%zu: %.1f ms (GEMM(5x40) %.1f, attn(dxB,T*40) %.1f, lm_head %.1f)\n",
-                             i, i + GT, t_real, tm.total_ms, tm.part0_ms, tm.route_ms, tm.lmhead_ms);
+                std::fprintf(stderr, "  gemm-block [%zu,%zu) t_real=%zu: %.1f ms (GEMM %.1f, host %.1f, per-token %.1f, lm_head %.1f)\n",
+                             i, i + GT, t_real, tm.total_ms, tm.part0_ms, tm.part1_ms, tm.route_ms, tm.lmhead_ms);
             }
-            if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(i + t_real - 1), core.logits());
+            // every real position of the block, like the sequential path's --prefill-logits
+            for (size_t t = 0; t < core.block_logits().size(); ++t)
+                dump_pos(a.dump_prefix, static_cast<int>(i + t), core.block_logits()[t]);
+            if (!a.dump_prefix.empty() && want && core.block_logits().empty())
+                dump_pos(a.dump_prefix, static_cast<int>(i + t_real - 1), core.logits());
             if (!a.dump_prefix.empty() && i + t_real == a.ids.size()) dump(a.dump_prefix, dumped++, core.logits());
             i += t_real;
         }

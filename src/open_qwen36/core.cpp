@@ -13,6 +13,8 @@
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
 
+#include "open_qwen36/block_host.hpp"
+
 namespace open_qwen36 {
 
 namespace fs = std::filesystem;
@@ -101,7 +103,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         // Step -- see manifest.hpp's GemmBlockProgram) which the manifest
         // parser already required to exist whenever gemm_block is present.
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
-        if (types_[l]->gemm_block.t) wanted["dxB"] = true;
+        if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
+        if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
     for (const auto& [name, d] : man_.kernels)
@@ -122,7 +125,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     gemm_block_t_ = nl_ > 0 ? types_[0]->gemm_block.t : 0;
     for (int l = 1; l < nl_; ++l)
         if (types_[l]->gemm_block.t != gemm_block_t_) { gemm_block_t_ = 0; break; }
-    log("GEMM-route prefill block size (0167/#32): " + std::to_string(gemm_block_t_) +
+    log("block prefill route: T = " + std::to_string(gemm_block_t_) +
         (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
 }
 
@@ -173,68 +176,99 @@ xrt::bo Core::alloc(size_t bytes, const uint8_t* init, size_t init_bytes) {
 void Core::load_weights(const std::function<void(int, int)>& progress) {
     auto t0 = std::chrono::steady_clock::now();
     pools_.clear(); consts_.clear(); act_.clear(); state_.clear(); globals_.clear();
-    gqkv3_w_.clear(); go_w_.clear(); ggate_w_.clear(); gup_w_.clear(); gdown_w_.clear();
+    gemm_w_.clear(); hc_.clear();
     ln_w_bf16_.clear(); post_ln_w_bf16_.clear();
     pools_.reserve(nl_); consts_.reserve(nl_); act_.reserve(nl_); state_.reserve(nl_);
     if (gemm_block_t_) {
-        gqkv3_w_.resize(nl_); go_w_.resize(nl_); ggate_w_.resize(nl_); gup_w_.resize(nl_); gdown_w_.resize(nl_);
         ln_w_bf16_.resize(nl_); post_ln_w_bf16_.resize(nl_);
+        hc_.resize(nl_);
     }
+    // the block route's per-layer weight buffers: each a contiguous run of pack ops of
+    // the freshly packed host bytes (pool or consts), copied before that buffer's upload
+    auto build_weights = [&](const LayerType& lt, int l, const std::string& from, const uint8_t* host) {
+        if (!(gemm_block_t_ && lt.gemm_block.t)) return;
+        for (const auto& [name, gw] : lt.gemm_block.weights) {
+            if (gw.from != from) continue;
+            size_t off0 = 0, total = 0;
+            for (size_t i = 0; i < gw.ops.size(); ++i) {
+                auto [off, bytes] = op_region(lt, from, gw.ops[i]);
+                if (i == 0) off0 = off;
+                else if (off != off0 + total)
+                    throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": the " + from + " ops of " + name +
+                                             " are not contiguous -- the route needs one memcpy per weight buffer");
+                total += bytes;
+            }
+            xrt::bo w = xrt::ext::bo(*dev_, padup(total));
+            std::memcpy(w.map<uint8_t*>(), host + off0, total);
+            w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            auto& v = gemm_w_[name];
+            if (v.size() != static_cast<size_t>(nl_)) v.resize(nl_);
+            v[l] = std::move(w);
+        }
+    };
     for (int l = 0; l < nl_; ++l) {
         const LayerType& lt = *types_[l];
         xrt::bo pool = xrt::ext::bo(*dev_, man_.pool_bytes);
         uint8_t* pool_host = pool.map<uint8_t*>();
         pools::pack_pool(man_, lt, *file_, l, pool_host);
-        // 0167/#32: the GEMM route's 5 per-layer weight buffers,
-        // built ONCE here from the SAME freshly-packed host bytes pool.sync()
-        // is about to upload -- see core.hpp's field comment for why these
-        // are dedicated buffers rather than a sub-range of `pool`. q/k/v are
-        // concatenated because lt.pool[0..2] (q,k,v) are already byte-
-        // contiguous in this layout (dense.py's pack_plan lays them out back
-        // to back with no gaps); this is checked, not assumed.
-        // gemm_block_t_, NOT lt.gemm_block.t: the vectors above are sized only
-        // when every layer type agrees, and step_gemm_block() refuses otherwise,
-        // so a per-layer test here would index empty vectors on a set whose
-        // layer types disagree (review on #39).
-        if (gemm_block_t_ && lt.gemm_block.t) {
-            auto [qo, qb] = pool_region(lt, 0);
-            auto [ko, kb] = pool_region(lt, 1);
-            auto [vo, vb] = pool_region(lt, 2);
-            if (ko != qo + qb || vo != ko + kb)
-                throw std::runtime_error("open_qwen36: layer " + std::to_string(l) +
-                                         ": q/k/v pool regions are not contiguous -- the GEMM route's "
-                                         "qkv3 weight buffer cannot be built by a single memcpy");
-            xrt::bo w = xrt::ext::bo(*dev_, padup(qb + kb + vb));
-            std::memcpy(w.map<uint8_t*>(), pool_host + qo, qb + kb + vb);
-            w.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-            gqkv3_w_[l] = std::move(w);
-            auto mk = [&](int idx, std::vector<xrt::bo>& dst) {
-                auto [off, bytes] = pool_region(lt, idx);
-                xrt::bo b = xrt::ext::bo(*dev_, padup(bytes));
-                std::memcpy(b.map<uint8_t*>(), pool_host + off, bytes);
-                b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-                dst[l] = std::move(b);
-            };
-            mk(3, go_w_); mk(4, gup_w_); mk(5, ggate_w_); mk(6, gdown_w_);
-        }
+        build_weights(lt, l, "pool", pool_host);
         pool.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         pools_.push_back(std::move(pool));
         xrt::bo c = xrt::ext::bo(*dev_, padup(lt.consts_bytes));
         std::memset(c.map<uint8_t*>(), 0, padup(lt.consts_bytes));
         uint8_t* c_host = c.map<uint8_t*>();
         pools::pack_consts(man_, lt, *file_, l, c_host);
-        // 0167/#32: this route's host RMSNorm needs the two norm
-        // weights as host floats. consts.pack always puts input_layernorm at
-        // byte 0 and post_attention_layernorm right after it, both ELN =
-        // hidden*2 bytes bf16 (open_kernels/recipes/dense.py's DenseLayout;
-        // CD_LNW=0, CD_POSTLN=eln) -- checked against a real manifest.json,
-        // not assumed. Captured from the SAME host buffer pack_consts() just
-        // wrote, before its device sync, so this costs no extra I/O.
+        build_weights(lt, l, "consts", c_host);
         if (gemm_block_t_ && lt.gemm_block.t) {
-            ln_w_bf16_[l].resize(man_.hidden);
-            post_ln_w_bf16_[l].resize(man_.hidden);
-            std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
-            std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+            if (lt.gemm_block.kind == "dense") {
+                // the dense route's host RMSNorm reads the two norm weights as bf16;
+                // dense.py's consts plan puts input_layernorm at byte 0 and
+                // post_attention_layernorm right after it (ELN = hidden * 2 each)
+                ln_w_bf16_[l].resize(man_.hidden);
+                post_ln_w_bf16_[l].resize(man_.hidden);
+                std::memcpy(ln_w_bf16_[l].data(), c_host, man_.hidden * 2);
+                std::memcpy(post_ln_w_bf16_[l].data(), c_host + man_.hidden * 2, man_.hidden * 2);
+            } else {
+                // the MoE kinds' host stages read their small tensors straight from the
+                // file, by the names the consts plan carries (no consts layout knowledge here)
+                const GemmBlockProgram& gb = lt.gemm_block;
+                HostConsts& h = hc_[l];
+                auto bf = [&](const char* suffix) { return file_->bf16(const_tensor(lt, suffix, l)); };
+                auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
+                    if (v.size() != n)
+                        throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +
+                                                 std::to_string(v.size()) + " values, the route wants " + std::to_string(n));
+                };
+                h.ln = bf("input_layernorm.weight");
+                h.postln = bf("post_attention_layernorm.weight");
+                h.router = bf("moe_router.weight");
+                want(h.ln, man_.hidden, "input_layernorm");
+                want(h.postln, man_.hidden, "post_attention_layernorm");
+                want(h.router, man_.hidden * man_.moe.experts, "moe_router");
+                if (gb.kind == "linear") {
+                    const std::string wa = const_tensor(lt, "ssm_alpha_proj.weight", l);
+                    const auto& shape = file_->meta(wa).shape;
+                    if (shape.size() != 2 || shape[0] != man_.hidden)
+                        throw std::runtime_error("open_qwen36: " + wa + " is not [hidden, lanes]");
+                    h.lanes = shape[1];
+                    h.Wa = file_->bf16(wa);
+                    h.Wb = bf("ssm_beta_proj.weight");
+                    h.A = file_->f32(const_tensor(lt, "ssm_a", l));
+                    h.dtb = file_->f32(const_tensor(lt, "ssm_dt.bias", l));
+                    h.convw = bf("ssm_conv1d.weight");
+                    h.nw = bf("ssm_norm.weight");
+                    want(h.Wb, man_.hidden * h.lanes, "ssm_beta_proj");
+                    want(h.A, gb.value_heads, "ssm_a");
+                    want(h.dtb, gb.value_heads, "ssm_dt.bias");
+                    want(h.convw, gb.conv_kernel * gb.qkv_dim, "ssm_conv1d");
+                    want(h.nw, gb.head_dim, "ssm_norm");
+                } else {
+                    h.qn = bf("q_norm.weight");
+                    h.kn = bf("k_norm.weight");
+                    want(h.qn, gb.hd, "q_norm");
+                    want(h.kn, gb.hd, "k_norm");
+                }
+            }
         }
         c.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         consts_.push_back(std::move(c));
@@ -306,19 +340,12 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     if (name == "consts") return consts_[layer];
     if (name == "act") return act_[layer];
     if (name == "state") return state_[layer];
-    // 0167/#32: the GEMM-route block's per-layer weight buffers
-    // (built once in load_weights(), see its own comment for why they are
-    // dedicated buffers rather than a sub-range of `pool`).
-    auto gemm_w = [&](std::vector<xrt::bo>& v, const char* label) -> xrt::bo& {
-        if (layer < 0 || static_cast<size_t>(layer) >= v.size() || !v[layer])
-            throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " has no '" + label + "' (gemm_block) buffer");
-        return v[layer];
-    };
-    if (name == "gqkv3_w") return gemm_w(gqkv3_w_, "gqkv3_w");
-    if (name == "go_w") return gemm_w(go_w_, "go_w");
-    if (name == "ggate_w") return gemm_w(ggate_w_, "ggate_w");
-    if (name == "gup_w") return gemm_w(gup_w_, "gup_w");
-    if (name == "gdown_w") return gemm_w(gdown_w_, "gdown_w");
+    // the block route's per-layer weight buffers (load_weights)
+    if (auto g = gemm_w_.find(name); g != gemm_w_.end()) {
+        if (layer < 0 || static_cast<size_t>(layer) >= g->second.size() || !g->second[layer])
+            throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " has no '" + name + "' (gemm_block) buffer");
+        return g->second[layer];
+    }
     auto it = globals_.find(name);
     if (it == globals_.end()) throw std::runtime_error("open_qwen36: the program names an unknown buffer '" + name + "'");
     return it->second;
@@ -438,12 +465,62 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
 // each buffer's lifetime and why it is per-layer vs global.
 // ============================================================================
 
-std::pair<size_t, size_t> Core::pool_region(const LayerType& lt, int idx) const {
-    if (idx < 0 || static_cast<size_t>(idx) >= lt.pool.size())
-        throw std::runtime_error("open_qwen36: pool_region: index " + std::to_string(idx) + " out of range (" +
-                                 std::to_string(lt.pool.size()) + " pool ops)");
-    const PackOp& op = lt.pool[static_cast<size_t>(idx)];
+std::pair<size_t, size_t> Core::op_region(const LayerType& lt, const std::string& from, size_t idx) const {
+    const auto& ops = from == "pool" ? lt.pool : lt.consts;
+    if (idx >= ops.size())
+        throw std::runtime_error("open_qwen36: op_region: " + from + " op " + std::to_string(idx) + " out of range (" +
+                                 std::to_string(ops.size()) + " ops)");
+    const PackOp& op = ops[idx];
+    // the GEMM dequantises the q4_1 band law, which is what std_perm writes; a q8_perm
+    // projection has no route (the recipe does not emit one) and is refused here too
+    if (op.op != "std_perm")
+        throw std::runtime_error("open_qwen36: op_region: " + from + " op " + std::to_string(idx) + " is a " + op.op +
+                                 ", not a band-law projection the GEMM reads");
     return {static_cast<size_t>(op.dst), static_cast<size_t>(op.nch) * man_.chunk_bytes};
+}
+
+std::string Core::const_tensor(const LayerType& lt, const std::string& suffix, int layer) const {
+    for (const PackOp& op : lt.consts) {
+        const std::string& t = op.tensor;
+        if (t.size() >= suffix.size() && t.compare(t.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            std::string name = t;
+            const size_t at = name.find("{l}");
+            if (at != std::string::npos) name.replace(at, 3, std::to_string(layer));
+            return name;
+        }
+    }
+    throw std::runtime_error("open_qwen36: layer type " + lt.name + " has no consts tensor ending in " + suffix);
+}
+
+std::vector<float> Core::gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer) {
+    xrt::bo& xb = buffer(s.args[1], 0);
+    xrt::bo& yb = buffer(s.args[2], 0);
+    if (xb.size() < K * T * 2 || yb.size() < N * T * 4)
+        throw std::runtime_error("open_qwen36: gemm " + s.kernel + ": the x / y globals are smaller than [" +
+                                 std::to_string(K) + "] x " + std::to_string(T) + " -> [" + std::to_string(N) + "]");
+    auto t0 = std::chrono::steady_clock::now();
+    host::tile_x(x.data(), T, K, xb.map<uint16_t*>());   // straight into the mapped buffer
+    timing_.part1_ms += ms_since(t0);
+    xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, K * T * 2, 0);
+    timing_.part0_ms += run(kerns_.at(s.kernel), s.args, layer);
+    yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, N * T * 4, 0);
+    auto t1 = std::chrono::steady_clock::now();
+    std::vector<float> out(T * N);
+    host::transpose(yb.map<float*>(), N, T, out.data());   // [N, T] on the device -> [T, N]
+    timing_.part1_ms += ms_since(t1);
+    return out;
+}
+
+void Core::tail_logits(const float* row) {
+    auto t1 = std::chrono::steady_clock::now();
+    xrt::bo& xres1 = buffer("xres", 0);
+    std::memcpy(xres1.map<uint8_t*>(), row, man_.hidden * 4);
+    xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
+    for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
+    xrt::bo& lg = buffer("logits", 0);
+    lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
+    std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
+    timing_.lmhead_ms = ms_since(t1);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch) {
@@ -483,6 +560,11 @@ void Core::rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid, cons
 }
 
 void Core::tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out) {
+    out.assign(K * T, 0);
+    host::tile_x(x_tk.data(), T, K, out.data());
+}
+
+void Core::tile_gemm_x_reference(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out) {
     // [T,K] fp32 -> bf16, pre-tiled [K,T] "k,n" order (K_TILE=64, MAC 8x8,
     // tile_n=32 -- gemm_q4_prefill.py's own GQP_TILE_N default), matching
     // open_npue/npue_pack.cpp's tile_b algorithm exactly (copied, not
@@ -639,6 +721,10 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
                                  std::to_string(cfg_.max_ctx));
     for (int tok : ids)
         if (tok < 0 || static_cast<size_t>(tok) >= man_.vocab) throw std::runtime_error("open_qwen36: token id out of range");
+    if (types_[0]->gemm_block.kind != "dense") {
+        step_block_moe(ids, t_real, want_logits);
+        return;
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     timing_ = StepTiming{};
@@ -664,25 +750,198 @@ void Core::step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want
     }
     pos_ += static_cast<int>(t_real);
 
+    block_logits_.clear();
+    if (block_logits_all_) {
+        std::vector<float> row(man_.hidden);
+        for (size_t t = 0; t < t_real; ++t) {
+            for (size_t c = 0; c < man_.hidden; ++c) row[c] = static_cast<float>(xres[t * man_.hidden + c]);
+            tail_logits(row.data());
+            block_logits_.push_back(logits_host_);
+        }
+    }
     if (want_logits) {
-        // Prefill wants only the (t_real-1)th (the true last REAL) token's
-        // logits -- matches step()'s own "prefill wants only the final
-        // token's logits" contract, generalized past T-1 for a padded final
-        // block.
-        auto t1 = std::chrono::steady_clock::now();
-        xrt::bo& xres1 = buffer("xres", 0);
-        const size_t last = t_real - 1;
+        // only the last REAL token's logits, as step() does for a prefill
         std::vector<float> last_row(man_.hidden);
-        for (size_t c = 0; c < man_.hidden; ++c) last_row[c] = static_cast<float>(xres[last * man_.hidden + c]);
-        std::memcpy(xres1.map<uint8_t*>(), last_row.data(), man_.hidden * 4);
-        xres1.sync(XCL_BO_SYNC_BO_TO_DEVICE, man_.hidden * 4, 0);
-        for (const Step& s : man_.tail) run(kerns_.at(s.kernel), s.args, 0);
-        xrt::bo& lg = buffer("logits", 0);
-        lg.sync(XCL_BO_SYNC_BO_FROM_DEVICE, man_.vocab * 4, 0);
-        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), man_.vocab * 4);
-        timing_.lmhead_ms = ms_since(t1);
+        for (size_t c = 0; c < man_.hidden; ++c) last_row[c] = static_cast<float>(xres[(t_real - 1) * man_.hidden + c]);
+        tail_logits(last_row.data());
     }
     timing_.total_ms = ms_since(t0);
+}
+
+// ---- the MoE families' block: kinds linear and full. Timing: part0 = the GEMM
+// dispatches, part1 = the host stages, route = the per-token MoE (routing + kernel).
+
+void Core::step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits) {
+    auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    const size_t T = ids.size(), hid = man_.hidden;
+    std::vector<float> xres(T * hid);
+    for (size_t t = 0; t < T; ++t) file_->bf16_row(man_.embed_tensor, static_cast<size_t>(ids[t]), hid, xres.data() + t * hid);
+    for (int l = 0; l < nl_; ++l) {
+        const std::string& kind = types_[l]->gemm_block.kind;
+        if (kind == "linear") block_layer_linear(l, xres, T, t_real);
+        else if (kind == "full") block_layer_full(l, xres, T, t_real);
+        else throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + " (" + types_[l]->name + ") has no block route");
+    }
+    pos_ += static_cast<int>(t_real);
+    block_logits_.clear();
+    if (block_logits_all_)
+        for (size_t t = 0; t < t_real; ++t) {
+            tail_logits(xres.data() + t * hid);
+            block_logits_.push_back(logits_host_);
+        }
+    if (want_logits) tail_logits(xres.data() + (t_real - 1) * hid);
+    timing_.total_ms = ms_since(t0);
+}
+
+void Core::moe_token(int l, const float* xm, const float* res, const float* probs, const int32_t* idx, const float* w,
+                     float* out) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
+    xrt::bo& act = act_[l];
+    uint8_t* a = act.map<uint8_t*>();
+    // what the sequential layer's first dispatch would have left in act: xm (bf16), the
+    // router record [probs f32[E] | idx i32[8] @rout_idx_off | w f32[8]], the residual (f32)
+    uint16_t* xmb = reinterpret_cast<uint16_t*>(a + gb.a_xm);
+    for (size_t i = 0; i < hid; ++i) xmb[i] = f32_to_bf16(xm[i]);
+    std::memcpy(a + gb.a_rout, probs, E * 4);
+    int32_t* ri = reinterpret_cast<int32_t*>(a + gb.a_rout + man_.rout_idx_off);
+    float* rw = reinterpret_cast<float*>(a + gb.a_rout + man_.rout_idx_off + 8 * 4);
+    for (size_t s = 0; s < 8; ++s) {
+        ri[s] = s < topk ? idx[s] : 0;
+        rw[s] = s < topk ? w[s] : 0.f;
+    }
+    std::memcpy(a + gb.a_res, res, hid * 4);
+    act.sync(XCL_BO_SYNC_BO_TO_DEVICE, hid * 2, gb.a_xm);
+    act.sync(XCL_BO_SYNC_BO_TO_DEVICE, E * 4 + 16 * 4, gb.a_rout);
+    act.sync(XCL_BO_SYNC_BO_TO_DEVICE, hid * 4, gb.a_res);
+    // the MoE-only dispatch (mx.py): the routed slots patched from the ids we just wrote
+    // (no readback of the record), then run
+    auto t0 = std::chrono::steady_clock::now();
+    Kern& mk = kerns_.at(gb.moe_kernel);
+    if (mk.moe2.empty()) throw std::runtime_error("open_qwen36: " + gb.moe_kernel + " has no routed-expert table");
+    uint32_t slots[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t s = 0; s < topk; ++s) {
+        if (idx[s] < 0 || static_cast<unsigned>(idx[s]) >= E) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(idx[s]));
+        slots[s] = static_cast<uint32_t>(idx[s]);
+    }
+    stream_patch::moe2_apply(mk.iw(), mk.moe2, slots, man_.moe);
+    mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    run(mk, gb.moe_args, l);
+    xrt::bo& xr = buffer("xres", 0);
+    xr.sync(XCL_BO_SYNC_BO_FROM_DEVICE, hid * 4, 0);
+    std::memcpy(out, xr.map<uint8_t*>(), hid * 4);
+    timing_.route_ms += ms_since(t0);
+}
+
+namespace {
+// residual + post-attention norm, the router, then the MoE per real token: the tail both
+// MoE kinds share once their attention half has produced `out` [T, hid]
+struct MoeTail {
+    std::vector<float> res, xm, probs, w;
+    std::vector<int32_t> idx;
+};
+}  // namespace
+
+void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const HostConsts& hc = hc_[l];
+    const size_t hid = man_.hidden, nch = gb.qkv_dim, vw = gb.vw, E = man_.moe.experts, topk = man_.moe.topk;
+
+    std::vector<float> xn(T * hid);
+    host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
+    const std::vector<float> y = gemm(gb.program[0], xn, T, hid, nch + vw, l);
+    std::vector<float> qkv(T * nch), z(T * vw);
+    for (size_t t = 0; t < T; ++t) {
+        std::memcpy(qkv.data() + t * nch, y.data() + t * (nch + vw), nch * 4);
+        std::memcpy(z.data() + t * vw, y.data() + t * (nch + vw) + nch, vw * 4);
+    }
+    // the conv rows and S live in the state BO; the recurrence runs on the host in place
+    xrt::bo& st = state_[l];
+    st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
+    uint8_t* sp = st.map<uint8_t*>();
+    host::DeltaGeom g;
+    g.T = T; g.t_real = t_real; g.hid = hid;
+    g.key_heads = gb.key_heads; g.value_heads = gb.value_heads; g.head_dim = gb.head_dim; g.taps = gb.conv_kernel;
+    g.lanes = hc.lanes; g.s_rows = gb.s_rows; g.eps = gb.eps;
+    std::vector<float> og(T * vw);
+    auto t0 = std::chrono::steady_clock::now();
+    host::deltanet_block(g, qkv.data(), z.data(), xn.data(), hc.convw.data(), hc.Wa.data(), hc.Wb.data(), hc.A.data(),
+                         hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
+                         reinterpret_cast<float*>(sp + gb.state_s_off), og.data());
+    timing_.part1_ms += ms_since(t0);
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+    const std::vector<float> out = gemm(gb.program[1], og, T, vw, hid, l);
+
+    auto t1 = std::chrono::steady_clock::now();
+    MoeTail m;
+    m.res.resize(T * hid);
+    for (size_t i = 0; i < T * hid; ++i) m.res[i] = xres[i] + out[i];
+    m.xm.resize(T * hid);
+    host::rmsnorm_rows(m.res.data(), T, hid, hc.postln.data(), gb.eps, m.xm.data());
+    m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
+    host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
+    timing_.part1_ms += ms_since(t1);
+    for (size_t t = 0; t < T; ++t) {
+        if (t < t_real)
+            moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
+                      m.w.data() + t * topk, xres.data() + t * hid);
+        else
+            std::memcpy(xres.data() + t * hid, m.res.data() + t * hid, hid * 4);   // padding: carried, never read
+    }
+}
+
+void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const HostConsts& hc = hc_[l];
+    const size_t hid = man_.hidden, qw = gb.qw, kvw = gb.kvw, nf = 2 * qw + 2 * kvw;
+    const size_t E = man_.moe.experts, topk = man_.moe.topk;
+
+    std::vector<float> xn(T * hid);
+    host::rmsnorm_rows(xres.data(), T, hid, hc.ln.data(), gb.eps, xn.data());
+    const std::vector<float> y = gemm(gb.program[0], xn, T, hid, nf, l);
+    std::vector<float> q(T * qw), k(T * kvw), v(T * kvw), gate(T * qw);
+    for (size_t t = 0; t < T; ++t) {
+        const float* row = y.data() + t * nf;
+        std::memcpy(q.data() + t * qw, row, qw * 4);
+        std::memcpy(k.data() + t * kvw, row + qw, kvw * 4);
+        std::memcpy(v.data() + t * kvw, row + qw + kvw, kvw * 4);
+        std::memcpy(gate.data() + t * qw, row + qw + 2 * kvw, qw * 4);
+    }
+    // the KV rows: [0, pos_) read, [pos_, pos_ + t_real) written by the host attention
+    xrt::bo& st = state_[l];
+    const size_t row = lt.state_row;
+    if (pos_ > 0) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, static_cast<size_t>(pos_) * row, 0);
+    host::AttnGeom g;
+    g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
+    g.pos0 = static_cast<size_t>(pos_); g.eps = gb.eps;
+    std::vector<float> og(T * qw);
+    auto t0 = std::chrono::steady_clock::now();
+    host::attention_block(g, q.data(), k.data(), v.data(), gate.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                          st.map<uint16_t*>(), row / 2, og.data());
+    timing_.part1_ms += ms_since(t0);
+    st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
+    const std::vector<float> out = gemm(gb.program[1], og, T, qw, hid, l);
+
+    auto t1 = std::chrono::steady_clock::now();
+    MoeTail m;
+    m.res.resize(T * hid);
+    for (size_t i = 0; i < T * hid; ++i) m.res[i] = xres[i] + out[i];
+    m.xm.resize(T * hid);
+    host::rmsnorm_rows(m.res.data(), T, hid, hc.postln.data(), gb.eps, m.xm.data());
+    m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
+    host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
+    timing_.part1_ms += ms_since(t1);
+    for (size_t t = 0; t < T; ++t) {
+        if (t < t_real)
+            moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
+                      m.w.data() + t * topk, xres.data() + t * hid);
+        else
+            std::memcpy(xres.data() + t * hid, m.res.data() + t * hid, hid * 4);
+    }
 }
 
 void Core::seek(int pos) {

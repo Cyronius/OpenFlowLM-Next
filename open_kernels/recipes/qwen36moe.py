@@ -821,6 +821,110 @@ def pack_plan(spec: ModelSpec) -> dict:
     return plan
 
 
+# ---- the block prefill route (OPEN-PREFILL-BATCH): T tokens through a layer's projections
+# as whole-array GEMM dispatches (designs/gemm_q4_prefill), the DeltaNet / attention / router
+# stages on the host between them, the MoE block still per token -- on its own dispatch
+# (designs/layer_x/mx.py), because lx1 / ax1 are the second half of a per-token core program
+# and cannot run alone.
+GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 columns
+GEMM_ROLES = ("attn", "linear", "linear_out", "shared")   # the projections the route streams
+
+
+def _op_index(ops: list[dict], suffix: str, chunk0: int | None = None) -> int:
+    """The position of the pack op for `suffix` (the fused q_proj appears twice; chunk0 picks)."""
+    hits = [i for i, o in enumerate(ops) if o.get("tensor", "").endswith(suffix)
+            and (chunk0 is None or o.get("chunk0", 0) == chunk0)]
+    if len(hits) != 1:
+        raise OpRangeError(f"gemm route: {len(hits)} pack ops end in {suffix!r}, want one")
+    return hits[0]
+
+
+def gemm_route(spec: ModelSpec) -> dict | None:
+    """Per layer type the `gemm_block` the driver reads, plus the contexts / kernels / globals /
+    builds the route adds. None when a projection is streamed at q8: the GEMM dequantises the
+    q4_1 band law only, and the sequential path is then exactly what it was."""
+    if any(spec.quant_of(r) == "q8" for r in GEMM_ROLES):
+        return None
+    L, T = layout(spec), GEMM_T
+    hid, ff = spec.hidden, spec.moe_intermediate
+    plan = pack_plan(spec)["layer_types"]
+    shapes: set[tuple[int, int]] = set()
+
+    def ctx(N: int, K: int) -> str:
+        if N % 256 or K % 256:
+            raise OpRangeError(f"gemm route: [{N}, {K}] is not a multiple of 256 in both dims")
+        shapes.add((N, K))
+        return f"gemm_n{N}_k{K}"
+
+    def run(N: int, K: int, w: str) -> dict:
+        return {"op": "run", "kernel": ctx(N, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
+
+    # the routed AND the shared expert stay on lx1 / ax1, one token at a time, until the
+    # token-batched expert kernel lands (the plan's stage 2); the route covers the projections
+    moe_args = ["pool", "xres", "consts", "state", "act", "ptab"]     # mx.py's six, ax's order
+    check_buffer_args("mx", moe_args)
+    types: dict[str, dict] = {}
+    if spec.has_linear:
+        pool, consts = plan[LINEAR]["pool"], plan[LINEAR]["consts"]
+        nch, vw = spec.lin_qkv_dim, spec.lin_value_width
+        types[LINEAR] = {
+            "kind": "linear", "t": T, "eps": spec.norm_eps,
+            "program": [run(nch + vw, hid, "gqkvz_w"), run(hid, vw, "gout_w")],
+            "moe_kernel": "mx_linear", "moe_args": moe_args,
+            "weights": {"gqkvz_w": {"from": "pool", "ops": [_op_index(pool, "linear_attn.qkv_proj.weight"),
+                                                           _op_index(pool, "self_attn.gate_proj.weight")]},
+                        "gout_w": {"from": "consts", "ops": [_op_index(consts, "linear_attn.ssm_out_proj.weight")]}},
+            "qkv_dim": nch, "vw": vw, "key_heads": spec.lin_key_heads, "value_heads": spec.lin_value_heads,
+            "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff,
+            "a_xm": L.A_XM, "a_rout": L.A_ROUT, "a_res": L.A_RES,
+            "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
+        }
+    if spec.has_full:
+        pool = plan[FULL]["pool"]
+        qw, kvw = spec.attn_q_width, spec.attn_kv_width
+        nq = q4_chunks(qw, hid)
+        types[FULL] = {
+            "kind": "full", "t": T, "eps": spec.norm_eps,
+            "program": [run(2 * qw + 2 * kvw, hid, "gqkvg_w"), run(hid, qw, "go_w")],
+            "moe_kernel": "mx_full", "moe_args": moe_args,
+            "weights": {"gqkvg_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.q_proj.weight", 0),
+                                                           _op_index(pool, "self_attn.k_proj.weight"),
+                                                           _op_index(pool, "self_attn.v_proj.weight"),
+                                                           _op_index(pool, "self_attn.q_proj.weight", nq)]},
+                        "go_w": {"from": "pool", "ops": [_op_index(pool, "self_attn.o_proj.weight")]}},
+            "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
+            "rot": spec.rotary_dim, "ff": ff,
+            "a_xm": L.AA_XM, "a_rout": L.AA_ROUT, "a_res": L.AA_RES,
+        }
+    out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
+    # Hardware contexts are the scarce thing (every design here takes all eight
+    # columns, so contexts time-share the array): the two MoE streams share one
+    # xclbin, and the GEMM core program does not depend on N -- one xclbin per K,
+    # each N its own instruction stream. The context points at the first build of
+    # its K; a kernel set therefore carries one final.xclbin per K and one
+    # insts.bin per shape.
+    qh = spec.quant_hash()
+    sfx = f"_q{qh}" if qh else ""
+    kinds = [k for lt, k in ((LINEAR, "linear"), (FULL, "full")) if lt in types]
+    for kind in kinds:
+        name = f"mx_{kind}"
+        if "mx" not in out["contexts"]:
+            out["contexts"]["mx"] = f"{name}/final.xclbin"
+        out["kernels"][name] = {"context": "mx", "insts": f"{name}/insts.bin", "patch": "moeroute2", "build": name}
+        out["builds"][name] = {"design": "layer_x/mx.py", "build_dir": f"layer_x/build_mx_{kind}{sfx}", "env": {"MX_KIND": kind}}
+    for N, K in sorted(shapes):
+        name, ctx = f"gemm_n{N}_k{K}", f"gemm_k{K}"
+        if ctx not in out["contexts"]:
+            out["contexts"][ctx] = f"{name}/final.xclbin"
+        out["kernels"][name] = {"context": ctx, "insts": f"{name}/insts.bin", "build": name}
+        out["globals"][f"gemm_x_k{K}"] = K * T * 2
+        out["globals"][f"gemm_y_n{N}"] = N * T * 4
+        out["builds"][name] = {"design": "gemm_q4_prefill/gemm_q4_prefill.py",
+                               "build_dir": f"gemm_q4_prefill/build_n{N}_k{K}_t{T}",
+                               "env": {"GQP_N": str(N), "GQP_K": str(K), "GQP_T": str(T)}}
+    return out
+
+
 # ---- the step program (what the driver runs per layer type), and the kernel sets that serve it
 def programs(spec: ModelSpec) -> dict:
     L = layout(spec)
@@ -860,6 +964,12 @@ def programs(spec: ModelSpec) -> dict:
                         {"op": "moeroute2", "kernel": "ax1", "act_off": L.AA_ROUT},
                         {"op": "run", "kernel": "ax1", "args": args}],
         }
+    r = gemm_route(spec)
+    if r:
+        for k in ("contexts", "kernels", "globals"):
+            out[k].update(r[k])
+        for lt, gb in r["layer_types"].items():
+            out["layer_types"][lt]["gemm_block"] = gb
     return out
 
 
@@ -908,6 +1018,9 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b["lm_head_q8"] = {"design": "lm_head_q8/lm_head_q8.py", "build_dir": "lm_head_q8/build_full",
                        "env": {"LMHEAD_N": str(spec.vocab), "LMHEAD_K": str(spec.hidden),
                                "LMHEAD_CORES": str(LIMITS["n_cols"])}}
+    r = gemm_route(spec)
+    if r:
+        b.update(r["builds"])
     return b
 
 
@@ -921,6 +1034,7 @@ KERNEL_SOURCES = [
     "designs/router/*.cc", "designs/router/*.h",
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
+    "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key

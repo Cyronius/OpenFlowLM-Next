@@ -132,37 +132,31 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
         // lm_head only for the last one (whose logits pick the first sampled token).
         //
-        // 0167/#32: FLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
-        // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
-        // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
-        // (q4_1 dequantised on-core) plus T single-token attention dispatches,
-        // instead of T sequential step() calls. Off by default so every existing
-        // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
-        // tail padded with a repeated in-range id (hardware-proven exact: the
-        // real columns' output does not depend on the padding), never falling
-        // back to step(). A kernel set with no gemm_block program (GT == 0) runs
-        // exactly the sequential path this engine always has.
+        // The block route (Core::step_gemm_block, manifest.hpp's GemmBlockProgram)
+        // whenever the kernel set carries one: the prompt in T-wide blocks, the
+        // tail padded with a repeated in-range id and the real count passed on,
+        // never falling back to step(). FLM_OPEN_GEMM_BLOCK=0 forces the
+        // sequential path (the A/B). A prompt that has had an image is on the
+        // (t, h, w) counter, which the route does not write, so it stays sequential.
         return guarded([&] {
-            // Test the VALUE, not just presence: the docs say =1, and
-            // FLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
-            // that gets diagnosed as a different bug entirely (review on #39).
-            const char* gemm_block_env = std::getenv("FLM_OPEN_GEMM_BLOCK");
-            // A prompt that has had an image is on the (t, h, w) counter, and the
-            // gemm-block route writes no position records - it would place these
-            // tokens at the wrong positions, so stay sequential.
-            if (gemm_block_env && std::string(gemm_block_env) == "1" && !core_->mrope_active()) {
-                const size_t GT = core_->gemm_block_t();
-                if (GT > 0) {
-                    size_t i = 0;
-                    while (i < ids.size()) {
-                        const size_t t_real = std::min(GT, ids.size() - i);
-                        std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
-                        block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
-                        core_->step_gemm_block(block, t_real, i + t_real == ids.size());
-                        i += t_real;
-                    }
-                    return logits_view();
+            const char* env = std::getenv("FLM_OPEN_GEMM_BLOCK");
+            const bool off = env && std::string(env) == "0";
+            const size_t GT = core_->gemm_block_t();
+            // A block costs its full-width GEMMs however few real tokens it holds, so a
+            // short prompt is cheaper one token at a time; the crossover is measured, not
+            // derived (Qwen3.6-35B: ~64 tokens), FLM_OPEN_GEMM_BLOCK_MIN overrides it.
+            size_t min_prompt = 64;
+            if (const char* mp = std::getenv("FLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
+            if (!off && GT > 0 && ids.size() >= min_prompt && !core_->mrope_active()) {
+                size_t i = 0;
+                while (i < ids.size()) {
+                    const size_t t_real = std::min(GT, ids.size() - i);
+                    std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
+                    block.resize(GT, block.empty() ? 0 : block.back());
+                    core_->step_gemm_block(block, t_real, i + t_real == ids.size());
+                    i += t_real;
                 }
+                return logits_view();
             }
             for (size_t i = 0; i < ids.size(); ++i) core_->step(ids[i], i + 1 == ids.size());
             return logits_view();

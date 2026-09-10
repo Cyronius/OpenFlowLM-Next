@@ -189,36 +189,100 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         else fail(tw, "unknown state kind " + t.state_kind);
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
-        // 0167/#32: the GEMM-route block, independent of the sequential
-        // `program` above (see manifest.hpp's GemmBlockProgram) -- exactly
-        // 5 Steps, fixed order.
+        // the block prefill route, independent of the sequential `program`
+        // above (manifest.hpp's GemmBlockProgram): a per-kind fixed step list
         if (v.contains("gemm_block")) {
             const json& gj = v["gemm_block"];
             const std::string gw = tw + " gemm_block";
-            t.gemm_block.t = get<uint64_t>(gj, "t", gw);
-            if (t.gemm_block.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
-            t.gemm_block.eps = get<double>(gj, "eps", gw);
-            t.gemm_block.qw = get<uint64_t>(gj, "qw", gw);
-            t.gemm_block.kvw = get<uint64_t>(gj, "kvw", gw);
-            t.gemm_block.ff = get<uint64_t>(gj, "ff", gw);
-            t.gemm_block.ad_q = get<uint64_t>(gj, "ad_q", gw);
-            t.gemm_block.ad_kvn = get<uint64_t>(gj, "ad_kvn", gw);
-            t.gemm_block.ad_og = get<uint64_t>(gj, "ad_og", gw);
-            t.gemm_block.program = parse_program(need(gj, "program", gw), gw + ".program");
-            if (t.gemm_block.program.size() != 5)
-                fail(gw, "program must have exactly 5 steps (qkv3, o, gate, up, down), has " +
-                             std::to_string(t.gemm_block.program.size()));
-            for (const auto& s : t.gemm_block.program) {
+            GemmBlockProgram& g = t.gemm_block;
+            g.t = get<uint64_t>(gj, "t", gw);
+            if (g.t == 0) fail(gw, "t must be > 0 when gemm_block is present");
+            g.kind = gj.value("kind", "dense");
+            g.eps = get<double>(gj, "eps", gw);
+            g.program = parse_program(need(gj, "program", gw), gw + ".program");
+            for (const auto& s : g.program) {
                 check_step(m, s, gw, "gemm_block.program");
                 if (s.op != "run" || s.args.size() != 3)
-                    fail(gw, "gemm_block.program step '" + s.kernel + "' must be a run with exactly 3 args (weight, x, y), has " +
+                    fail(gw, "gemm_block.program step " + s.kernel + " must be a run with exactly 3 args (weight, x, y), has " +
                                  std::to_string(s.args.size()));
             }
-            if (!m.kernels.count("dxB")) fail(gw, "gemm_block present but this manifest declares no 'dxB' kernel");
+            if (gj.contains("weights")) {
+                for (const auto& [name, wj] : gj["weights"].items()) {
+                    GemmWeight w;
+                    w.from = get<std::string>(wj, "from", gw + ".weights." + name);
+                    if (w.from != "pool" && w.from != "consts") fail(gw, "weight " + name + ": from must be pool or consts");
+                    w.ops = get<std::vector<size_t>>(wj, "ops", gw + ".weights." + name);
+                    if (w.ops.empty()) fail(gw, "weight " + name + " names no pack ops");
+                    g.weights[name] = w;
+                }
+            }
+            if (g.kind == "dense") {
+                if (g.program.size() != 5)
+                    fail(gw, "a dense route has exactly 5 steps (qkv3, o, gate, up, down), has " + std::to_string(g.program.size()));
+                g.qw = get<uint64_t>(gj, "qw", gw);
+                g.kvw = get<uint64_t>(gj, "kvw", gw);
+                g.ff = get<uint64_t>(gj, "ff", gw);
+                g.ad_q = get<uint64_t>(gj, "ad_q", gw);
+                g.ad_kvn = get<uint64_t>(gj, "ad_kvn", gw);
+                g.ad_og = get<uint64_t>(gj, "ad_og", gw);
+                if (!m.kernels.count("dxB")) fail(gw, "gemm_block present but this manifest declares no dxB kernel");
+                // #39's hand-built sets carry no weights map: the dense recipe's pack order is q k v o up gate down
+                if (g.weights.empty())
+                    g.weights = {{"gqkv3_w", {"pool", {0, 1, 2}}}, {"go_w", {"pool", {3}}}, {"gup_w", {"pool", {4}}},
+                                 {"ggate_w", {"pool", {5}}}, {"gdown_w", {"pool", {6}}}};
+            } else if (g.kind == "linear" || g.kind == "full") {
+                if (!m.has_moe) fail(gw, "a " + g.kind + " route needs layout.moe (the per-token MoE tail)");
+                if (g.program.size() != 2)
+                    fail(gw, "a " + g.kind + " route has exactly 2 steps (the fused input projection, the output projection), has " +
+                                 std::to_string(g.program.size()));
+                g.a_xm = get<uint64_t>(gj, "a_xm", gw);
+                g.a_rout = get<uint64_t>(gj, "a_rout", gw);
+                g.a_res = get<uint64_t>(gj, "a_res", gw);
+                g.moe_kernel = get<std::string>(gj, "moe_kernel", gw);
+                g.moe_args = get<std::vector<std::string>>(gj, "moe_args", gw);
+                auto mk = m.kernels.find(g.moe_kernel);
+                if (mk == m.kernels.end()) fail(gw, "moe_kernel names unknown kernel " + g.moe_kernel);
+                if (mk->second.patch != "moeroute2") fail(gw, "moe_kernel " + g.moe_kernel + " is not built with the moeroute2 patch table");
+                if (g.moe_args.empty()) fail(gw, "moe_args is empty");
+                if (g.kind == "linear") {
+                    g.qkv_dim = get<uint64_t>(gj, "qkv_dim", gw);
+                    g.vw = get<uint64_t>(gj, "vw", gw);
+                    g.key_heads = get<uint64_t>(gj, "key_heads", gw);
+                    g.value_heads = get<uint64_t>(gj, "value_heads", gw);
+                    g.head_dim = get<uint64_t>(gj, "head_dim", gw);
+                    g.conv_kernel = get<uint64_t>(gj, "conv_kernel", gw);
+                    g.state_s_off = get<uint64_t>(gj, "state_s_off", gw);
+                    g.s_head_bytes = get<uint64_t>(gj, "s_head_bytes", gw);
+                    g.s_rows = get<uint64_t>(gj, "s_rows", gw);
+                    if (t.state_kind != "linear") fail(gw, "a linear route on a layer type whose state is not linear");
+                    if (g.qkv_dim != 2 * g.key_heads * g.head_dim + g.value_heads * g.head_dim || g.vw != g.value_heads * g.head_dim)
+                        fail(gw, "qkv_dim / vw disagree with the head counts");
+                } else {
+                    g.qw = get<uint64_t>(gj, "qw", gw);
+                    g.kvw = get<uint64_t>(gj, "kvw", gw);
+                    g.nh = get<uint64_t>(gj, "nh", gw);
+                    g.kvh = get<uint64_t>(gj, "kvh", gw);
+                    g.hd = get<uint64_t>(gj, "hd", gw);
+                    g.rot = get<uint64_t>(gj, "rot", gw);
+                    if (t.state_kind != "kv") fail(gw, "a full route on a layer type whose state is not kv");
+                    if (g.qw != g.nh * g.hd || g.kvw != g.kvh * g.hd || g.rot > g.hd || g.rot != m.rotary_dim)
+                        fail(gw, "qw / kvw / rot disagree with the heads and the layout rotary dim");
+                }
+            } else {
+                fail(gw, "unknown kind " + g.kind + " (dense | linear | full)");
+            }
+            for (const auto& s : g.program)
+                if (!g.weights.count(s.args[0]))
+                    fail(gw, "step " + s.kernel + " reads weight buffer " + s.args[0] + ", which weights does not define");
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
+        for (const auto& [name, w] : t.gemm_block.weights) {
+            const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
+            for (size_t idx : w.ops)
+                if (idx >= n) fail(tw, "gemm_block weight " + name + " names " + w.from + " op " + std::to_string(idx) + " of " + std::to_string(n));
+        }
         m.layer_types[name] = std::move(t);
     }
     for (const auto& l : m.layers)

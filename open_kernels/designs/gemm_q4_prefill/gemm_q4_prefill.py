@@ -46,7 +46,6 @@ Test:
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -60,12 +59,9 @@ from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 
 HERE = Path(__file__).parent
 
-# npue.py (tile_b/untile_b) already lives in THIS repo, synced from
-# NpuEmbeddings/experiments/m5-pretiled-gemm (tasks/0156, T63) -- reuse it
-# rather than re-deriving the pre-tiling logic.
-sys.path.insert(0, str(HERE.parents[2] / "npu_offload" / "gemm_rtp"))
-from npue import tile_b, untile_b  # noqa: E402
-
+# the activation's pre-tiling (npu_offload/gemm_rtp/npue.py's tile_b) is the
+# host's job -- make_test.py for the harness, core.cpp's tile_gemm_x in the
+# engine; this file only describes the layout it expects
 N_AIE_ROWS = 4
 N_AIE_COLS = 8
 M_TILE = 64        # weight rows per band / per matmul m-tile (= mac_dims-compatible, matches q4 band's 64 rows)
@@ -266,20 +262,23 @@ def gemm_q4_prefill(
     nib_bufs = [[Buffer(nib_ty, name=f"nib_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
     scratch_bufs = [[Buffer(scratch_ty, name=f"ascr_{row}_{col}") for col in range(n_aie_cols)] for row in range(n_aie_rows)]
 
+    # One weight row-block group per pass. The worker body already loops forever (IRON's
+    # while_true), and a core cannot see dispatch boundaries -- it blocks on the next
+    # element -- so the row-block count is a property of the instruction stream, not of
+    # the core program: one xclbin per (K, T) serves every N, each N its own insts.bin.
     def core_fn(in_a, in_b, out_c, zero, matmul, nib_scr, a_scr, *dequants):
-        for _ in range_(NRB):
-            for _ in range_(T_TILES):
-                elem_out = out_c.acquire(1)
-                zero(elem_out)
-                for _ in range_(NBG):
-                    band = in_a.acquire(1)
-                    for ky in range(4):  # compile-time (Python) unroll: 4 distinct entry symbols
-                        dequants[ky](band, nib_scr, a_scr)
-                        elem_in_b = in_b.acquire(1)
-                        matmul(a_scr, elem_in_b, elem_out)
-                        in_b.release(1)
-                    in_a.release(1)
-                out_c.release(1)
+        for _ in range_(T_TILES):
+            elem_out = out_c.acquire(1)
+            zero(elem_out)
+            for _ in range_(NBG):
+                band = in_a.acquire(1)
+                for ky in range(4):  # compile-time (Python) unroll: 4 distinct entry symbols
+                    dequants[ky](band, nib_scr, a_scr)
+                    elem_in_b = in_b.acquire(1)
+                    matmul(a_scr, elem_in_b, elem_out)
+                    in_b.release(1)
+                in_a.release(1)
+            out_c.release(1)
 
     def _mk(row, col):
         return Worker(

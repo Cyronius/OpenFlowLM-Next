@@ -98,7 +98,29 @@ int main(int argc, char** argv) {
     check(m.embed_tensor == "model.embed_tokens.weight" && m.norm_tensor == "model.norm.weight" && m.lmhead_ops.size() == 1 &&
           m.lmhead_ops[0].op == "lmhead_q8" && m.lmhead_ops[0].tensor == "lm_head.weight" && m.lmhead_ops[0].chunk_bytes == 8704, "tensor names");
     check(m.has_moe, "the 27B manifest carries the MoE geometry");
-    check(m.files().size() == 10, "10 files named (4 xclbin + 6 insts)");
+    // the block prefill route (OPEN-PREFILL-BATCH)
+    const auto& lg = lin.gemm_block;
+    const auto& fg = full.gemm_block;
+    check(lg.t == 256 && lg.kind == "linear" && lg.program.size() == 2 && lg.program[0].kernel == "gemm_n12288_k2048" &&
+          lg.program[1].kernel == "gemm_n2048_k4096" && lg.program[0].args[0] == "gqkvz_w" && lg.program[1].args[2] == "gemm_y_n2048",
+          "linear route: two GEMM steps");
+    check(lg.weights.at("gqkvz_w").from == "pool" && lg.weights.at("gqkvz_w").ops == std::vector<size_t>{5, 6} &&
+          lg.weights.at("gout_w").from == "consts" && lg.weights.at("gout_w").ops == std::vector<size_t>{10},
+          "linear route: qkv|z out of the pool, out_proj out of the consts");
+    check(lg.qkv_dim == 8192 && lg.vw == 4096 && lg.key_heads == 16 && lg.value_heads == 32 && lg.head_dim == 128 &&
+          lg.conv_kernel == 4 && lg.s_rows == 140 && lg.a_rout == 176128 && lg.eps == 1e-6, "linear route: the DeltaNet geometry");
+    check(lg.moe_kernel == "mx_linear" && fg.moe_kernel == "mx_full" && lg.moe_args.size() == 6 && lg.moe_args[4] == "act" &&
+          m.kernels.at("mx_linear").patch == "moeroute2" && m.kernels.at("mx_full").context == "mx",
+          "the per-token MoE dispatch of each kind");
+    check(fg.t == 256 && fg.kind == "full" && fg.program.size() == 2 && fg.program[0].kernel == "gemm_n9216_k2048" &&
+          fg.weights.at("gqkvg_w").ops == std::vector<size_t>{5, 6, 7, 8} && fg.weights.at("go_w").ops == std::vector<size_t>{9} &&
+          fg.qw == 4096 && fg.kvw == 512 && fg.nh == 16 && fg.kvh == 2 && fg.hd == 256 && fg.rot == 64 && fg.a_rout == 83968,
+          "full route: q|k|v|gate then o, the attention geometry");
+    check(m.contexts.count("gemm_k2048") && m.kernels.at("gemm_n9216_k2048").context == "gemm_k2048" &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 7 &&
+          m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4,
+          "route contexts, kernels and globals");
+    check(m.files().size() == 18, "18 files named (7 xclbin + 11 insts: the route adds two GEMM contexts, the MoE one, five streams)");
 
     // ---- the model check
     json ok = matching_config(m);
@@ -138,6 +160,16 @@ int main(int argc, char** argv) {
     }
     // A pack op missing a size pools::apply needs, and a moeroute2 step on a kernel
     // without the routed-expert table: both named at load, not part-way through a run.
+    refused_manifest(argv[1], "op 99", "a route weight past the pack plan is refused at load", [](json& j) {
+        j["layer_types"]["linear_attention"]["gemm_block"]["weights"]["gout_w"]["ops"] = {99};
+    });
+    refused_manifest(argv[1], "moeroute2", "a route whose MoE dispatch lacks the patch table is refused at load", [](json& j) {
+        j["kernels"]["mx_linear"].erase("patch");
+    });
+    refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
+        auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];
+        p.push_back(p[1]);
+    });
     refused_manifest(argv[1], "nch", "a std_perm without nch is refused at load", [](json& j) {
         for (auto& lt : j["layer_types"])
             for (auto& o : lt["pack"]["pool"])

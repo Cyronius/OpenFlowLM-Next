@@ -17,10 +17,12 @@
 /// headers so it can be built and tested on its own (cli.cpp); engine.hpp
 /// adapts it to the app's `causal_lm` seam.
 ///
-/// Prefill is decode-as-prefill: the prompt goes through `step()` one token at
-/// a time from zeroed state with logits skipped, which is exact for this
-/// architecture (each layer's state update sees one token at a time) and is
-/// the only prefill the open kernels have.
+/// Prefill is decode-as-prefill -- the prompt through `step()` one token at a
+/// time, exact for this architecture -- unless the kernel set carries the
+/// block route (manifest.hpp's GemmBlockProgram): then `step_gemm_block()`
+/// takes 256 tokens at a time through the projections as GEMMs, with the
+/// stages between them on the host (block_host.hpp) and, on the MoE
+/// families, the expert block still one token at a time.
 #pragma once
 
 #include <cstddef>
@@ -36,6 +38,7 @@
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
 
+#include "open_qwen36/block_host.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -105,22 +108,24 @@ public:
     bool mrope_active() const { return mrope_on_; }
     /// config.json's image_token_id (-1 when the model has none).
     int image_token_id() const { return image_token_id_; }
-    /// 0167/#32: the GEMM-route batched-prefill block size (manifest.hpp's
-    /// GemmBlockProgram), or 0 when the loaded kernel set has none / its
-    /// layer types disagree -- refuses rather than guesses.
+    /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
+    /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
-    /// T tokens through every layer as 5 GEMM dispatches (q|k|v fused,
-    /// o_proj, gate_proj, up_proj, down_proj) plus T single-token attnpos-
-    /// patched attention dispatches between GEMM A' and GEMM O, with
-    /// HOST-side fp64 RMSNorm/residual/SwiGLU between every GEMM stage (see
-    /// manifest.hpp's GemmBlockProgram docstring for the full chain).
-    /// `ids.size()` must equal gemm_block_t(); the caller pads a short tail
-    /// with any in-range token id (hardware-proven exact: the real columns'
-    /// output does not depend on what the padding columns carry) and passes
-    /// the REAL count as `t_real` so position only advances by the real
-    /// tokens. Logits, like step(), only for the (t_real-1)th token, only
-    /// when asked.
+    /// T = gemm_block_t() tokens through every layer on the block route: the
+    /// projections as whole-array GEMM dispatches, the stages between them
+    /// per layer-type kind (dense: T single-token attention dispatches and
+    /// host norms / SwiGLU; linear: the DeltaNet recurrence on the host; full:
+    /// attention on the host; the MoE block one token at a time). The caller
+    /// pads a short tail with any in-range id and passes the REAL count as
+    /// `t_real`: only those tokens touch the state, and only they advance the
+    /// position. Logits, like step(), only for the last real token, only when
+    /// asked.
     void step_gemm_block(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// Validation: logits for EVERY real token of the next blocks (one lm_head pass each),
+    /// read back with block_logits() -- what a position-for-position diff against the
+    /// sequential path needs. Off by default; costs a tail per token.
+    void set_block_logits_all(bool on) { block_logits_all_ = on; }
+    const std::vector<std::vector<float>>& block_logits() const { return block_logits_; }
 
     int position() const { return pos_; }
     /// Test hook: place the next token at `pos` without decoding up to it.
@@ -176,29 +181,25 @@ private:
     int64_t mrope_pos_ = 0;
     size_t ptab_dirty_ = 0;                    ///< rows [0, dirty) hold per-request records; reset() restores them
 
-    // ---- 0167/#32: the GEMM-route block (see manifest.hpp's GemmBlockProgram)
+    // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
-    // Per-layer, dedicated (byte-0-based) weight buffers built ONCE in
-    // load_weights() by copying the already-packed pool bytes at the q/k/v,
-    // o, up, gate, down PackOp offsets (Manifest::layer_type(l).pool[0..6],
-    // fixed order per open_kernels/recipes/dense.py's pack_plan/programs) --
-    // NOT sub-ranges of pools_[l] passed with an offset: the GEMM kernels
-    // (gemm_q4_prefill.py) were traced expecting their "w" arg to start at
-    // byte 0 of its own bound buffer, and an XRT device-side sub-buffer view
-    // is an untested mechanism in this tree -- so this pays a one-time
-    // ~1.9 GB extra resident-memory cost (5 buffers/layer x 40 layers) for a
-    // mechanism already proven on hardware, rather than an unvalidated one.
-    // q/k/v are concatenated because they are ALREADY byte-contiguous in
-    // the existing pool layout (POOL_K immediately follows POOL_Q+QB, POOL_V
-    // immediately follows POOL_K+KB -- confirmed against a real manifest.json,
-    // not assumed), so this is a single memcpy, no interleaving.
-    std::vector<xrt::bo> gqkv3_w_, go_w_, ggate_w_, gup_w_, gdown_w_;   ///< per layer, only when gemm_block.t > 0
-    // Host-resident copies of input_layernorm.weight / post_attention_layernorm.weight
-    // (bf16, hidden elements each), captured once from the SAME host buffer
-    // pack_consts() just wrote (before its device sync) -- this route's
-    // RMSNorm runs on the HOST in fp64 (rmsnorm_host() below), so it needs
-    // these as host floats, not a device buffer.
-    std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;    ///< per layer, only when gemm_block.t > 0
+    // Per weight name, per layer: a dedicated buffer holding a contiguous run of
+    // the packed pool / consts bytes (the GEMM kernels read their weight from
+    // byte 0 of their own buffer; an XRT sub-buffer view is untested here).
+    // Built once in load_weights() from the same host bytes the pool upload uses.
+    std::map<std::string, std::vector<xrt::bo>> gemm_w_;
+    // dense: the two norm weights (bf16) the host RMSNorm reads, captured from consts
+    std::vector<std::vector<uint16_t>> ln_w_bf16_, post_ln_w_bf16_;
+    // linear / full: the small per-layer tensors the host stages read, straight from the file
+    struct HostConsts {
+        std::vector<float> ln, postln, router;          ///< [hid], [hid], [hid, E]
+        std::vector<float> convw, Wa, Wb, A, dtb, nw;   ///< linear: [taps, nch], [hid, lanes] x2, [heads] x2, [head_dim]
+        size_t lanes = 0;
+        std::vector<float> qn, kn;                      ///< full: [hd] x2
+    };
+    std::vector<HostConsts> hc_;                       ///< per layer, filled for a linear / full route
+    bool block_logits_all_ = false;
+    std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
     StepTiming timing_;
@@ -214,41 +215,45 @@ private:
     void route(Kern& k, int layer, uint64_t act_off);
     void log(const std::string& s) const;
 
-    // ---- 0167/#32: the GEMM-route block's own helpers (core.cpp)
-    /// The byte {offset, length} of `lt.pool[idx]` (idx: 0=q 1=k 2=v 3=o
-    /// 4=up 5=gate 6=down, per open_kernels/recipes/dense.py's pack_plan
-    /// order) inside a layer's packed pool buffer. length = nch * chunk_bytes,
-    /// the SAME formula gemm_q4_prefill.py's own `pool_bytes = n_weight * k *
-    /// 5 // 8` computes (cross-checked against a real manifest.json).
-    std::pair<size_t, size_t> pool_region(const LayerType& lt, int idx) const;
+    // ---- the block route's helpers (core.cpp)
+    /// The byte {offset, length} of pack op `idx` of `lt.pool` (from "pool") or `lt.consts`
+    /// ("consts"): a band-law (std_perm) projection, length = nch * chunk_bytes.
+    std::pair<size_t, size_t> op_region(const LayerType& lt, const std::string& from, size_t idx) const;
+    /// The consts tensor whose name ends in `suffix`, with the layer index filled in.
+    std::string const_tensor(const LayerType& lt, const std::string& suffix, int layer) const;
+    /// One GEMM step over x [T, K] (f32 row-major): tile, upload, run, download y as [T, N].
+    std::vector<float> gemm(const Step& s, const std::vector<float>& x, size_t T, size_t K, size_t N, int layer);
+    /// The tail (final norm, lm_head) for one residual row into logits_host_.
+    void tail_logits(const float* row);
     /// Host-side shuttle of one token's `act_bytes` slice between a GLOBAL
     /// T-wide scratch buffer (`wide`, e.g. "gact") and an ordinary T=1
-    /// per-layer scratch buffer (`scratch1`, e.g. "act") -- a map+memcpy+sync
-    /// round trip, the same idiom open_kernels/harness/run_kernel.cpp's
-    /// `copy` directive uses, validated on hardware before this was wired
-    /// into the engine.
+    /// per-layer scratch buffer (`scratch1`, e.g. "act").
     void shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch);
     /// out[t,:] = x[t,:] / sqrt(mean(x[t,:]^2) + eps) * w[:], reduction and
-    /// the final multiply both in fp64 (trap 11: fp32 is not a safe
-    /// reduction width at this hidden size). w is bf16 (hidden elements);
-    /// out is written as fp32 (ready for tile_gemm_x).
+    /// the final multiply both in fp64. w is bf16 (hidden elements).
     static void rmsnorm_host(const std::vector<double>& x, size_t T, size_t hid,
                              const std::vector<uint16_t>& w_bf16, double eps, std::vector<float>& out);
-    /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64,
-    /// MAC 8x8) -- a local port of the SAME algorithm
-    /// open_npue/npue_pack.cpp's tile_b implements (internal linkage there,
-    /// not callable from here -- copied rather than exported, see this
-    /// route's own history in tasks/0167 for why). Writes K*T bf16 elements
-    /// (raw bits) to `out`.
+    /// [T,K] fp32 -> bf16, pre-tiled into [K,T] "k,n" order (K_TILE=64, MAC 8x8, tile_n 32)
+    /// -- the layout gemm_q4_prefill.py streams its activation in.
     static void tile_gemm_x(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
-    /// One layer of the GEMM-route chain (manifest.hpp's GemmBlockProgram
-    /// docstring): entry RMSNorm -> GEMM A' (qkv3) -> T dxB dispatches at
-    /// positions [pos_, pos_+T) -> GEMM O -> residual + post-attn RMSNorm ->
-    /// GEMM gate + GEMM up -> host SwiGLU -> GEMM down -> residual. `xres` is
-    /// T*hidden fp64, updated in place (this layer's output becomes the next
-    /// layer's input) -- positions come from the member `pos_`, unchanged by
-    /// this call (the caller advances it once per BLOCK, not per layer).
+    /// The scalar original of tile_gemm_x, kept only as the reference host::tile_x is checked against.
+    static void tile_gemm_x_reference(const std::vector<float>& x_tk, size_t T, size_t K, std::vector<uint16_t>& out);
+    /// One dense layer of the route (0167/#32): entry RMSNorm -> GEMM qkv3 -> T dxB
+    /// dispatches -> GEMM o -> residual + post-attn RMSNorm -> GEMM gate, up -> host
+    /// SwiGLU -> GEMM down -> residual. `xres` is T*hidden fp64, updated in place.
     void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
+    /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
+    void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// A linear-attention layer of the block route: GEMM qkv|z -> host DeltaNet (state in
+    /// place through t_real tokens) -> GEMM out -> residual, norm, router -> the MoE per token.
+    void block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// A full-attention layer: GEMM q|k|v|gate -> host attention over the KV rows (rows
+    /// [pos_, pos_ + t_real) written) -> GEMM o -> the same tail.
+    void block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real);
+    /// The MoE block for one token on the sequential kernel (lx1 / ax1): xm, the router
+    /// record and the residual into `act`, route + run, the new residual out of `xres`.
+    void moe_token(int l, const float* xm, const float* res, const float* probs, const int32_t* idx, const float* w,
+                   float* out);
 };
 
 }  // namespace open_qwen36

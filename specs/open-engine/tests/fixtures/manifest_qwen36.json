@@ -245,7 +245,10 @@
   "ln": "ln/final.xclbin",
   "lm": "lm_head_q8/final.xclbin",
   "lx": "lx0/final.xclbin",
-  "ax": "ax0/final.xclbin"
+  "ax": "ax0/final.xclbin",
+  "mx": "mx_linear/final.xclbin",
+  "gemm_k4096": "gemm_n2048_k4096/final.xclbin",
+  "gemm_k2048": "gemm_n9216_k2048/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -280,6 +283,33 @@
    "insts": "ax1/insts.bin",
    "patch": "moeroute2",
    "build": "ax1"
+  },
+  "mx_linear": {
+   "context": "mx",
+   "insts": "mx_linear/insts.bin",
+   "patch": "moeroute2",
+   "build": "mx_linear"
+  },
+  "mx_full": {
+   "context": "mx",
+   "insts": "mx_full/insts.bin",
+   "patch": "moeroute2",
+   "build": "mx_full"
+  },
+  "gemm_n2048_k4096": {
+   "context": "gemm_k4096",
+   "insts": "gemm_n2048_k4096/insts.bin",
+   "build": "gemm_n2048_k4096"
+  },
+  "gemm_n9216_k2048": {
+   "context": "gemm_k2048",
+   "insts": "gemm_n9216_k2048/insts.bin",
+   "build": "gemm_n9216_k2048"
+  },
+  "gemm_n12288_k2048": {
+   "context": "gemm_k2048",
+   "insts": "gemm_n12288_k2048/insts.bin",
+   "build": "gemm_n12288_k2048"
   }
  },
  "layer_types": {
@@ -321,6 +351,68 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "linear",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n12288_k2048",
+      "args": [
+       "gqkvz_w",
+       "gemm_x_k2048",
+       "gemm_y_n12288"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k4096",
+      "args": [
+       "gout_w",
+       "gemm_x_k4096",
+       "gemm_y_n2048"
+      ]
+     }
+    ],
+    "moe_kernel": "mx_linear",
+    "moe_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "weights": {
+     "gqkvz_w": {
+      "from": "pool",
+      "ops": [
+       5,
+       6
+      ]
+     },
+     "gout_w": {
+      "from": "consts",
+      "ops": [
+       10
+      ]
+     }
+    },
+    "qkv_dim": 8192,
+    "vw": 4096,
+    "key_heads": 16,
+    "value_heads": 32,
+    "head_dim": 128,
+    "conv_kernel": 4,
+    "ff": 512,
+    "a_xm": 172032,
+    "a_rout": 176128,
+    "a_res": 151552,
+    "state_s_off": 49152,
+    "s_head_bytes": 71680,
+    "s_rows": 140
+   },
    "pack": {
     "pool": [
      {
@@ -489,6 +581,67 @@
      ]
     }
    ],
+   "gemm_block": {
+    "kind": "full",
+    "t": 256,
+    "eps": 1e-06,
+    "program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n9216_k2048",
+      "args": [
+       "gqkvg_w",
+       "gemm_x_k2048",
+       "gemm_y_n9216"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k4096",
+      "args": [
+       "go_w",
+       "gemm_x_k4096",
+       "gemm_y_n2048"
+      ]
+     }
+    ],
+    "moe_kernel": "mx_full",
+    "moe_args": [
+     "pool",
+     "xres",
+     "consts",
+     "state",
+     "act",
+     "ptab"
+    ],
+    "weights": {
+     "gqkvg_w": {
+      "from": "pool",
+      "ops": [
+       5,
+       6,
+       7,
+       8
+      ]
+     },
+     "go_w": {
+      "from": "pool",
+      "ops": [
+       9
+      ]
+     }
+    },
+    "qw": 4096,
+    "kvw": 512,
+    "nh": 16,
+    "kvh": 2,
+    "hd": 256,
+    "rot": 64,
+    "ff": 512,
+    "a_xm": 79872,
+    "a_rout": 83968,
+    "a_res": 59392
+   },
    "pack": {
     "pool": [
      {
@@ -640,7 +793,12 @@
   "lmpool": 542113792,
   "ptab": {
    "per_row": 1024
-  }
+  },
+  "gemm_x_k4096": 2097152,
+  "gemm_y_n2048": 2097152,
+  "gemm_x_k2048": 1048576,
+  "gemm_y_n9216": 9437184,
+  "gemm_y_n12288": 12582912
  },
  "builds": {
   "lx0": {
@@ -683,6 +841,47 @@
     "LMHEAD_N": "248320",
     "LMHEAD_K": "2048",
     "LMHEAD_CORES": "8"
+   }
+  },
+  "mx_linear": {
+   "design": "layer_x/mx.py",
+   "build_dir": "layer_x/build_mx_linear",
+   "env": {
+    "MX_KIND": "linear"
+   }
+  },
+  "mx_full": {
+   "design": "layer_x/mx.py",
+   "build_dir": "layer_x/build_mx_full",
+   "env": {
+    "MX_KIND": "full"
+   }
+  },
+  "gemm_n2048_k4096": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2048_k4096_t256",
+   "env": {
+    "GQP_N": "2048",
+    "GQP_K": "4096",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n9216_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n9216_k2048_t256",
+   "env": {
+    "GQP_N": "9216",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n12288_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n12288_k2048_t256",
+   "env": {
+    "GQP_N": "12288",
+    "GQP_K": "2048",
+    "GQP_T": "256"
    }
   }
  },
