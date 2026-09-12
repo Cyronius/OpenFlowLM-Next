@@ -80,11 +80,14 @@ def test_the_35b_attention_layer_type_carries_the_route(m):
 
 def test_the_gemm_contexts_are_shape_keyed_and_built(m):
     # one xclbin (context) per K, one instruction stream (kernel) per shape
-    assert sorted(k for k in m["contexts"] if k.startswith("gemm_")) == ["gemm_k2048", "gemm_k4096"]
-    assert m["contexts"]["gemm_k2048"] == "gemm_n12288_k2048/final.xclbin"
+    assert sorted(k for k in m["contexts"] if k.startswith("gemm_")) == ["gemm_k2048", "gemm_k4096", "gemm_k512"]
+    # the context points at the first build of its K, the shapes being emitted in sorted order
+    assert m["contexts"]["gemm_k2048"] == "gemm_n1024_k2048/final.xclbin"
     assert m["contexts"]["gemm_k4096"] == "gemm_n2048_k4096/final.xclbin"
+    assert m["contexts"]["gemm_k512"] == "gemm_n2048_k512/final.xclbin"
     names = sorted(k for k in m["kernels"] if k.startswith("gemm_"))
-    assert names == ["gemm_n12288_k2048", "gemm_n2048_k4096", "gemm_n9216_k2048"]
+    assert names == ["gemm_n1024_k2048", "gemm_n12288_k2048", "gemm_n2048_k4096",
+                     "gemm_n2048_k512", "gemm_n9216_k2048"]
     for n in names:
         N, K = (int(p[1:]) for p in n.split("_")[1:])
         assert N % 256 == 0 and K % 256 == 0
