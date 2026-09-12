@@ -64,6 +64,17 @@ struct Snapshot {
     std::vector<std::vector<uint8_t>> kv;      ///< per attention layer: rows [0, pos)
 };
 
+/// One kernel's dispatches over a block: what it cost where it actually runs.
+struct DispatchStat {
+    int calls = 0;
+    double ms = 0, min_ms = 1e18;
+    void add(double t) {
+        ++calls;
+        ms += t;
+        min_ms = t < min_ms ? t : min_ms;
+    }
+};
+
 struct StepTiming {
     double part0_ms = 0, part1_ms = 0, route_ms = 0, lmhead_ms = 0, total_ms = 0;
     // The block route's stages, split finely enough to say which one to work on.
@@ -118,6 +129,25 @@ public:
     bool mrope_active() const { return mrope_on_; }
     /// config.json's image_token_id (-1 when the model has none).
     int image_token_id() const { return image_token_id_; }
+    /// Time every kernel the layer's block route names under conditions the route puts them
+    /// in, to say where a dispatch's time goes. Writes its table to stderr; needs
+    /// load_weights(), and the buffers' contents do not affect the timing.
+    ///
+    /// What the probes found on the 35B (2026-09-12), each against the same kernel run back
+    /// to back with nothing else happening:
+    ///   cycling every layer's weights   free
+    ///   a 30 ms idle gap                +0.1 to +0.7 ms
+    ///   the expert patch + its sync     free (the sync of an 800 KB stream is 0.03 ms)
+    ///   the host reading the output     free
+    ///   a change of hardware context    +2.8 ms, flat, whatever the kernel's size
+    ///   ~48 MB of host memory churn     +3.7 ms on the smallest, +14.7 on the widest
+    /// The last two together reproduce what the same dispatches cost in a real block
+    /// (OFLM_OPEN_DISPATCH_LOG prints that). Churn scales with what the kernel streams,
+    /// which is what dirty cache lines being written back during the stream would do.
+    void bench_dispatch(int layer, int reps);
+    /// Per-kernel dispatch counts and times since the last call, then cleared. Empty unless
+    /// dispatch accounting is on (OFLM_OPEN_DISPATCH_LOG).
+    std::map<std::string, DispatchStat> take_dispatch_stats();
     /// The block route's token block (manifest.hpp's GemmBlockProgram), or 0
     /// when the loaded kernel set has none / its layer types disagree.
     size_t gemm_block_t() const { return gemm_block_t_; }
@@ -195,6 +225,8 @@ private:
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
+    bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
+    std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
     // byte 0 of their own buffer; an XRT sub-buffer view is untested here).
@@ -225,6 +257,9 @@ private:
     /// Write KV row `row`'s position record from (t, h, w) into every position table.
     void write_record(size_t row, const double pos[3]);
     double run(Kern& k, const std::vector<std::string>& args, int layer);
+    /// run()'s two halves for the bench: building the xrt::run and setting its arguments,
+    /// then start() to wait(). The sum is what run() returns.
+    std::pair<double, double> run_split(Kern& k, const std::vector<std::string>& args, int layer);
     void route(Kern& k, int layer, uint64_t act_off);
     void log(const std::string& s) const;
 

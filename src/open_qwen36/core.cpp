@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 
 #include "xrt/experimental/xrt_ext.h"
@@ -132,6 +133,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
+    dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -378,7 +380,7 @@ xrt::bo& Core::buffer(const std::string& name, int layer) {
     return it->second;
 }
 
-double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
+std::pair<double, double> Core::run_split(Kern& k, const std::vector<std::string>& args, int layer) {
     auto t0 = std::chrono::steady_clock::now();
     xrt::run r(*k.k);
     r.set_arg(0, kOpcode);
@@ -386,13 +388,249 @@ double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
     r.set_arg(2, static_cast<int>(k.words.size()));
     int i = 3;
     for (const auto& a : args) r.set_arg(i++, buffer(a, layer));
+    const double submit = ms_since(t0);
+    auto t1 = std::chrono::steady_clock::now();
     r.start();
     auto st = cfg_.timeout_ms ? r.wait(std::chrono::milliseconds(cfg_.timeout_ms)) : r.wait();
     if (st != ERT_CMD_STATE_COMPLETED)
         throw std::runtime_error("open_qwen36: kernel " + k.name + " at position " + std::to_string(pos_) +
                                  " ended in ERT state " + std::to_string(static_cast<int>(st)) +
                                  (st == ERT_CMD_STATE_TIMEOUT ? " (timeout)" : ""));
-    return ms_since(t0);
+    return {submit, ms_since(t1)};
+}
+
+double Core::run(Kern& k, const std::vector<std::string>& args, int layer) {
+    const auto [submit, wait] = run_split(k, args, layer);
+    if (dispatch_log_) dispatch_stats_[k.name].add(submit + wait);
+    return submit + wait;
+}
+
+std::map<std::string, DispatchStat> Core::take_dispatch_stats() {
+    auto out = dispatch_stats_;
+    dispatch_stats_.clear();
+    return out;
+}
+
+namespace {
+struct BenchStat {
+    double min = 1e18, sum = 0, submit = 0;
+    int n = 0;
+    void add(double submit_ms, double wait_ms) {
+        const double t = submit_ms + wait_ms;
+        min = t < min ? t : min;
+        sum += t;
+        submit += submit_ms;
+        ++n;
+    }
+    double mean() const { return n ? sum / n : 0; }
+    double mean_submit() const { return n ? submit / n : 0; }
+};
+}  // namespace
+
+void Core::bench_dispatch(int layer, int reps) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: bench_dispatch before load_weights");
+    if (layer < 0 || layer >= nl_) throw std::runtime_error("open_qwen36: bench_dispatch: no such layer");
+    const GemmBlockProgram& gb = types_[layer]->gemm_block;
+    if (!gb.t) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " has no block route to bench");
+
+    // every kernel the route names, with the buffer arguments the manifest gives it
+    std::vector<std::pair<std::string, std::vector<std::string>>> jobs;
+    for (const auto* prog : {&gb.program, &gb.shared_program})
+        for (const Step& st : *prog) jobs.push_back({st.kernel, st.args});
+    for (const auto& [slots, name] : gb.moe_batch.kernels) jobs.push_back({name, gb.moe_batch.args});
+    if (!gb.moe_kernel.empty()) jobs.push_back({gb.moe_kernel, gb.moe_args});
+
+    std::fprintf(stderr, "\nopen_qwen36: dispatch bench, layer %d, %d reps each\n", layer, reps);
+    std::fprintf(stderr, "  %-22s %8s %8s %8s %8s\n", "kernel", "min ms", "mean ms", "submit", "context");
+    std::map<std::string, BenchStat> alone;
+    for (const auto& [name, args] : jobs) {
+        Kern& k = kerns_.at(name);
+        run_split(k, args, layer);                       // warm: the first call of a context pays for it
+        BenchStat st;
+        for (int i = 0; i < reps; ++i) {
+            const auto [submit, wait] = run_split(k, args, layer);
+            st.add(submit, wait);
+        }
+        alone[name] = st;
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f %8s\n", name.c_str(), st.min, st.mean(), st.mean_submit(),
+                     man_.kernels.at(name).context.c_str());
+    }
+
+    // The same kernels cycling through every layer's own weights. The pass above re-reads
+    // layer 0's, which a real block never does: it walks 40 layers once. Whatever this costs
+    // over the pass above is the price of reading weights nothing has touched recently.
+    // only this layer type's own layers: the two types name different weight buffers
+    std::vector<int> same;
+    for (int l = 0; l < nl_; ++l)
+        if (types_[l]->name == types_[layer]->name) same.push_back(l);
+    std::fprintf(stderr, "  cycling the %zu %s layers' weights (the cold-memory probe)\n", same.size(),
+                 types_[layer]->name.c_str());
+    for (const auto& [name, args] : jobs) {
+        Kern& k = kerns_.at(name);
+        BenchStat st;
+        for (int i = 0; i < reps; ++i) {
+            const auto [submit, wait] = run_split(k, args, same[i % same.size()]);
+            st.add(submit, wait);
+        }
+        const double solo = alone[name].mean();
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs layer 0 only\n", name.c_str(), st.min, st.mean(),
+                     st.mean_submit(), st.mean() - solo);
+    }
+
+    // The same kernels with the CPU busy for ~30 ms first, the gap a real layer has between
+    // its dispatches. Same context throughout, so anything here is the cost of an idle NPU.
+    std::fprintf(stderr, "  after a 30 ms host gap (the idle probe)\n");
+    for (const auto& [name, args] : jobs) {
+        Kern& k = kerns_.at(name);
+        BenchStat st;
+        for (int i = 0; i < reps; ++i) {
+            volatile double spin = 0;                       // busy, not asleep: the CPU is working in a real block
+            auto g0 = std::chrono::steady_clock::now();
+            while (ms_since(g0) < 30.0) spin += 1.0;
+            const auto [submit, wait] = run_split(k, args, layer);
+            st.add(submit, wait);
+        }
+        const double solo = alone[name].mean();
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
+                     st.mean_submit(), st.mean() - solo);
+    }
+
+    // The patched kernels with their instruction stream re-synced first, as the real path does
+    // it. The patch itself is a few hundred words; the sync is the whole stream.
+    std::fprintf(stderr, "  with the expert patch + instruction sync (the patch probe)\n");
+    std::vector<uint32_t> ex(man_.moe.experts);
+    for (size_t i = 0; i < ex.size(); ++i) ex[i] = static_cast<uint32_t>(i);
+    for (const auto& [name, args] : jobs) {
+        Kern& k = kerns_.at(name);
+        if (k.moe2.empty()) continue;
+        BenchStat st, sync_only;
+        for (int i = 0; i < reps; ++i) {
+            auto p0 = std::chrono::steady_clock::now();
+            stream_patch::moe2_apply(k.iw(), k.moe2, ex.data(), man_.moe);
+            k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            sync_only.add(ms_since(p0), 0);
+            const auto [submit, wait] = run_split(k, args, layer);
+            st.add(submit, wait);
+        }
+        const double solo = alone[name].mean();
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone (patch+sync itself %.3f, %zu KB)\n",
+                     name.c_str(), st.min, st.mean(), st.mean_submit(), st.mean() - solo, sync_only.mean(),
+                     k.words.size() * 4 / 1024);
+    }
+
+    // The same kernels with the host moving their buffers around each call, as the route does.
+    std::fprintf(stderr, "  with the host reading the output (the buffer-traffic probe)\n");
+    for (const auto& [name, args] : jobs) {
+        Kern& k = kerns_.at(name);
+        if (args.size() < 3) continue;
+        xrt::bo& xb = buffer(args[args.size() - 2], layer);   // the input the host fills
+        xrt::bo& yb = buffer(args.back(), layer);             // the output the host reads
+        BenchStat st, traffic;
+        volatile double sink = 0;
+        for (int i = 0; i < reps; ++i) {
+            auto h0 = std::chrono::steady_clock::now();
+            xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, xb.size(), 0);
+            const double up = ms_since(h0);
+            const auto [submit, wait] = run_split(k, args, layer);
+            st.add(submit, wait);
+            auto h1 = std::chrono::steady_clock::now();
+            yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, yb.size(), 0);
+            const float* y = yb.map<float*>();
+            for (size_t j = 0; j < yb.size() / 4; j += 1024) sink += y[j];
+            traffic.add(up, ms_since(h1));
+        }
+        const double solo = alone[name].mean();
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone (host traffic %.2f ms, out %zu MB)\n",
+                     name.c_str(), st.min, st.mean(), st.mean_submit(), st.mean() - solo, traffic.mean(),
+                     yb.size() >> 20);
+    }
+
+    // The layer's cycle again, with the host writing and reading ~25 MB between dispatches --
+    // the size of the tiling, gather and transpose the route does around each one.
+    {
+        std::vector<std::pair<std::string, std::vector<std::string>>> cycle;
+        for (const Step& st : gb.program) cycle.push_back({st.kernel, st.args});
+        for (const Step& st : gb.shared_program) cycle.push_back({st.kernel, st.args});
+        if (!gb.moe_batch.kernels.empty()) {
+            auto big = gb.moe_batch.kernels.rbegin();
+            cycle.push_back({big->second, gb.moe_batch.args});
+            if (gb.moe_batch.kernels.size() > 1)
+                cycle.push_back({std::next(big)->second, gb.moe_batch.args});
+        }
+        std::vector<float> churn(6u << 20), churn2(6u << 20);        // 24 MB written, 24 MB read
+        volatile double sink = 0;
+        std::fprintf(stderr, "  the same cycle with ~48 MB of host memory churn between dispatches\n");
+        std::map<std::string, BenchStat> in_cycle;
+        for (int i = 0; i < reps; ++i)
+            for (const auto& [name, args] : cycle) {
+#pragma omp parallel for
+                for (long long j = 0; j < static_cast<long long>(churn.size()); ++j)
+                    churn[j] = static_cast<float>(j + i);
+                for (size_t j = 0; j < churn2.size(); j += 16) sink += churn2[j] + churn[j];
+                const auto [submit, wait] = run_split(kerns_.at(name), args, layer);
+                in_cycle[name].add(submit, wait);
+            }
+        for (const auto& [name, args] : cycle) {
+            const BenchStat& st = in_cycle[name];
+            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
+                         st.mean_submit(), st.mean() - alone[name].mean());
+        }
+    }
+
+    // The layer's real dispatch cycle, in order, over and over.
+    {
+        std::vector<std::pair<std::string, std::vector<std::string>>> cycle;
+        for (const Step& st : gb.program) cycle.push_back({st.kernel, st.args});
+        for (const Step& st : gb.shared_program) cycle.push_back({st.kernel, st.args});
+        if (!gb.moe_batch.kernels.empty()) {
+            auto big = gb.moe_batch.kernels.rbegin();                 // the widest stream, then the second pass
+            cycle.push_back({big->second, gb.moe_batch.args});
+            if (gb.moe_batch.kernels.size() > 1)
+                cycle.push_back({std::next(big)->second, gb.moe_batch.args});
+        }
+        std::fprintf(stderr, "  the layer's own cycle of %zu dispatches, repeated (the rotation probe)\n", cycle.size());
+        std::map<std::string, BenchStat> in_cycle;
+        for (int i = 0; i < reps; ++i)
+            for (const auto& [name, args] : cycle) {
+                const auto [submit, wait] = run_split(kerns_.at(name), args, layer);
+                in_cycle[name].add(submit, wait);
+            }
+        for (const auto& [name, args] : cycle) {
+            const BenchStat& st = in_cycle[name];
+            std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
+                         st.mean_submit(), st.mean() - alone[name].mean());
+        }
+    }
+
+    // The same kernels alternating with one from another context: if a dispatch costs more
+    // here than it did alone, the difference is what switching hardware contexts costs.
+    std::fprintf(stderr, "  alternating with the widest GEMM (the context-switch probe)\n");
+    std::string other;
+    size_t widest = 0;
+    for (const auto& [name, args] : jobs)
+        if (name.rfind("gemm_n", 0) == 0) {
+            const size_t n = std::stoul(name.substr(6, name.find('_', 6) - 6));
+            if (n > widest) { widest = n; other = name; }
+        }
+    if (other.empty()) { std::fprintf(stderr, "  (no GEMM step in this route)\n"); return; }
+    const std::vector<std::string>* other_args = nullptr;
+    for (const auto& [name, args] : jobs)
+        if (name == other) other_args = &args;
+    for (const auto& [name, args] : jobs) {
+        if (name == other) continue;
+        Kern& k = kerns_.at(name);
+        Kern& o = kerns_.at(other);
+        BenchStat st;
+        for (int i = 0; i < reps; ++i) {
+            run_split(o, *other_args, layer);
+            const auto [submit, wait] = run_split(k, args, layer);
+            st.add(submit, wait);
+        }
+        const double solo = alone[name].mean();
+        std::fprintf(stderr, "  %-22s %8.3f %8.3f %8.3f  %+.3f vs alone\n", name.c_str(), st.min, st.mean(),
+                     st.mean_submit(), st.mean() - solo);
+    }
+    std::fprintf(stderr, "\n");
 }
 
 void Core::route(Kern& k, int layer, uint64_t act_off) {
