@@ -369,7 +369,10 @@ def ffn_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_act, w_prods, x_prod, y_conss
 
 
 # ---- the MoE block on one main core
-def moe_body(win, ain, yout, B, K):
+def moe_body(win, ain, yout, B, K, nx=NX):
+    """nx = NX runs the routed slots and then the shared expert; nx = NE runs the routed
+    slots only and closes on xres alone, for a stream whose shared expert ran on the host
+    (mx.py -- the block route lifts it into two GEMMs over the whole block)."""
     tab, ms = B["tab"], B["ms"]
     xm = ain.acquire(1)
     K["prep2048"](xm, tab)
@@ -378,7 +381,7 @@ def moe_body(win, ain, yout, B, K):
         K["hdr"](we, xm, ms, mode)
         win.release(1)
     ain.release(1)
-    for e in range_(NX):                          # NE routed slots, then the shared expert
+    for e in range_(nx):                          # NE routed slots, then the shared expert
         for b in range_(2):                       # u then g, HID_PC rows each, UP_ELEMS elements per band
             for g in range_(C.UP_ELEMS):
                 we = win.acquire(1)
@@ -395,6 +398,8 @@ def moe_body(win, ain, yout, B, K):
             K["gdown"](we, tab, ms, j, e)
             win.release(1)
         K["accfin"](ms, e)                        # routed: acc += w[e] y; shared: out = xres + acc + gate y
+    if nx == NE:
+        K["accfin"](ms, -1)                       # no shared slot: out = xres + acc
     for j in range_(C.OUT_ELEMS):
         ye = yout.acquire(1)
         K["out"](ms, ye, j)
@@ -402,16 +407,17 @@ def moe_body(win, ain, yout, B, K):
 
 
 def moe_sequence(pipe_w, pipe_x, pipe_y, a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW):
+                 A_BYTES, C_BYTES, A_XM, A_ROUT, A_RES, A_HP, C_SGW, nx=NX):
     """Host sequence of the MoE block (one instruction-stream part). Routed slot j's fills carry
-    placeholder pool offsets (expert j); moeroute2 rewrites them from the router output."""
+    placeholder pool offsets (expert j); moeroute2 rewrites them from the router output.
+    nx must match the body's: NE drops the shared expert's fills with its slot."""
     spp, cps = C.STRIPES_PER_PROJ, C.CORES_PER_STRIPE
     pipe_x.fill(x_prod, a_act, bt(A_BYTES, A_XM, ELEM))
     for c in range(N_CORES):
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_ROUT, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_consts, bt(C_BYTES, C_SGW, CALL_BYTES))
         pipe_w.fill(w_prods[c], a_act, bt(A_BYTES, A_RES + c * ROWS_PC * 4, CALL_BYTES))
-    for e in range(NX):
+    for e in range(nx):
         for c in range(N_CORES):
             if e < NE:
                 up = (2 * spp * e + 2 * (c // cps)) * STRIPE + (c % cps) * PAIR

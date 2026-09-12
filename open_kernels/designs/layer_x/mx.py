@@ -6,6 +6,12 @@ for one token. lx1 / ax1 cannot serve there: the main cores run one fixed
 program per token and the MoE stream is its second half -- dispatched on its
 own it waits on part 0's elements forever.
 
+Routed experts ONLY (nx = NE): the shared expert is 1.97 MB of every token's
+17.69 MB stream doing work that is identical across a block, so the block route
+runs it once per block as two GEMMs on the host side and folds it into the
+residual this dispatch is given. The stream closes on xres + acc instead
+(moe_accfin's slot < 0). The whole-layer designs keep all NX slots.
+
 Same main-core kernels, buffers and w / x / y streams as the whole-layer
 designs and the same `moe_sequence`, so the driver's moeroute2 patch applies
 unchanged. Six buffer arguments in the attention layer's order (pool, xres,
@@ -78,7 +84,7 @@ def mx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *,
 
     def main_body(win, xin, yout, *args):
         B, K = X.unpack_args(args)
-        X.moe_body(win, xin, yout, B, K)
+        X.moe_body(win, xin, yout, B, K, nx=X.NE)
 
     workers = [Worker(main_body,
                       fn_args=[of_w[c].cons(), of_x.cons(), of_y[c].prod(), *X.worker_args(X.core_buffers(t, c), K)],
@@ -88,7 +94,7 @@ def mx(pool: In, xres: InOut, consts: In, state: InOut, act: InOut, ptab: In, *,
     def sequence(a_pool, c_xres, a_consts, a_state, a_act, a_ptab, w_prods, x_prod, y_conss):
         # a_state / a_ptab: never touched (see the docstring)
         X.moe_sequence(Pipeline(3), Pipeline(3), Pipeline(3), a_pool, a_consts, a_act, c_xres, w_prods, x_prod, y_conss,
-                       ACT_BYTES, CONSTS_BYTES, XM, ROUT, RES, HP, SGW)
+                       ACT_BYTES, CONSTS_BYTES, XM, ROUT, RES, HP, SGW, nx=X.NE)
 
     rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, state_ty, act_ty, ptab_ty,
                             [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],

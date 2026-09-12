@@ -206,16 +206,18 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     fail(gw, "gemm_block.program step " + s.kernel + " must be a run with exactly 3 args (weight, x, y), has " +
                                  std::to_string(s.args.size()));
             }
-            if (gj.contains("weights")) {
-                for (const auto& [name, wj] : gj["weights"].items()) {
+            auto parse_weights = [&](const char* key, std::map<std::string, GemmWeight>& into) {
+                if (!gj.contains(key)) return;
+                for (const auto& [name, wj] : gj[key].items()) {
                     GemmWeight w;
-                    w.from = get<std::string>(wj, "from", gw + ".weights." + name);
+                    w.from = get<std::string>(wj, "from", gw + "." + key + "." + name);
                     if (w.from != "pool" && w.from != "consts") fail(gw, "weight " + name + ": from must be pool or consts");
-                    w.ops = get<std::vector<size_t>>(wj, "ops", gw + ".weights." + name);
+                    w.ops = get<std::vector<size_t>>(wj, "ops", gw + "." + key + "." + name);
                     if (w.ops.empty()) fail(gw, "weight " + name + " names no pack ops");
-                    g.weights[name] = w;
+                    into[name] = w;
                 }
-            }
+            };
+            parse_weights("weights", g.weights);
             if (g.kind == "dense") {
                 if (g.program.size() != 5)
                     fail(gw, "a dense route has exactly 5 steps (qkv3, o, gate, up, down), has " + std::to_string(g.program.size()));
@@ -244,6 +246,20 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                 if (mk == m.kernels.end()) fail(gw, "moe_kernel names unknown kernel " + g.moe_kernel);
                 if (mk->second.patch != "moeroute2") fail(gw, "moe_kernel " + g.moe_kernel + " is not built with the moeroute2 patch table");
                 if (g.moe_args.empty()) fail(gw, "moe_args is empty");
+                // the shared expert over the whole block: up|gate then down. mx is built
+                // routed-only, so a MoE route without these two steps has no shared expert
+                // at all -- required, not optional.
+                g.shared_ff = get<uint64_t>(gj, "shared_ff", gw);
+                g.shared_program = parse_program(need(gj, "shared_program", gw), gw + ".shared_program");
+                if (g.shared_program.size() != 2)
+                    fail(gw, "shared_program has exactly 2 steps (up|gate, down), has " + std::to_string(g.shared_program.size()));
+                for (const auto& s : g.shared_program) {
+                    check_step(m, s, gw, "gemm_block.shared_program");
+                    if (s.op != "run" || s.args.size() != 3)
+                        fail(gw, "gemm_block.shared_program step " + s.kernel + " must be a run with exactly 3 args, has " +
+                                     std::to_string(s.args.size()));
+                }
+                parse_weights("shared_weights", g.shared_weights);
                 if (g.kind == "linear") {
                     g.qkv_dim = get<uint64_t>(gj, "qkv_dim", gw);
                     g.vw = get<uint64_t>(gj, "vw", gw);
@@ -274,15 +290,19 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             for (const auto& s : g.program)
                 if (!g.weights.count(s.args[0]))
                     fail(gw, "step " + s.kernel + " reads weight buffer " + s.args[0] + ", which weights does not define");
+            for (const auto& s : g.shared_program)
+                if (!g.shared_weights.count(s.args[0]))
+                    fail(gw, "shared step " + s.kernel + " reads weight buffer " + s.args[0] + ", which shared_weights does not define");
         }
         const json& pk = need(v, "pack", tw);
         for (const auto& o : need(pk, "pool", tw)) t.pool.push_back(parse_op(o, tw + " pack.pool"));
         for (const auto& o : need(pk, "consts", tw)) t.consts.push_back(parse_op(o, tw + " pack.consts"));
-        for (const auto& [name, w] : t.gemm_block.weights) {
-            const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
-            for (size_t idx : w.ops)
-                if (idx >= n) fail(tw, "gemm_block weight " + name + " names " + w.from + " op " + std::to_string(idx) + " of " + std::to_string(n));
-        }
+        for (const auto* ws : {&t.gemm_block.weights, &t.gemm_block.shared_weights})
+            for (const auto& [name, w] : *ws) {
+                const size_t n = w.from == "pool" ? t.pool.size() : t.consts.size();
+                for (size_t idx : w.ops)
+                    if (idx >= n) fail(tw, "gemm_block weight " + name + " names " + w.from + " op " + std::to_string(idx) + " of " + std::to_string(n));
+            }
         m.layer_types[name] = std::move(t);
     }
     for (const auto& l : m.layers)

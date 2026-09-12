@@ -859,10 +859,24 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     def run(N: int, K: int, w: str) -> dict:
         return {"op": "run", "kernel": ctx(N, K), "args": [w, f"gemm_x_k{K}", f"gemm_y_n{N}"]}
 
-    # the routed AND the shared expert stay on lx1 / ax1, one token at a time, until the
-    # token-batched expert kernel lands (the plan's stage 2); the route covers the projections
+    # The routed experts stay on mx, one token at a time, until the token-batched expert
+    # kernel lands (the plan's stage 2). The SHARED expert does not: it is the same 1.97 MB
+    # for every token of the block, so the route runs it once as two GEMMs (up|gate are
+    # contiguous in the pool and both std_perm, so the band law the GEMM reads is already
+    # what is packed) and folds it into the residual mx is handed. mx closes on xres + acc.
     moe_args = ["pool", "xres", "consts", "state", "act", "ptab"]     # mx.py's six, ax's order
     check_buffer_args("mx", moe_args)
+    sff = spec.shared_expert_intermediate
+
+    def shared_of(lt: str) -> dict:
+        pool = plan[lt]["pool"]
+        return {"shared_program": [run(2 * sff, hid, "gshare_w"), run(hid, sff, "gsdown_w")],
+                "shared_ff": sff,
+                "shared_weights": {
+                    "gshare_w": {"from": "pool", "ops": [_op_index(pool, "share_up_exps_proj.weight"),
+                                                         _op_index(pool, "share_gate_exps_proj.weight")]},
+                    "gsdown_w": {"from": "pool", "ops": [_op_index(pool, "share_down_exps_proj.weight")]}}}
+
     types: dict[str, dict] = {}
     if spec.has_linear:
         pool, consts = plan[LINEAR]["pool"], plan[LINEAR]["consts"]
@@ -878,6 +892,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff,
             "a_xm": L.A_XM, "a_rout": L.A_ROUT, "a_res": L.A_RES,
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
+            **shared_of(LINEAR),
         }
     if spec.has_full:
         pool = plan[FULL]["pool"]
@@ -895,6 +910,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
             "rot": spec.rotary_dim, "ff": ff,
             "a_xm": L.AA_XM, "a_rout": L.AA_ROUT, "a_res": L.AA_RES,
+            **shared_of(FULL),
         }
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight

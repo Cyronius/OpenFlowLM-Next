@@ -103,6 +103,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         // Step -- see manifest.hpp's GemmBlockProgram) which the manifest
         // parser already required to exist whenever gemm_block is present.
         for (const auto& s : types_[l]->gemm_block.program) wanted[s.kernel] = true;
+        for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
     }
@@ -187,7 +188,9 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
     // the freshly packed host bytes (pool or consts), copied before that buffer's upload
     auto build_weights = [&](const LayerType& lt, int l, const std::string& from, const uint8_t* host) {
         if (!(gemm_block_t_ && lt.gemm_block.t)) return;
-        for (const auto& [name, gw] : lt.gemm_block.weights) {
+        std::map<std::string, GemmWeight> all = lt.gemm_block.weights;
+        all.insert(lt.gemm_block.shared_weights.begin(), lt.gemm_block.shared_weights.end());
+        for (const auto& [name, gw] : all) {
             if (gw.from != from) continue;
             size_t off0 = 0, total = 0;
             for (size_t i = 0; i < gw.ops.size(); ++i) {
@@ -242,9 +245,11 @@ void Core::load_weights(const std::function<void(int, int)>& progress) {
                 h.ln = bf("input_layernorm.weight");
                 h.postln = bf("post_attention_layernorm.weight");
                 h.router = bf("moe_router.weight");
+                h.sgw = bf("shared_expert_gate.weight");
                 want(h.ln, man_.hidden, "input_layernorm");
                 want(h.postln, man_.hidden, "post_attention_layernorm");
                 want(h.router, man_.hidden * man_.moe.experts, "moe_router");
+                want(h.sgw, man_.hidden, "shared_expert_gate");
                 if (gb.kind == "linear") {
                     const std::string wa = const_tensor(lt, "ssm_alpha_proj.weight", l);
                     const auto& shape = file_->meta(wa).shape;
@@ -849,6 +854,41 @@ struct MoeTail {
 };
 }  // namespace
 
+// The shared expert, once over the block instead of once per token: up|gate (one GEMM --
+// the two are contiguous in the pool and both band-law) then down, with silu, the sigmoid
+// gate and the add on the host. The kernels' own formula, from moe_silu32 / moe_hdr2 /
+// moe_accfin: h = silu(g) * u, out += sigmoid(xm . sgw) * down(h). xm is rounded to bf16
+// first because that is what the dispatch would have seen.
+void Core::shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real) {
+    const LayerType& lt = *types_[l];
+    const GemmBlockProgram& gb = lt.gemm_block;
+    const size_t hid = man_.hidden, ff = gb.shared_ff;
+    std::vector<float> xv(xm, xm + T * hid);
+    const std::vector<float> ug = gemm(gb.shared_program[0], xv, T, hid, 2 * ff, l);
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<float> h(T * ff);
+    for (size_t t = 0; t < T; ++t) {
+        const float* u = ug.data() + t * 2 * ff;
+        const float* g = u + ff;
+        float* ho = h.data() + t * ff;
+        for (size_t j = 0; j < ff; ++j) ho[j] = g[j] / (1.f + std::exp(-g[j])) * u[j];
+    }
+    timing_.shared_ms += ms_since(t0);
+    const std::vector<float> y = gemm(gb.shared_program[1], h, T, ff, hid, l);
+    auto t1 = std::chrono::steady_clock::now();
+    const std::vector<float>& sgw = hc_[l].sgw;
+    for (size_t t = 0; t < t_real; ++t) {
+        const float* x = xm + t * hid;
+        double d = 0;
+        for (size_t i = 0; i < hid; ++i) d += static_cast<double>(bf16_to_f32(f32_to_bf16(x[i]))) * sgw[i];
+        const float gate = 1.f / (1.f + std::exp(-static_cast<float>(d)));
+        const float* yr = y.data() + t * hid;
+        float* r = res + t * hid;
+        for (size_t i = 0; i < hid; ++i) r[i] += gate * yr[i];
+    }
+    timing_.shared_ms += ms_since(t1);
+}
+
 void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real) {
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
@@ -895,6 +935,7 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
+    shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
@@ -952,6 +993,7 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
+    shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,

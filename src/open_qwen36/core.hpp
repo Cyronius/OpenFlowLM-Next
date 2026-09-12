@@ -75,6 +75,7 @@ struct StepTiming {
     double moe_patch_ms = 0;  ///< moe2_apply and the instruction sync
     double moe_run_ms = 0;    ///< the mx dispatch itself
     double moe_read_ms = 0;   ///< xres back
+    double shared_ms = 0;     ///< the shared expert over the block (its GEMMs are in part0)
 };
 
 class Core {
@@ -205,6 +206,7 @@ private:
         std::vector<float> convw, Wa, Wb, A, dtb, nw;   ///< linear: [taps, nch], [hid, lanes] x2, [heads] x2, [head_dim]
         size_t lanes = 0;
         std::vector<float> qn, kn;                      ///< full: [hd] x2
+        std::vector<float> sgw;                         ///< the shared expert's sigmoid gate, [hid]
     };
     std::vector<HostConsts> hc_;                       ///< per layer, filled for a linear / full route
     bool block_logits_all_ = false;
@@ -253,6 +255,9 @@ private:
     void step_gemm_block_layer(int l, std::vector<double>& xres, size_t T);
     /// The MoE families' block (kinds linear / full): xres as f32 [T, hidden].
     void step_block_moe(const std::vector<int>& ids, size_t t_real, bool want_logits);
+    /// The shared expert over a whole block: up|gate then down as GEMMs, silu and the
+    /// sigmoid gate on the host, added into res [T, hid] in place.
+    void shared_expert_block(int l, const float* xm, float* res, size_t T, size_t t_real);
     /// A linear-attention layer of the block route: GEMM qkv|z -> host DeltaNet (state in
     /// place through t_real tokens) -> GEMM out -> residual, norm, router -> the MoE per token.
     void block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t t_real);

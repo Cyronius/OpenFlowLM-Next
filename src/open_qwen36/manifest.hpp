@@ -95,6 +95,12 @@ struct GemmBlockProgram {
     std::string moe_kernel;
     std::vector<std::string> moe_args;
     uint64_t a_xm = 0, a_rout = 0, a_res = 0;
+    // linear and full: the shared expert, lifted out of the per-token dispatch and run once
+    // over the block -- up|gate (contiguous in the pool) then down, with silu and the sigmoid
+    // gate on the host, folded into the residual mx is handed. mx closes on xres + acc.
+    std::vector<Step> shared_program;
+    std::map<std::string, GemmWeight> shared_weights;
+    uint64_t shared_ff = 0;
 };
 
 struct LayerType {

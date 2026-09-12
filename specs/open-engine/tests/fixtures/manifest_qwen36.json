@@ -247,8 +247,9 @@
   "lx": "lx0/final.xclbin",
   "ax": "ax0/final.xclbin",
   "mx": "mx_linear/final.xclbin",
-  "gemm_k4096": "gemm_n2048_k4096/final.xclbin",
-  "gemm_k2048": "gemm_n9216_k2048/final.xclbin"
+  "gemm_k2048": "gemm_n1024_k2048/final.xclbin",
+  "gemm_k512": "gemm_n2048_k512/final.xclbin",
+  "gemm_k4096": "gemm_n2048_k4096/final.xclbin"
  },
  "kernels": {
   "ln": {
@@ -295,6 +296,16 @@
    "insts": "mx_full/insts.bin",
    "patch": "moeroute2",
    "build": "mx_full"
+  },
+  "gemm_n1024_k2048": {
+   "context": "gemm_k2048",
+   "insts": "gemm_n1024_k2048/insts.bin",
+   "build": "gemm_n1024_k2048"
+  },
+  "gemm_n2048_k512": {
+   "context": "gemm_k512",
+   "insts": "gemm_n2048_k512/insts.bin",
+   "build": "gemm_n2048_k512"
   },
   "gemm_n2048_k4096": {
    "context": "gemm_k4096",
@@ -411,7 +422,43 @@
     "a_res": 151552,
     "state_s_off": 49152,
     "s_head_bytes": 71680,
-    "s_rows": 140
+    "s_rows": 140,
+    "shared_program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n1024_k2048",
+      "args": [
+       "gshare_w",
+       "gemm_x_k2048",
+       "gemm_y_n1024"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k512",
+      "args": [
+       "gsdown_w",
+       "gemm_x_k512",
+       "gemm_y_n2048"
+      ]
+     }
+    ],
+    "shared_ff": 512,
+    "shared_weights": {
+     "gshare_w": {
+      "from": "pool",
+      "ops": [
+       2,
+       3
+      ]
+     },
+     "gsdown_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     }
+    }
    },
    "pack": {
     "pool": [
@@ -640,7 +687,43 @@
     "ff": 512,
     "a_xm": 79872,
     "a_rout": 83968,
-    "a_res": 59392
+    "a_res": 59392,
+    "shared_program": [
+     {
+      "op": "run",
+      "kernel": "gemm_n1024_k2048",
+      "args": [
+       "gshare_w",
+       "gemm_x_k2048",
+       "gemm_y_n1024"
+      ]
+     },
+     {
+      "op": "run",
+      "kernel": "gemm_n2048_k512",
+      "args": [
+       "gsdown_w",
+       "gemm_x_k512",
+       "gemm_y_n2048"
+      ]
+     }
+    ],
+    "shared_ff": 512,
+    "shared_weights": {
+     "gshare_w": {
+      "from": "pool",
+      "ops": [
+       2,
+       3
+      ]
+     },
+     "gsdown_w": {
+      "from": "pool",
+      "ops": [
+       4
+      ]
+     }
+    }
    },
    "pack": {
     "pool": [
@@ -794,9 +877,11 @@
   "ptab": {
    "per_row": 1024
   },
-  "gemm_x_k4096": 2097152,
-  "gemm_y_n2048": 2097152,
   "gemm_x_k2048": 1048576,
+  "gemm_y_n1024": 1048576,
+  "gemm_x_k512": 262144,
+  "gemm_y_n2048": 2097152,
+  "gemm_x_k4096": 2097152,
   "gemm_y_n9216": 9437184,
   "gemm_y_n12288": 12582912
  },
@@ -855,6 +940,24 @@
    "build_dir": "layer_x/build_mx_full",
    "env": {
     "MX_KIND": "full"
+   }
+  },
+  "gemm_n1024_k2048": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n1024_k2048_t256",
+   "env": {
+    "GQP_N": "1024",
+    "GQP_K": "2048",
+    "GQP_T": "256"
+   }
+  },
+  "gemm_n2048_k512": {
+   "design": "gemm_q4_prefill/gemm_q4_prefill.py",
+   "build_dir": "gemm_q4_prefill/build_n2048_k512_t256",
+   "env": {
+    "GQP_N": "2048",
+    "GQP_K": "512",
+    "GQP_T": "256"
    }
   },
   "gemm_n2048_k4096": {

@@ -117,10 +117,18 @@ int main(int argc, char** argv) {
           fg.qw == 4096 && fg.kvw == 512 && fg.nh == 16 && fg.kvh == 2 && fg.hd == 256 && fg.rot == 64 && fg.a_rout == 83968,
           "full route: q|k|v|gate then o, the attention geometry");
     check(m.contexts.count("gemm_k2048") && m.kernels.at("gemm_n9216_k2048").context == "gemm_k2048" &&
-          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 7 &&
-          m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4,
+          m.kernels.at("gemm_n1024_k2048").context == "gemm_k2048" &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 8 &&
+          m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
+          m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 18, "18 files named (7 xclbin + 11 insts: the route adds two GEMM contexts, the MoE one, five streams)");
+    check(m.files().size() == 21, "21 files named (8 xclbin + 13 insts: the route adds three GEMM contexts, the MoE one, seven streams)");
+    // the shared expert runs over the block, not per token: up|gate (contiguous pool ops) then down
+    const auto& sp = lg.shared_program;
+    check(sp.size() == 2 && sp[0].kernel == "gemm_n1024_k2048" && sp[1].kernel == "gemm_n2048_k512" &&
+          lg.shared_ff == 512 && lg.shared_weights.at("gshare_w").ops.size() == 2 &&
+          lg.shared_weights.at("gsdown_w").ops.size() == 1,
+          "linear route: the shared expert as two GEMMs over the block");
 
     // ---- the model check
     json ok = matching_config(m);
