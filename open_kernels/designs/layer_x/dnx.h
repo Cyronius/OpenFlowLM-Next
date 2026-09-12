@@ -98,6 +98,9 @@ static constexpr unsigned DS_VEC = 0, DS_T = 512, DS_O = 640, DS_KHL = 768, DS_Q
 
 // ---- pass 1, slice blk (20 rows): t[j] += sum_i k[i] * S[i][j]; blk 0 splits k, q and zeroes t.
 static inline void dnx_pass1_slice(const float *__restrict S, float *__restrict ds, unsigned blk) {
+#ifdef LX_NULL_DN
+  return;                                    // timing ablation: the streams stay, the maths goes
+#endif
   aie::set_rounding(aie::rounding_mode::conv_even);
   const float *__restrict vec = ds + DS_VEC;
   float *__restrict t = ds + DS_T;
@@ -125,6 +128,9 @@ static inline void dnx_pass1_slice(const float *__restrict S, float *__restrict 
 
 // ---- once per head after pass 1: delta = beta * (v - decay * t) as hi/lo, o = 0, dd = decay hi/lo
 static inline void dnx_delta_head(float *__restrict ds) {
+#ifdef LX_NULL_DN
+  return;                                    // timing ablation: the streams stay, the maths goes
+#endif
   aie::set_rounding(aie::rounding_mode::conv_even);
   const float *__restrict vec = ds + DS_VEC;
   const float *__restrict t = ds + DS_T;
@@ -156,6 +162,9 @@ static inline void dnx_delta_head(float *__restrict ds) {
 // ---- pass 2, row i of the slice at S, half hf: S'[i][hf] -> ye (64 floats); o[hf] += S' * q[i]
 static inline void dnx_row_half(const float *__restrict S, float *__restrict ds, float *__restrict ye,
                                 unsigned blk, unsigned i, unsigned hf) {
+#ifdef LX_NULL_DN
+  return;                                    // timing ablation: the streams stay, the maths goes
+#endif
   aie::set_rounding(aie::rounding_mode::conv_even);
   float *__restrict o = ds + DS_O;
   const bfloat16 *__restrict k_hl = (const bfloat16 *)(ds + DS_KHL);
@@ -190,6 +199,9 @@ static inline void dnx_row_half(const float *__restrict S, float *__restrict ds,
 
 // ---- per head, half hf: ye = o[hf] / sqrt(128)
 static inline void dnx_ofin_half(const float *__restrict ds, float *__restrict ye, unsigned hf) {
+#ifdef LX_NULL_DN
+  return;                                    // timing ablation: the streams stay, the maths goes
+#endif
   aie::set_rounding(aie::rounding_mode::conv_even);
   const float *__restrict o = ds + DS_O;
   bfloat16 ii[2];

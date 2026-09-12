@@ -20,6 +20,7 @@ Main-core streams (all layer types):
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -149,6 +150,10 @@ def types():
 # compiles with exactly the flags it always did.
 DNX_ROWS_DEFAULT = 20                 # dnx.h's #ifndef DNX_ROWS value
 DN_FLAGS = [] if C.DN_ROWS in (0, DNX_ROWS_DEFAULT) else [f"-DDNX_ROWS={C.DN_ROWS}"]
+# timing-only ablation (output garbage): LX_NULL_DN=1 skips the DeltaNet arithmetic and
+# leaves every stream and fifo exactly as it was, to tell a stream limit from a compute one
+if os.environ.get("LX_NULL_DN") == "1":
+    DN_FLAGS = DN_FLAGS + ["-DLX_NULL_DN"]
 
 
 def kernels(inc, t):
