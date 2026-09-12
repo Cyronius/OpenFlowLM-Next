@@ -633,6 +633,33 @@ void Core::bench_dispatch(int layer, int reps) {
     std::fprintf(stderr, "\n");
 }
 
+void Core::bench_kernel(const std::string& name, int reps, int layer, int warm_token) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: bench_kernel before load_weights");
+    if (layer < 0 || layer >= nl_) throw std::runtime_error("open_qwen36: bench_kernel: no such layer");
+    Kern& k = kerns_.at(name);
+    // Only a patched kernel needs a real step first to put live values in its stream. An
+    // unpatched one does not, and the step would run the whole program -- which is exactly what
+    // must not happen when the build under test is a truncated one whose other half would hang.
+    if (!k.patch.empty()) step(warm_token, false);
+    // the arguments the layer's own program gives it, so the buffers are the real ones
+    const std::vector<std::string>* args = nullptr;
+    for (const Step& s : types_[layer]->program)
+        if (s.op == "run" && s.kernel == name) args = &s.args;
+    if (!args)
+        for (const Step& s : man_.tail)
+            if (s.kernel == name) args = &s.args;
+    if (!args) throw std::runtime_error("open_qwen36: layer " + std::to_string(layer) + " does not run " + name);
+
+    run_split(k, *args, layer);                             // the first call of a context pays for it
+    BenchStat st;
+    for (int i = 0; i < reps; ++i) {
+        const auto [submit, wait] = run_split(k, *args, layer);
+        st.add(submit, wait);
+    }
+    std::fprintf(stderr, "\nopen_qwen36: %s on layer %d, %d reps: %.3f min, %.3f mean, %.3f submit (context %s)\n\n",
+                 name.c_str(), layer, reps, st.min, st.mean(), st.mean_submit(), man_.kernels.at(name).context.c_str());
+}
+
 void Core::bench_decode(int reps) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: bench_decode before load_weights");
 

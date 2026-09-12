@@ -91,6 +91,7 @@ struct Args {
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
     int bench = 0;                  // --bench N: time the route's dispatches instead of running a prompt
     int bench_decode = 0;           // --bench-decode N: the same for the per-token program
+    std::string bench_kernel;       // --bench-kernel NAME:REPS[:LAYER]: one kernel, over and over
 };
 
 Args parse(int argc, char** argv) {
@@ -122,12 +123,14 @@ Args parse(int argc, char** argv) {
         else if (k == "--prefill-logits") a.prefill_logits = true;
         else if (k == "--bench") a.bench = std::atoi(val().c_str());
         else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
+        else if (k == "--bench-kernel") a.bench_kernel = val();
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
-                             "[--gemm-block] [--prefill-logits] [--bench N] [--bench-decode N]\n");
+                             "[--gemm-block] [--prefill-logits] [--bench N] [--bench-decode N] "
+                             "[--bench-kernel NAME:REPS[:LAYER]]\n");
         std::exit(2);
     }
     return a;
@@ -232,6 +235,17 @@ int main(int argc, char** argv) {
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
             core.bench_dispatch(0, a.bench);
+            std::printf("DONE\n");
+            return 0;
+        }
+        if (!a.bench_kernel.empty()) {
+            const size_t c1 = a.bench_kernel.find(':');
+            if (c1 == std::string::npos) { std::fprintf(stderr, "--bench-kernel wants NAME:REPS[:LAYER]\n"); std::exit(2); }
+            const size_t c2 = a.bench_kernel.find(':', c1 + 1);
+            const std::string name = a.bench_kernel.substr(0, c1);
+            const int reps = std::atoi(a.bench_kernel.substr(c1 + 1, c2 - c1 - 1).c_str());
+            const int layer = c2 == std::string::npos ? 0 : std::atoi(a.bench_kernel.substr(c2 + 1).c_str());
+            core.bench_kernel(name, reps, layer, a.ids[0]);
             std::printf("DONE\n");
             return 0;
         }
