@@ -827,6 +827,7 @@ def pack_plan(spec: ModelSpec) -> dict:
 # (designs/layer_x/mx.py), because lx1 / ax1 are the second half of a per-token core program
 # and cannot run alone.
 GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 columns
+MB_NT = 8             # moe_batch.py's token slots per expert visit: one bf16 MAC tile wide
 GEMM_ROLES = ("attn", "linear", "linear_out", "shared")   # the projections the route streams
 
 
@@ -867,6 +868,16 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     moe_args = ["pool", "xres", "consts", "state", "act", "ptab"]     # mx.py's six, ax's order
     check_buffer_args("mx", moe_args)
     sff = spec.shared_expert_intermediate
+    # The token-batched expert kernel (OPEN-MOE-BATCH, designs/moe_batch): one dispatch streams
+    # every slot's expert once for up to MB_NT of its tokens. One xclbin, one instruction stream
+    # per dispatch length; the driver takes the shortest stream that holds the experts still
+    # owed tokens and patches the slots' expert offsets (moebatch). A set without it runs the
+    # routed experts on mx, one token at a time.
+    E = spec.num_experts
+    mb_slots = [s for s in dict.fromkeys((E, E // 2, 32, 8)) if s % 8 == 0 and 0 < s <= E]
+    mb_args = ["pool", "mb_x", "mb_h", "mb_y"]
+    check_buffer_args("moe_batch", mb_args)
+    moe_batch = {"kernels": {str(s): f"mb_s{s}" for s in mb_slots}, "args": mb_args, "nt": MB_NT}
 
     def shared_of(lt: str) -> dict:
         pool = plan[lt]["pool"]
@@ -892,7 +903,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             "head_dim": spec.lin_value_dim, "conv_kernel": spec.conv_kernel, "ff": ff,
             "a_xm": L.A_XM, "a_rout": L.A_ROUT, "a_res": L.A_RES,
             "state_s_off": L.STATE_S_OFF, "s_head_bytes": L.S_HEAD_BYTES, "s_rows": L.S_ROWS,
-            **shared_of(LINEAR),
+            **shared_of(LINEAR), "moe_batch": moe_batch,
         }
     if spec.has_full:
         pool = plan[FULL]["pool"]
@@ -910,7 +921,7 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             "qw": qw, "kvw": kvw, "nh": spec.num_heads, "kvh": spec.num_kv_heads, "hd": spec.head_dim,
             "rot": spec.rotary_dim, "ff": ff,
             "a_xm": L.AA_XM, "a_rout": L.AA_ROUT, "a_res": L.AA_RES,
-            **shared_of(FULL),
+            **shared_of(FULL), "moe_batch": moe_batch,
         }
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
@@ -928,6 +939,18 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             out["contexts"]["mx"] = f"{name}/final.xclbin"
         out["kernels"][name] = {"context": "mx", "insts": f"{name}/insts.bin", "patch": "moeroute2", "build": name}
         out["builds"][name] = {"design": "layer_x/mx.py", "build_dir": f"layer_x/build_mx_{kind}{sfx}", "env": {"MX_KIND": kind}}
+    # the expert streams share one xclbin (the core program does not depend on the slot count);
+    # the x / h / y globals are sized for the longest
+    out["contexts"]["mb"] = f"mb_s{mb_slots[0]}/final.xclbin"
+    for s in mb_slots:
+        name = f"mb_s{s}"
+        out["kernels"][name] = {"context": "mb", "insts": f"{name}/insts.bin", "patch": "moebatch", "build": name}
+        out["builds"][name] = {"design": "moe_batch/moe_batch.py", "build_dir": f"moe_batch/build_s{s}{sfx}",
+                               "env": {"MB_SLOTS": str(s), "MB_HID": str(hid), "MB_FF": str(ff), "MB_EXPERTS": str(E),
+                                       "MB_POOL_DOWN": str(L.POOL_DOWN), "MB_POOL_BYTES": str(L.POOL_BYTES)}}
+    out["globals"]["mb_x"] = mb_slots[0] * hid * MB_NT * 2
+    out["globals"]["mb_h"] = mb_slots[0] * ff * MB_NT * 2
+    out["globals"]["mb_y"] = mb_slots[0] * hid * MB_NT * 4
     for N, K in sorted(shapes):
         name, ctx = f"gemm_n{N}_k{K}", f"gemm_k{K}"
         if ctx not in out["contexts"]:
@@ -1051,6 +1074,7 @@ KERNEL_SOURCES = [
     "designs/ln/ln.h", "designs/ln/*.cc", "designs/ln/ln.py", "designs/lin_layer/ln_nr.cc",
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
+    "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key

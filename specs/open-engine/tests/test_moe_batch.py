@@ -84,3 +84,46 @@ def test_an_experts_bands_land_inside_its_own_pool_region(e):
         off = e * down_bytes + (band // 2) * 40960 + (band % 2) * BAND_BYTES
         assert e * down_bytes <= off < (e + 1) * down_bytes
         assert off + 20480 + BAND_BYTES <= (e + 1) * down_bytes
+
+
+# ---- what the recipe writes for the kernel (the driver reads it from gemm_block.moe_batch)
+def test_the_route_names_the_token_batched_expert_streams():
+    from recipes.load import default_spec
+    from recipes.manifest import manifest
+    from recipes.spec import FULL, LINEAR
+
+    m = manifest(default_spec())
+    for lt in (LINEAR, FULL):
+        mb = m["layer_types"][lt]["gemm_block"]["moe_batch"]
+        # one stream per dispatch length, the shortest that holds the experts still owed tokens is run
+        assert mb == {"kernels": {"256": "mb_s256", "128": "mb_s128", "32": "mb_s32", "8": "mb_s8"},
+                      "args": ["pool", "mb_x", "mb_h", "mb_y"], "nt": 8}
+    # all four streams on one xclbin (the core program does not depend on the slot count)
+    assert m["contexts"]["mb"] == "mb_s256/final.xclbin"
+    for s in (256, 128, 32, 8):
+        assert m["kernels"][f"mb_s{s}"] == {"context": "mb", "insts": f"mb_s{s}/insts.bin", "patch": "moebatch",
+                                            "build": f"mb_s{s}"}
+        b = m["builds"][f"mb_s{s}"]
+        assert b["design"] == "moe_batch/moe_batch.py" and b["build_dir"] == f"moe_batch/build_s{s}"
+        assert b["env"]["MB_SLOTS"] == str(s) and b["env"]["MB_EXPERTS"] == "256"
+        assert int(b["env"]["MB_POOL_DOWN"]) == m["layout"]["moe"]["pool_down"]
+        assert int(b["env"]["MB_POOL_BYTES"]) == m["layout"]["pool_bytes"]
+    # x / h / y sized for the longest stream: [256 slots, K, 8 tokens] bf16 in, [256, 512, 8] bf16 h, [256, 2048, 8] f32 out
+    assert (m["globals"]["mb_x"], m["globals"]["mb_h"], m["globals"]["mb_y"]) == (256 * 2048 * 16, 256 * 512 * 16, 256 * 2048 * 32)
+
+
+# ---- the kernel itself: manual, on the NPU (the harness measurement is the artifact)
+# Verification (designs/moe_batch, WSL ironenv for the builds, run_kernel.exe on Windows):
+# 1. MB_SLOTS=64 MB_EXPERTS=64 python build_design.py designs/moe_batch/moe_batch.py designs/moe_batch/build_s64_e64
+# 2. python make_test.py --slots 64  (64 random experts packed by recipes/pack.py's own stripe and
+#    down laws, 8 distinct token activations per slot, the fp64 reference from the same bytes)
+# 3. run_kernel.exe run_s64.cfg && python compare.py s64: PASS at rel_fro <= 5e-3 on y, every
+#    slot's and every token column's cosine printed; the dispatch time is the stream rate
+#    (64 experts x 2.23 MB per run).
+# 4. The full model: open_qwen36_cli --layers 4 --gemm-block --prefill-logits with and without
+#    FLM_OPEN_MOE_BATCH=0 on the 19-token prompt agree on argmax / top-5 per position (the
+#    family's near-tie exemption); the 1020-token prompt at 40 layers gives the same greedy
+#    continuation and the per-block `moe run` time recorded in spec.md.
+@pytest.mark.skip(reason="OPEN-MOE-BATCH hardware verification: see the procedure above")
+def test_the_kernel_on_hardware():
+    pass
