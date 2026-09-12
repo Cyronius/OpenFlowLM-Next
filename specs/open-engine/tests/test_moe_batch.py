@@ -121,7 +121,7 @@ def test_the_route_names_the_token_batched_expert_streams():
 #    slot's and every token column's cosine printed; the dispatch time is the stream rate
 #    (64 experts x 2.23 MB per run).
 # 4. The full model: open_qwen36_cli --layers 4 --gemm-block --prefill-logits with and without
-#    FLM_OPEN_MOE_BATCH=0 on the 19-token prompt agree on argmax / top-5 per position (the
+#    OFLM_OPEN_MOE_BATCH=0 on the 19-token prompt agree on argmax / top-5 per position (the
 #    family's near-tie exemption); the 1020-token prompt at 40 layers gives the same greedy
 #    continuation and the per-block `moe run` time recorded in spec.md.
 @pytest.mark.skip(reason="OPEN-MOE-BATCH hardware verification: see the procedure above")

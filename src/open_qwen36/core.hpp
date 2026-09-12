@@ -194,7 +194,7 @@ private:
 
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
-    bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (FLM_OPEN_MOE_BATCH=0 off)
+    bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
     // byte 0 of their own buffer; an XRT sub-buffer view is untested here).

@@ -34,7 +34,7 @@ the offending key named.
 - `gemm_block`, when present, is parsed per kind (`dense` | `linear` | `full`) with its weight map and, for the MoE kinds, its `moe_kernel`; the 35B fixture carries the linear and full routes, and a route naming a pack op past the plan, with a third step or whose MoE dispatch lacks the patch table is refused by name (OPEN-PREFILL-BATCH).
 - A manifest the packer or the engine could not execute is refused by the parser, naming the field: a pack op without a size `pools::apply` needs (a `std_perm` without `nch`, an `lmhead_q8` without `chunk_bytes`), or a `moeroute2` step on a kernel not built with the routed-expert patch table.
 - The fixture equals the recipe's current output (`make_fixtures.py`) apart from the build key.
-- `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `FLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$FLM_XCLBIN_PATH`, the directory holding `$FLM_CONFIG_PATH`, the user-level flm directory `flm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/flm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `flm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
+- `Engine::find_kernels` looks in this order and returns the first complete set, logging the directory that served: `OFLM_OPEN_KERNELS_DIR`; `<model dir>/open_kernels`; then `<root>/xclbins/<model name>/open_kernels` over **every** root in `utils::xclbin_roots()` -- the user roots first (`$OFLM_XCLBIN_PATH`, the directory holding `$OFLM_CONFIG_PATH`, the user-level flm directory `flm-add` writes into), then the roots the closed path walks (the executable's directory, the CWD, `<exe>/../share/flm`, the configured prefix), then `config.exec_path` if a DEV_BUILD put it outside all of those. Not only the single root `utils::find_xclbin_path()` returns: a set `flm-add` linked under the user root and a set shipped in the install tree are both reachable, whichever of the two that function happens to pick. `find_xclbin_path` itself is unchanged -- it still walks the closed roots only, so which root serves a **closed** kernel does not move.
 
 ### OPEN-ADD-KERNEL-LINK: `flm-add` links a model to the kernel set matching its spec
 **Applies to:** openflowlm-next (`utilities/flm-add/flm_add/__init__.py`)
@@ -614,12 +614,12 @@ are in the catalogue:
 4. `python src/open_qwen36/chat.py "Explain what an NPU is in two sentences." --model <model dir> --kernels src/xclbins/Qwen3-4B-NPU2/open_kernels` → a coherent answer ending in `<|im_end|>`.
 
 **Adapters (manual):** every Qwen3-dense adapter class selects the open engine when a
-kernel set is installed for its model, and honours `FLM_QWEN3_ENGINE=open|closed`:
+kernel set is installed for its model, and honours `OFLM_QWEN3_ENGINE=open|closed`:
 `Qwen3`, `Qwen3_IT`, `Qwen3_TK` and `DeepSeek_r1_0528_8b` (`model_list.json`
 families `qwen3`, `qwen3-it`, `qwen3-tk`, `deepseek-r1-0528`). Verify with
 `flm serve <tag>` on a model that has `open_kernels/` installed: the load logs
 `<Family> on the open kernels (<dir>)` -- `Qwen3`, `Qwen3-IT`, `Qwen3-TK`,
-`DeepSeek-R1-0528` respectively -- and `FLM_QWEN3_ENGINE=closed` restores the
+`DeepSeek-R1-0528` respectively -- and `OFLM_QWEN3_ENGINE=closed` restores the
 `qwen3_npu` DLL for all four.
 
 **Result 2026-09-05 (Qwen3-4B):** step 2 logits corr 0.999997 / 0.999994, same argmax and top-5, residual corr ≥ 0.999996 in every layer at both positions; step 3 identical through the engine, request 2 reproduced request 1; step 4 a coherent two-sentence answer ending in `<|im_end|>` at token 58 (272 ms/token). Details: `.claude/plans/open-kernels-phase-b-qwen3-dense.md`.
@@ -665,11 +665,11 @@ container that lacks the tensor, naming it.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Llama-3.1-8B-NPU2`, `out_l3`, prompt id 128000, and `chat.py` (which switches to the Llama 3 template when the tokenizer has `<|start_header_id|>`).
 
 **Adapters (manual):** both Llama-3 adapter classes select the open engine when a
-kernel set is installed for their model, and honour `FLM_LLAMA_ENGINE=open|closed`:
+kernel set is installed for their model, and honour `OFLM_LLAMA_ENGINE=open|closed`:
 `Llama3` (`model_list.json` families `llama3.1`, `llama3.2`) and `DeepSeek_r1_8b`
 (family `deepseek-r1`, a Llama-3.1-8B distill). Verify with `flm serve <tag>` on a
 model that has `open_kernels/` installed: the load logs `Llama 3 on the open kernels (<dir>)`
-or `DeepSeek-R1 on the open kernels (<dir>)`, and `FLM_LLAMA_ENGINE=closed` restores
+or `DeepSeek-R1 on the open kernels (<dir>)`, and `OFLM_LLAMA_ENGINE=closed` restores
 the `llama_npu` DLL for both.
 
 **Result 2026-09-05 (Llama-3.1-8B):** slice logits corr 1.000000 / 0.999993, same argmax and top-5, residual corr ≥ 0.999994 every layer; identical through the engine; a coherent two-sentence answer ending in `<|eot_id|>` at token 79 (203 ms/token). Details: `.claude/plans/open-kernels-phase-c-llama3.md`.
@@ -701,11 +701,11 @@ stored.
 **Procedure (manual):** as OPEN-FAMILY-QWEN3 with `Gemma3-4B-NPU2`, `out_g3`, 6 layers (five local, one global), prompt id 2; then `open_qwen36_cli --at-position 1100 --layers 6` (finite logits through the window path); then `chat.py` (the Gemma template when the tokenizer has `<start_of_turn>`).
 
 **Adapters (manual):** both Gemma-3 adapter classes select the open engine when a
-kernel set is installed for their model, and honour `FLM_GEMMA_ENGINE=open|closed`:
+kernel set is installed for their model, and honour `OFLM_GEMMA_ENGINE=open|closed`:
 `Gemma3` (`model_list.json` family `gemma3`, e.g. `gemma3:4b`) and `Gemma3_Text_Only`
 (family `gemma3-text`, e.g. `gemma3:1b`). Verify with `flm serve <tag>` on a model
 that has `open_kernels/` installed: the load logs `Gemma 3 on the open kernels (<dir>)`
-or `Gemma 3 (text) on the open kernels (<dir>)`, and `FLM_GEMMA_ENGINE=closed`
+or `Gemma 3 (text) on the open kernels (<dir>)`, and `OFLM_GEMMA_ENGINE=closed`
 restores the `gemma_npu` / `gemma_text_npu` DLL. Images always need the closed
 engine -- the open one has no vision path.
 
@@ -873,13 +873,13 @@ corr >= 0.9999 every layer. Reported separately: the same slice against the repl
 the q8 out_proj -- the quality cost of the re-quantization decision.
 
 **Adapters (manual):** the Qwen3.5 adapter class selects the open engine when a kernel set
-is installed for its model, and honours `FLM_QWEN35_ENGINE=open|closed`: `Qwen3_5VL`
+is installed for its model, and honours `OFLM_QWEN35_ENGINE=open|closed`: `Qwen3_5VL`
 (`model_list.json` family `qwen3.5`, e.g. `qwen3.5:4b`). Verify with `flm serve <tag>` on a
 model that has `open_kernels/` installed: the load logs
-`Qwen3.5 on the open kernels (<dir>)`, and `FLM_QWEN35_ENGINE=closed` restores the
+`Qwen3.5 on the open kernels (<dir>)`, and `OFLM_QWEN35_ENGINE=closed` restores the
 `qwen3_5vl_npu` DLL. Images always need the closed engine -- the open one has no vision
 path, and an image payload is refused with
-`images need the closed Qwen3.5 engine (FLM_QWEN35_ENGINE=closed)`.
+`images need the closed Qwen3.5 engine (OFLM_QWEN35_ENGINE=closed)`.
 
 **Result 2026-09-06 (Qwen3.8-Distilled-4B-NPU2, HID 2560 / 32 layers / FFN 9216): PASS.**
 Slice (8 layers, 3 tokens from `[248045]`, six linear and two full): logits corr **0.999999 /
@@ -1059,8 +1059,8 @@ the sigmoid gate on the host, folds it into the residual the dispatch is
 handed, and `mx` closes on `xres + acc` (`moe_accfin`'s slot < 0). Hardware contexts are shared: one GEMM xclbin per
 K (the core program does not depend on N), one `mx` xclbin for both layer
 types. The engine takes the route whenever the set carries it and the prompt
-has at least the crossover length (64 tokens; `FLM_OPEN_GEMM_BLOCK_MIN`
-overrides), never for a prompt that has had an image; `FLM_OPEN_GEMM_BLOCK=0`
+has at least the crossover length (64 tokens; `OFLM_OPEN_GEMM_BLOCK_MIN`
+overrides), never for a prompt that has had an image; `OFLM_OPEN_GEMM_BLOCK=0`
 forces the sequential path. Only the real tokens of a padded block touch the
 state, write KV rows, run the MoE or advance the position, and the conv state,
 S and the KV rows leave the buffers as the sequential path would (bf16 where
@@ -1082,7 +1082,7 @@ unchanged.
 4. All 40 layers on a ~1000-token prompt with `--max-tokens 8`: the same greedy continuation, the last position's argmax and top-5 equal; TTFT with and without `--gemm-block` recorded.
 5. `flm-test --llm` through `flm serve` on `qwen3.6-moe:35b-a3b` with the route on.
 
-**Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`FLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `FLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
+**Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`OFLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `OFLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
 
 ### OPEN-MOE-BATCH: the token-batched expert kernel
 **Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
@@ -1105,13 +1105,13 @@ expert's tokens eight at a time into `mb_x`, runs the shortest stream that
 holds the experts still owed tokens, scatters `mb_y` back with the router
 weights, and goes round again until every token is served; the shared
 expert stays outside it (`OPEN-PREFILL-BATCH`). A set without `moe_batch`,
-or `FLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
+or `OFLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
 
 **Acceptance criteria (unit):**
 - The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).
 - The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s32 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
 - The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those four streams on both kinds.
 
-**Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `FLM_OPEN_MOE_BATCH=0`.
+**Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `OFLM_OPEN_MOE_BATCH=0`.
 
-**Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s -- below the harness rate, not yet understood). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s; the host stages are the next step (`.claude/plans/prefill-gap.md`).
+**Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s -- below the harness rate, not yet understood). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s. At 2582 tokens (the length the closed kernels were measured at) the same run is 64.5 s, 25 ms/token: the expert stage and the GEMMs are flat per block (1.7-1.9 s and 1.38 s) while the host stage grows from 1.36 s in block 0 to 3.72 s in block 9 -- 262 ms per 256 rows of window, and by the last block half of it. Against stock FLM 1.0.2's closed `qwen3_6_moe_npu` (14.3 s at 972 tokens, 21.9 s at 2582) the open path is 1.6x behind at ~1000 tokens and 2.9x at 2582, where before this kernel it was 2.9x and 5.4x. The host stages are the next step (`.claude/plans/prefill-gap.md`).

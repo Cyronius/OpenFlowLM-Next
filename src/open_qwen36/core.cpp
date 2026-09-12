@@ -123,7 +123,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     // prefill runs one token at a time even on a model that DOES have one, if
     // the kernel_dir actually loaded is a stale copy without it
     // (Engine::find_kernels() prefers <model>/open_kernels over
-    // FLM_OPEN_KERNELS_DIR/FLM_XCLBIN_PATH -- this project lost real time to
+    // OFLM_OPEN_KERNELS_DIR/OFLM_XCLBIN_PATH -- this project lost real time to
     // exactly that before this log line existed).
     gemm_block_t_ = nl_ > 0 ? types_[0]->gemm_block.t : 0;
     for (int l = 1; l < nl_; ++l)
@@ -131,7 +131,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     log("block prefill route: T = " + std::to_string(gemm_block_t_) +
         (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
-    if (const char* env = std::getenv("FLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
@@ -142,7 +142,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         }
     if (gemm_block_t_)
         log(std::string("token-batched expert kernel: ") +
-            (any_batch ? (moe_batch_on_ ? "on" : "off (FLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
+            (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
 }
 
 Core::~Core() = default;
@@ -1059,7 +1059,7 @@ void Core::moe_block(int l, const float* xm, const float* res, const int32_t* id
     xrt::bo& yb = buffer(mb.args[3], 0);
     std::vector<std::vector<std::pair<size_t, float>>> per_token(t_real);   // (slot * NT + column, weight)
     std::vector<float> yt;                                                    // y un-interleaved: [slot][column][hid]
-    static const bool log_passes = std::getenv("FLM_OPEN_MOE_BATCH_LOG") != nullptr;
+    static const bool log_passes = std::getenv("OFLM_OPEN_MOE_BATCH_LOG") != nullptr;
     for (size_t done = 0; done < visits.size();) {
         const size_t left = visits.size() - done;
         size_t slots = 0;

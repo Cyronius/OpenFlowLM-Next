@@ -41,15 +41,15 @@ std::string Engine::find_kernels(const LM_Config& config) {
         return true;
     };
     std::string why;
-    if (const char* env = std::getenv("FLM_OPEN_KERNELS_DIR")) {
+    if (const char* env = std::getenv("OFLM_OPEN_KERNELS_DIR")) {
         if (complete(env, &why)) return env;
-        std::fprintf(stderr, "open_qwen36: FLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
+        std::fprintf(stderr, "open_qwen36: OFLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
     }
     fs::path local = fs::path(config.model_path) / "open_kernels";
     if (complete(local, &why)) return local.string();
     // Every xclbins root the closed path would consider, not just the first one
     // find_xclbin_path() happens to return: flm-add links a set under the user
-    // root ($FLM_XCLBIN_PATH / ~/.config/flm) while the shipped sets live in the
+    // root ($OFLM_XCLBIN_PATH / ~/.config/flm) while the shipped sets live in the
     // install tree, and whichever root wins there would otherwise hide the other.
     std::vector<std::string> roots = utils::xclbin_roots();
     // config.exec_path is find_xclbin_path()'s single winner, already in the list above --
@@ -70,10 +70,10 @@ Engine::Engine(const LM_Config& config, flm_rt::device* dev, int MAX_L) : dev_(d
     cfg_.kernel_dir = find_kernels(config);
     if (cfg_.kernel_dir.empty())
         throw std::runtime_error("open_qwen36: no open kernels found for " + config.model_name +
-                                 " (set FLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
+                                 " (set OFLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
-    if (const char* tm = std::getenv("FLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
-    cfg_.verbose = std::getenv("FLM_OPEN_QUIET") == nullptr;
+    if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
+    cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
     core_ = std::make_unique<Core>(cfg_, dev_);
     logits_.assign(core_->vocab(), bf16(0.f));
 }
@@ -135,18 +135,18 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // The block route (Core::step_gemm_block, manifest.hpp's GemmBlockProgram)
         // whenever the kernel set carries one: the prompt in T-wide blocks, the
         // tail padded with a repeated in-range id and the real count passed on,
-        // never falling back to step(). FLM_OPEN_GEMM_BLOCK=0 forces the
+        // never falling back to step(). OFLM_OPEN_GEMM_BLOCK=0 forces the
         // sequential path (the A/B). A prompt that has had an image is on the
         // (t, h, w) counter, which the route does not write, so it stays sequential.
         return guarded([&] {
-            const char* env = std::getenv("FLM_OPEN_GEMM_BLOCK");
+            const char* env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
             const bool off = env && std::string(env) == "0";
             const size_t GT = core_->gemm_block_t();
             // A block costs its full-width GEMMs however few real tokens it holds, so a
             // short prompt is cheaper one token at a time; the crossover is measured, not
-            // derived (Qwen3.6-35B: ~64 tokens), FLM_OPEN_GEMM_BLOCK_MIN overrides it.
+            // derived (Qwen3.6-35B: ~64 tokens), OFLM_OPEN_GEMM_BLOCK_MIN overrides it.
             size_t min_prompt = 64;
-            if (const char* mp = std::getenv("FLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
+            if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
             if (!off && GT > 0 && ids.size() >= min_prompt && !core_->mrope_active()) {
                 size_t i = 0;
                 while (i < ids.size()) {
@@ -169,7 +169,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     // same counter (Core::mrope_*), and later chunks / generated tokens inherit it.
     if (!core_->has_mrope() || core_->image_token_id() < 0)
         throw std::runtime_error("open_qwen36: config.json carries no image_token_id / mrope_section for this model; "
-                                 "images need the closed engine (FLM_QWEN36_ENGINE=closed)");
+                                 "images need the closed engine (OFLM_QWEN36_ENGINE=closed)");
     // The app hands its own family's payload struct (qwen3_6_moe_image_payload_t /
     // qwen3_5vl_image_payload_t -- the same fields); read it through the one matching the
     // kernel set's family.
