@@ -66,6 +66,15 @@ struct Snapshot {
 
 struct StepTiming {
     double part0_ms = 0, part1_ms = 0, route_ms = 0, lmhead_ms = 0, total_ms = 0;
+    // The block route's stages, split finely enough to say which one to work on.
+    // part1_ms is mid + tail; route_ms is the four moe_* below.
+    double mid_ms = 0;        ///< the DeltaNet recurrence, or the attention itself
+    double tail_ms = 0;       ///< residual, post-norm, router
+    double state_ms = 0;      ///< the state BO syncs (the KV read grows with position)
+    double moe_prep_ms = 0;   ///< xm / the router record / the residual into act
+    double moe_patch_ms = 0;  ///< moe2_apply and the instruction sync
+    double moe_run_ms = 0;    ///< the mx dispatch itself
+    double moe_read_ms = 0;   ///< xres back
 };
 
 class Core {

@@ -801,6 +801,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk;
     xrt::bo& act = act_[l];
     uint8_t* a = act.map<uint8_t*>();
+    auto tp = std::chrono::steady_clock::now();
     // what the sequential layer's first dispatch would have left in act: xm (bf16), the
     // router record [probs f32[E] | idx i32[8] @rout_idx_off | w f32[8]], the residual (f32)
     uint16_t* xmb = reinterpret_cast<uint16_t*>(a + gb.a_xm);
@@ -816,6 +817,7 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     act.sync(XCL_BO_SYNC_BO_TO_DEVICE, hid * 2, gb.a_xm);
     act.sync(XCL_BO_SYNC_BO_TO_DEVICE, E * 4 + 16 * 4, gb.a_rout);
     act.sync(XCL_BO_SYNC_BO_TO_DEVICE, hid * 4, gb.a_res);
+    timing_.moe_prep_ms += ms_since(tp);
     // the MoE-only dispatch (mx.py): the routed slots patched from the ids we just wrote
     // (no readback of the record), then run
     auto t0 = std::chrono::steady_clock::now();
@@ -828,11 +830,14 @@ void Core::moe_token(int l, const float* xm, const float* res, const float* prob
     }
     stream_patch::moe2_apply(mk.iw(), mk.moe2, slots, man_.moe);
     mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    run(mk, gb.moe_args, l);
+    timing_.moe_patch_ms += ms_since(t0);
+    timing_.moe_run_ms += run(mk, gb.moe_args, l);
+    auto t1 = std::chrono::steady_clock::now();
     xrt::bo& xr = buffer("xres", 0);
     xr.sync(XCL_BO_SYNC_BO_FROM_DEVICE, hid * 4, 0);
     std::memcpy(out, xr.map<uint8_t*>(), hid * 4);
-    timing_.route_ms += ms_since(t0);
+    timing_.moe_read_ms += ms_since(t1);
+    timing_.route_ms += ms_since(tp);
 }
 
 namespace {
@@ -860,7 +865,9 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     }
     // the conv rows and S live in the state BO; the recurrence runs on the host in place
     xrt::bo& st = state_[l];
+    auto ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, lt.state_bytes, 0);
+    timing_.state_ms += ms_since(ts);
     uint8_t* sp = st.map<uint8_t*>();
     host::DeltaGeom g;
     g.T = T; g.t_real = t_real; g.hid = hid;
@@ -872,7 +879,10 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
                          hc.dtb.data(), hc.nw.data(), reinterpret_cast<uint16_t*>(sp),
                          reinterpret_cast<float*>(sp + gb.state_s_off), og.data());
     timing_.part1_ms += ms_since(t0);
+    timing_.mid_ms += ms_since(t0);
+    ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, lt.state_bytes, 0);
+    timing_.state_ms += ms_since(ts);
     const std::vector<float> out = gemm(gb.program[1], og, T, vw, hid, l);
 
     auto t1 = std::chrono::steady_clock::now();
@@ -884,6 +894,7 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
     host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
     timing_.part1_ms += ms_since(t1);
+    timing_.tail_ms += ms_since(t1);
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
@@ -914,7 +925,9 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     // the KV rows: [0, pos_) read, [pos_, pos_ + t_real) written by the host attention
     xrt::bo& st = state_[l];
     const size_t row = lt.state_row;
+    auto ts = std::chrono::steady_clock::now();
     if (pos_ > 0) st.sync(XCL_BO_SYNC_BO_FROM_DEVICE, static_cast<size_t>(pos_) * row, 0);
+    timing_.state_ms += ms_since(ts);
     host::AttnGeom g;
     g.T = T; g.t_real = t_real; g.nh = gb.nh; g.kvh = gb.kvh; g.hd = gb.hd; g.rot = gb.rot;
     g.pos0 = static_cast<size_t>(pos_); g.eps = gb.eps;
@@ -923,7 +936,10 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     host::attention_block(g, q.data(), k.data(), v.data(), gate.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
                           st.map<uint16_t*>(), row / 2, og.data());
     timing_.part1_ms += ms_since(t0);
+    timing_.mid_ms += ms_since(t0);
+    ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
+    timing_.state_ms += ms_since(ts);
     const std::vector<float> out = gemm(gb.program[1], og, T, qw, hid, l);
 
     auto t1 = std::chrono::steady_clock::now();
@@ -935,6 +951,7 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     m.probs.resize(T * E); m.idx.resize(T * topk); m.w.resize(T * topk);
     host::router_block(t_real, hid, E, topk, m.xm.data(), hc.router.data(), m.probs.data(), m.idx.data(), m.w.data());
     timing_.part1_ms += ms_since(t1);
+    timing_.tail_ms += ms_since(t1);
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
