@@ -633,6 +633,86 @@ void Core::bench_dispatch(int layer, int reps) {
     std::fprintf(stderr, "\n");
 }
 
+void Core::bench_decode(int reps) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: bench_decode before load_weights");
+
+    // A layer's program is ONE core program issued as two streams (lx0 then lx1, ax0 then ax1):
+    // the first half fills the fifos the second drains, so neither half can be repeated on its
+    // own -- it hangs. Every probe below replays a whole layer, and attributes per kernel.
+    std::map<std::string, std::vector<int>> layers_of;
+    for (int l = 0; l < nl_; ++l) layers_of[types_[l]->name].push_back(l);
+
+    auto replay = [&](int l, std::map<std::string, BenchStat>& into) {
+        double ms = 0;
+        for (const Step& s : types_[l]->program) {
+            if (s.op != "run") { route(kerns_.at(s.kernel), l, s.act_off); continue; }
+            const auto [submit, wait] = run_split(kerns_.at(s.kernel), s.args, l);
+            into[s.kernel].add(submit, wait);
+            ms += submit + wait;
+        }
+        return ms;
+    };
+
+    std::fprintf(stderr, "\nopen_qwen36: decode bench, %d reps each\n", reps);
+    std::fprintf(stderr, "  %-16s %-12s %8s %8s %8s %8s\n", "probe", "kernel", "min ms", "mean ms", "submit", "context");
+
+    // One layer, over and over: its weights stay in whatever cache holds them and the context
+    // never changes, so this is the kernel's own cost with nothing charged on top.
+    std::map<std::string, BenchStat> alone;
+    std::map<std::string, double> alone_layer_ms;
+    for (const auto& [tname, ls] : layers_of) {
+        std::map<std::string, BenchStat> warm;
+        replay(ls[0], warm);                                // the first call of a context pays for it
+        double ms = 0;
+        for (int i = 0; i < reps; ++i) ms += replay(ls[0], alone);
+        alone_layer_ms[tname] = ms / reps;
+        for (const Step& s : types_[ls[0]]->program) {
+            if (s.op != "run") continue;
+            const BenchStat& st = alone[s.kernel];
+            std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f %8s\n", ("one " + tname).c_str(), s.kernel.c_str(),
+                         st.min, st.mean(), st.mean_submit(), man_.kernels.at(s.kernel).context.c_str());
+        }
+    }
+
+    // The same, cycling every layer of that type: a real step touches each layer's weights once
+    // and never comes back, so anything here over the pass above is the price of cold weights.
+    std::map<std::string, BenchStat> cold;
+    for (const auto& [tname, ls] : layers_of) {
+        double ms = 0;
+        for (int i = 0; i < reps; ++i) ms += replay(ls[i % ls.size()], cold);
+        for (const Step& s : types_[ls[0]]->program) {
+            if (s.op != "run") continue;
+            const BenchStat& st = cold[s.kernel];
+            std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f  %+.3f vs one layer\n", ("cold " + tname).c_str(),
+                         s.kernel.c_str(), st.min, st.mean(), st.mean_submit(), st.mean() - alone[s.kernel].mean());
+        }
+        std::fprintf(stderr, "  %-16s %-12s %8.1f ms per layer (%.1f warm)\n", "", "= layer", ms / reps,
+                     alone_layer_ms[tname]);
+    }
+
+    // The real walk: layer 0 to nl_ in order, then the tail. The two types interleave, so this
+    // is the only probe that pays for changing hardware context, and its total is the floor a
+    // decode step cannot go below.
+    std::map<std::string, BenchStat> walk;
+    double step_ms = 0;
+    for (int i = 0; i < reps; ++i) {
+        for (int l = 0; l < nl_; ++l) step_ms += replay(l, walk);
+        for (const Step& s : man_.tail) {
+            const auto [submit, wait] = run_split(kerns_.at(s.kernel), s.args, 0);
+            walk[s.kernel].add(submit, wait);
+            step_ms += submit + wait;
+        }
+    }
+    for (const auto& [name, st] : walk) {
+        const auto it = alone.find(name);
+        char delta[48] = "";
+        if (it != alone.end()) std::snprintf(delta, sizeof delta, "  %+.3f vs one layer", st.mean() - it->second.mean());
+        std::fprintf(stderr, "  %-16s %-12s %8.3f %8.3f %8.3f  %4d calls/step%s\n", "the real walk", name.c_str(),
+                     st.min, st.mean(), st.mean_submit(), st.n / reps, delta);
+    }
+    std::fprintf(stderr, "  a step's dispatches: %.1f ms\n\n", step_ms / reps);
+}
+
 void Core::route(Kern& k, int layer, uint64_t act_off) {
     auto t0 = std::chrono::steady_clock::now();
     if (k.moe2.empty()) throw std::runtime_error("open_qwen36: moeroute2 on " + k.name + ", which has no routed-expert table");

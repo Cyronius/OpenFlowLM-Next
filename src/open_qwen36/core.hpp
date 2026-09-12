@@ -145,6 +145,12 @@ public:
     /// (OFLM_OPEN_DISPATCH_LOG prints that). Churn scales with what the kernel streams,
     /// which is what dirty cache lines being written back during the stream would do.
     void bench_dispatch(int layer, int reps);
+    /// The same for decode's dispatches -- the per-token program, which the block route never
+    /// runs. Three probes: each kernel repeated on one layer, the same cycling every layer of
+    /// its type, and the real 40-layer walk in order. The walk's total is the floor a decode
+    /// step cannot go below. Call it after a step so the attnpos and route patches hold real
+    /// values; it leaves the state and the KV window meaningless, so exit afterwards.
+    void bench_decode(int reps);
     /// Per-kernel dispatch counts and times since the last call, then cleared. Empty unless
     /// dispatch accounting is on (OFLM_OPEN_DISPATCH_LOG).
     std::map<std::string, DispatchStat> take_dispatch_stats();

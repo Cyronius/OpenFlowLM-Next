@@ -90,6 +90,7 @@ struct Args {
     bool gemm_block = false;        // 0167/#32: prefill via step_gemm_block()
     bool prefill_logits = false;    // 0167/#32: logits (dump_pos) at every prefill position reached
     int bench = 0;                  // --bench N: time the route's dispatches instead of running a prompt
+    int bench_decode = 0;           // --bench-decode N: the same for the per-token program
 };
 
 Args parse(int argc, char** argv) {
@@ -120,12 +121,13 @@ Args parse(int argc, char** argv) {
         else if (k == "--gemm-block") a.gemm_block = true;
         else if (k == "--prefill-logits") a.prefill_logits = true;
         else if (k == "--bench") a.bench = std::atoi(val().c_str());
+        else if (k == "--bench-decode") a.bench_decode = std::atoi(val().c_str());
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
-                             "[--gemm-block] [--prefill-logits] [--bench N]\n");
+                             "[--gemm-block] [--prefill-logits] [--bench N] [--bench-decode N]\n");
         std::exit(2);
     }
     return a;
@@ -194,6 +196,7 @@ std::vector<int> request(Core& core, const Args& a) {
 
     std::vector<int> out;
     auto t1 = clock::now();
+    core.take_dispatch_stats();   // prefill's dispatches are not this loop's
     int tok = argmax(core.logits(), core.real_vocab());
     for (int n = 0; n < a.max_tokens; ++n) {
         out.push_back(tok);
@@ -205,6 +208,9 @@ std::vector<int> request(Core& core, const Args& a) {
         const auto& tm = core.last_timing();
         std::fprintf(stderr, "  step @%d: %.1f ms (part0 %.1f, route %.2f, part1 %.1f, lm_head %.1f)\n", core.position() - 1,
                      tm.total_ms, tm.part0_ms, tm.route_ms, tm.part1_ms, tm.lmhead_ms);
+        for (const auto& [kn, d] : core.take_dispatch_stats())
+            std::fprintf(stderr, "      %-22s %4d calls %8.1f ms total %7.3f mean %7.3f min\n", kn.c_str(),
+                         d.calls, d.ms, d.ms / d.calls, d.min_ms);
         tok = argmax(core.logits(), core.real_vocab());
     }
     double dec_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
@@ -226,6 +232,12 @@ int main(int argc, char** argv) {
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         if (a.bench) {
             core.bench_dispatch(0, a.bench);
+            std::printf("DONE\n");
+            return 0;
+        }
+        if (a.bench_decode) {
+            core.step(a.ids[0], true);       // one real step first: the attnpos and route patches
+            core.bench_decode(a.bench_decode);
             std::printf("DONE\n");
             return 0;
         }
