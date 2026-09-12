@@ -118,11 +118,22 @@ int main(int argc, char** argv) {
           "full route: q|k|v|gate then o, the attention geometry");
     check(m.contexts.count("gemm_k2048") && m.kernels.at("gemm_n9216_k2048").context == "gemm_k2048" &&
           m.kernels.at("gemm_n1024_k2048").context == "gemm_k2048" &&
-          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 8 &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 9 &&
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 21, "21 files named (8 xclbin + 13 insts: the route adds three GEMM contexts, the MoE one, seven streams)");
+    check(m.files().size() == 26, "26 files named (9 xclbin + 17 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
+                                  "and the token-batched expert kernel one context and four streams)");
+    // the token-batched expert kernel (OPEN-MOE-BATCH): four stream lengths on one xclbin, the same on both kinds
+    const auto& mbk = lg.moe_batch;
+    check(mbk.present() && mbk.nt == 8 && mbk.args == std::vector<std::string>{"pool", "mb_x", "mb_h", "mb_y"} &&
+          mbk.kernels.size() == 4 && mbk.kernels.at(256) == "mb_s256" && mbk.kernels.at(128) == "mb_s128" &&
+          mbk.kernels.at(32) == "mb_s32" && mbk.kernels.at(8) == "mb_s8" && fg.moe_batch.kernels == mbk.kernels,
+          "moe_batch: 256 / 128 / 32 / 8 slot streams, four buffer args, eight token slots");
+    check(m.kernels.at("mb_s256").patch == "moebatch" && m.kernels.at("mb_s8").context == "mb" &&
+          m.contexts.at("mb") == "mb_s256/final.xclbin" && m.globals.at("mb_x") == 256 * 2048 * 8 * 2 &&
+          m.globals.at("mb_h") == 256 * 512 * 8 * 2 && m.globals.at("mb_y") == 256 * 2048 * 8 * 4,
+          "moe_batch: the streams' patch and context, the x / h / y globals sized for the longest");
     // the shared expert runs over the block, not per token: up|gate (contiguous pool ops) then down
     const auto& sp = lg.shared_program;
     check(sp.size() == 2 && sp[0].kernel == "gemm_n1024_k2048" && sp[1].kernel == "gemm_n2048_k512" &&
@@ -173,6 +184,16 @@ int main(int argc, char** argv) {
     });
     refused_manifest(argv[1], "moeroute2", "a route whose MoE dispatch lacks the patch table is refused at load", [](json& j) {
         j["kernels"]["mx_linear"].erase("patch");
+    });
+    refused_manifest(argv[1], "moebatch", "a moe_batch stream without the patch table is refused at load", [](json& j) {
+        j["kernels"]["mb_s32"].erase("patch");
+    });
+    refused_manifest(argv[1], "multiple of 8", "a moe_batch slot count that is not a round of columns is refused", [](json& j) {
+        auto& k = j["layer_types"]["full_attention"]["gemm_block"]["moe_batch"]["kernels"];
+        k["12"] = k["8"];
+    });
+    refused_manifest(argv[1], "not a declared global", "a moe_batch naming an undeclared buffer is refused", [](json& j) {
+        j["layer_types"]["linear_attention"]["gemm_block"]["moe_batch"]["args"][3] = "mb_z";
     });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];

@@ -2,6 +2,7 @@
 /// \brief The resident open-kernel decode engine: a manifest interpreter (see core.hpp).
 #include "open_qwen36/core.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -106,6 +107,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& s : types_[l]->gemm_block.shared_program) wanted[s.kernel] = true;
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
+        for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
     for (const auto& [name, d] : man_.kernels)
@@ -128,6 +130,19 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         if (types_[l]->gemm_block.t != gemm_block_t_) { gemm_block_t_ = 0; break; }
     log("block prefill route: T = " + std::to_string(gemm_block_t_) +
         (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
+    // the token-batched expert kernel: every stream's slot count must be what the manifest says
+    if (const char* env = std::getenv("FLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
+    bool any_batch = false;
+    for (int l = 0; l < nl_; ++l)
+        for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) {
+            any_batch = true;
+            if (kerns_.at(k).slots != slots)
+                throw std::runtime_error("open_qwen36: " + k + " carries " + std::to_string(kerns_.at(k).slots) +
+                                         " expert slots, the manifest says " + std::to_string(slots));
+        }
+    if (gemm_block_t_)
+        log(std::string("token-batched expert kernel: ") +
+            (any_batch ? (moe_batch_on_ ? "on" : "off (FLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
 }
 
 Core::~Core() = default;
@@ -158,7 +173,14 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
     std::memcpy(k.instr->map<void*>(), insts.data(), insts.size());
     k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
     if (d.patch == "moeroute2") k.moe2 = stream_patch::moe2_table(k.words, name, man_.moe);
-    else if (d.patch == "attnpos") {
+    else if (d.patch == "moebatch") {
+        // every expert fill is a placeholder (slot s compiled as expert s), so the table is
+        // moeroute2's with the whole expert range as slots; the stream's length is its highest
+        stream_patch::MoeGeometry g = man_.moe;
+        g.topk = g.experts;
+        k.moe2 = stream_patch::moe2_table(k.words, name, g);
+        for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
+    } else if (d.patch == "attnpos") {
         k.attn = stream_patch::attn_table(k.words, name, man_.attn);
         k.geom = man_.attn;
         k.geom.window = d.window;
@@ -936,6 +958,10 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
     shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
+    if (moe_batch_on_ && gb.moe_batch.present()) {
+        moe_block(l, m.xm.data(), m.res.data(), m.idx.data(), m.w.data(), T, t_real, xres.data());
+        return;
+    }
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
@@ -994,6 +1020,10 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     timing_.part1_ms += ms_since(t1);
     timing_.tail_ms += ms_since(t1);
     shared_expert_block(l, m.xm.data(), m.res.data(), T, t_real);
+    if (moe_batch_on_ && gb.moe_batch.present()) {
+        moe_block(l, m.xm.data(), m.res.data(), m.idx.data(), m.w.data(), T, t_real, xres.data());
+        return;
+    }
     for (size_t t = 0; t < T; ++t) {
         if (t < t_real)
             moe_token(l, m.xm.data() + t * hid, m.res.data() + t * hid, m.probs.data() + t * E, m.idx.data() + t * topk,
@@ -1001,6 +1031,107 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
         else
             std::memcpy(xres.data() + t * hid, m.res.data() + t * hid, hid * 4);
     }
+}
+
+// The routed experts over the block on the token-batched kernel. Every expert's tokens are
+// cut into visits of NT (a hot expert takes several slots of the same dispatch, since a slot
+// can be patched to any expert); a pass fills the shortest stream that holds the visits still
+// pending, gathers their tokens into x[slot] = the kernel's A tiles, runs, and scatters
+// y[slot] back with the router weights. Three passes serve a block: 256 slots, then ~105
+// of the 128-stream, then a handful (Poisson(8) tokens per expert).
+void Core::moe_block(int l, const float* xm, const float* res, const int32_t* idx, const float* w, size_t T, size_t t_real,
+                     float* out) {
+    const MoeBatch& mb = types_[l]->gemm_block.moe_batch;
+    const size_t hid = man_.hidden, E = man_.moe.experts, topk = man_.moe.topk, NT = mb.nt;
+    auto tp = std::chrono::steady_clock::now();
+    std::memcpy(out, res, T * hid * 4);
+    std::vector<std::vector<std::pair<int, float>>> owed(E);   // per expert: its (token, weight) pairs
+    for (size_t t = 0; t < t_real; ++t)
+        for (size_t s = 0; s < topk; ++s) {
+            const int32_t e = idx[t * topk + s];
+            if (e < 0 || static_cast<size_t>(e) >= E) throw std::runtime_error("open_qwen36: router produced expert index " + std::to_string(e));
+            owed[e].push_back({static_cast<int>(t), w[t * topk + s]});
+        }
+    std::vector<std::pair<uint32_t, size_t>> visits;             // (expert, first token of its NT)
+    for (size_t e = 0; e < E; ++e)
+        for (size_t off = 0; off < owed[e].size(); off += NT) visits.push_back({static_cast<uint32_t>(e), off});
+    xrt::bo& xb = buffer(mb.args[1], 0);
+    xrt::bo& yb = buffer(mb.args[3], 0);
+    std::vector<std::vector<std::pair<size_t, float>>> per_token(t_real);   // (slot * NT + column, weight)
+    std::vector<float> yt;                                                    // y un-interleaved: [slot][column][hid]
+    static const bool log_passes = std::getenv("FLM_OPEN_MOE_BATCH_LOG") != nullptr;
+    for (size_t done = 0; done < visits.size();) {
+        const size_t left = visits.size() - done;
+        size_t slots = 0;
+        const std::string* kname = nullptr;
+        for (const auto& [s, k] : mb.kernels) {   // ascending: the shortest stream that holds them, else the longest
+            slots = s;
+            kname = &k;
+            if (s >= left) break;
+        }
+        const size_t n = std::min(left, slots);
+        auto t0 = std::chrono::steady_clock::now();
+        uint16_t* xh = xb.map<uint16_t*>();
+        std::vector<uint32_t> ex(slots, 0);   // unused slots stream expert 0: a valid read, ignored
+        for (auto& v : per_token) v.clear();
+        for (size_t i = 0; i < n; ++i) {
+            const auto& [e, off] = visits[done + i];
+            ex[i] = e;
+            for (size_t j = 0; j < std::min(NT, owed[e].size() - off); ++j)
+                per_token[owed[e][off + j].first].push_back({i * NT + j, owed[e][off + j].second});
+        }
+        // x[slot] as the kernel's A tiles: [hid / 8][8 tokens][8 k] bf16 (designs/moe_batch/layout.py)
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const auto& [e, off] = visits[done + i];
+            uint16_t* xs = xh + i * hid * NT;
+            for (size_t j = 0; j < std::min(NT, owed[e].size() - off); ++j) {
+                const float* row = xm + owed[e][off + j].first * hid;
+                for (size_t kb = 0; kb < hid / 8; ++kb)
+                    for (size_t kl = 0; kl < 8; ++kl) xs[(kb * NT + j) * 8 + kl] = f32_to_bf16(row[kb * 8 + kl]);
+            }
+        }
+        xb.sync(XCL_BO_SYNC_BO_TO_DEVICE, n * hid * NT * 2, 0);
+        timing_.moe_prep_ms += ms_since(t0);
+        auto t1 = std::chrono::steady_clock::now();
+        Kern& mk = kerns_.at(*kname);
+        stream_patch::moe2_apply(mk.iw(), mk.moe2, ex.data(), man_.moe);
+        mk.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        timing_.moe_patch_ms += ms_since(t1);
+        const double run_ms = run(mk, mb.args, l);
+        timing_.moe_run_ms += run_ms;
+        if (log_passes)
+            std::fprintf(stderr, "open_qwen36: layer %d moe pass: %zu of %zu visits on %s, %.2f ms\n", l, n, visits.size(),
+                         kname->c_str(), run_ms);
+        auto t2 = std::chrono::steady_clock::now();
+        yb.sync(XCL_BO_SYNC_BO_FROM_DEVICE, n * hid * NT * 4, 0);
+        const float* yh = yb.map<float*>();
+        // y[slot] comes back as C tiles: per 64-row band, [4 groups][even / odd rows][8 tokens][8];
+        // row 64 band + 16 g + 2 jj + p -- un-interleaved here into [token][hid]
+        yt.resize(n * NT * hid);
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(n); ++i)
+            for (size_t band = 0; band < hid / 64; ++band)
+                for (size_t g = 0; g < 4; ++g)
+                    for (size_t par = 0; par < 2; ++par) {
+                        const float* blk = yh + i * hid * NT + ((band * 4 + g) * 2 + par) * 64;
+                        for (size_t t = 0; t < NT; ++t) {
+                            float* d = yt.data() + (i * NT + t) * hid + band * 64 + g * 16 + par;
+                            for (size_t jj = 0; jj < 8; ++jj) d[2 * jj] = blk[t * 8 + jj];
+                        }
+                    }
+#pragma omp parallel for
+        for (long long t = 0; t < static_cast<long long>(t_real); ++t) {
+            float* o = out + t * hid;
+            for (const auto& [col, wt] : per_token[t]) {
+                const float* y = yt.data() + col * hid;
+                for (size_t k = 0; k < hid; ++k) o[k] += wt * y[k];
+            }
+        }
+        timing_.moe_read_ms += ms_since(t2);
+        done += n;
+    }
+    timing_.route_ms += ms_since(tp);
 }
 
 void Core::seek(int pos) {

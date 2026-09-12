@@ -1083,3 +1083,35 @@ unchanged.
 5. `flm-test --llm` through `flm serve` on `qwen3.6-moe:35b-a3b` with the route on.
 
 **Result 2026-09-11 (Qwen3.6-35B-A3B-NPU2, steps 2-5):** every GEMM shape PASSes the harness at rel_fro 2.2e-3 (gate 5e-3), 0.8 ms (512 x 2048) to 14 ms (12288 x 2048) per dispatch. Step 3: argmax 18/19 and top-5 19/19 against the sequential path, the one flip a 0.003-logit tie, corr >= 0.99996 per position; against the fp64 replica the block route is 18/19 (corr >= 0.9995) where the sequential path is 19/19 (>= 0.9998) -- the bf16 GEMM's rounding, not a stage. Step 4 on a 1020-token prompt, all 40 layers, nothing else on the NPU: prefill **121.4 s -> 41.5 s (119 -> 41 ms/token, 2.9x)**, and **40.0 s (39 ms/token)** once the shared expert moved out of the per-token dispatch (2026-09-12: 11.3 % off the route against the 11.1 % of the stream it is; the same greedy token, and step 3 improves to argmax 19/19, top-5 19/19, corr >= 0.9993), the 8-token greedy continuation identical, last-position argmax and top-5 equal, corr 0.9985 at full depth. Per 256-token block: the GEMMs 0.77-0.84 s (8 %), the host stages 1.5-2.0 s (17 %; attention grows with the window), the per-token MoE dispatches 7.1-7.9 s (73 %) -- what the token-batched expert kernel (`OPEN-MOE-BATCH`, the plan's stage 2) removes. (An earlier reading taken with another process serving on the NPU, 173 -> 61 ms/token, had the same ratio.) Step 5: `flm-test --llm` passes through this tree's `flm serve` (v1.0.4; the load log shows `Qwen3.6-MoE on the open kernels` and `block prefill route: T = 256`), both answers coherent; through the server the route prefills 972 tokens in 41.8 s (43 ms/token) and 2582 in 119.3 s (46 ms/token). For scale, the closed `qwen3_6_moe_npu` kernels in stock FLM 1.0.2 prefill the same two prompts in 14.3 s and 21.9 s (14.7 and 8.5 ms/token): the open path is still 3-5x behind them at prefill, and its per-token cost rises with length where theirs falls. Serving a 1.0.2 container from this tree needs the registry gates disarmed (`FLM_CONFIG_PATH` at copies of `model_list.json` / `model_info.json` carrying `flm_min_version` 1.0.2 and the real file sizes) and a scratch model copy under `FLM_MODEL_PATH`, or the app re-pulls the 22 GB file. Details: `.claude/plans/prefill-batch-35b.md`.
+
+### OPEN-MOE-BATCH: the token-batched expert kernel
+**Applies to:** openflowlm-next (`open_kernels/designs/moe_batch/`, `open_kernels/recipes/qwen36moe.py`, `src/open_qwen36/{manifest,core}.cpp`)
+**Test category:** manual (needs the NPU; the harness measurement and the full-model check are the artifact, `tests/test_moe_batch.py` documents the procedure); the band offsets, the recipe emission and the manifest schema are unit-tested in `tests/test_moe_batch.py` and `src/open_qwen36/manifest_test.cpp`
+
+The block route's routed experts run on a token-batched kernel instead of
+one dispatch per token: a dispatch streams every slot's expert once for up
+to eight of its tokens, one expert per column with the four rows splitting
+its output rows, taking the product transposed (the eight tokens as the
+mmul's A rows, the weight as its B operand, whose 8 k x 8 rows block is a
+q4_1 chunk's raw nibble layout) so a weight tile costs a mask and a convert
+and the per-row scales ride along as vectors. The expert pools are read as
+packed: a 128-row stripe is two 64-row bands interleaved at k-tile
+granularity, so a band is a strided read and no repack exists. A kernel set
+carries one `mb` xclbin and one instruction stream per dispatch length
+(`gemm_block.moe_batch.kernels`: 256, 128, 32 and 8 slots for 256 experts),
+each slot compiled as its own expert and patched per dispatch (`moebatch`,
+moeroute2's table with every expert a placeholder). The route gathers each
+expert's tokens eight at a time into `mb_x`, runs the shortest stream that
+holds the experts still owed tokens, scatters `mb_y` back with the router
+weights, and goes round again until every token is served; the shared
+expert stays outside it (`OPEN-PREFILL-BATCH`). A set without `moe_batch`,
+or `FLM_OPEN_MOE_BATCH=0`, runs `mx` per token as before.
+
+**Acceptance criteria (unit):**
+- The up / gate band tap is sizes [8, 10240] strides [20480, 1] at `(8 e + 2 (b // 2)) STRIPE + (b % 2) BAND`, the down band tap two elements at `POOL_DOWN + e 655360 + (b // 2) 40960 + (b % 2) BAND`, derived from `stripe_transpose`, `std_perm` and `down_perm` themselves (`test_moe_batch.py`).
+- The 35B emission: both MoE layer types carry `moe_batch` = streams `mb_s256 / mb_s128 / mb_s32 / mb_s8` on context `mb`, args `pool, mb_x, mb_h, mb_y`, `nt` 8; the builds pass `MB_SLOTS`, `MB_HID`, `MB_FF`, `MB_EXPERTS`, `MB_POOL_DOWN`, `MB_POOL_BYTES`; the globals are sized for 256 slots (`test_moe_batch.py`).
+- The parser (`manifest_test.cpp`): a stream a `moe_batch` names must exist with patch `moebatch`, its slot count a positive multiple of 8, its x / h / y declared globals; the fixture parses to those four streams on both kinds.
+
+**Procedure:** as `tests/test_moe_batch.py` documents -- the 64-expert harness run (`make_test.py --slots 64`, `compare.py s64`, gate rel_fro <= 5e-3 on y) and the full-model checks of `OPEN-PREFILL-BATCH` steps 3 and 4 with and without `FLM_OPEN_MOE_BATCH=0`.
+
+**Result 2026-09-12 (Qwen3.6-35B-A3B-NPU2):** the harness at 64 experts PASSes at rel_fro 4.4e-4 (gate 5e-3; every slot's cosine >= 0.999995, every token column's >= 0.99997), 4.27 ms per run = 33 GB/s over the 143 MB streamed. Full model: the 4-layer check against the sequential path is argmax 19/19, top-5 19/19, corr >= 0.9993 per position, and against mx per token corr >= 0.99999. The 1020-token prompt at 40 layers, nothing else on the NPU: prefill **40.0 s -> 24.0 s (39 -> 23 ms/token)**, the same 8-token greedy continuation as mx per token (first token 248068). Per 256-token block the expert stage went 7.1-7.5 s to 1.78-1.87 s: two dispatches per layer (256 slots, then ~95 of the 128-slot stream; 342-363 visits per layer), the 256-slot dispatch 27-32 ms (19 GB/s -- below the harness rate, not yet understood). The block is now GEMM 1.4 s, host 1.8-2.4 s (growing with the window), experts 1.8-2.1 s; the host stages are the next step (`.claude/plans/prefill-gap.md`).

@@ -171,8 +171,10 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         if (!m.contexts.count(d.context)) fail(where, "kernel " + k + " names unknown context " + d.context);
-        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos") fail(where, "kernel " + k + ": unknown patch " + d.patch);
-        if (d.patch == "moeroute2" && !m.has_moe) fail(where, "kernel " + k + " wants moeroute2 but layout.moe is absent");
+        if (!d.patch.empty() && d.patch != "moeroute2" && d.patch != "attnpos" && d.patch != "moebatch")
+            fail(where, "kernel " + k + ": unknown patch " + d.patch);
+        if ((d.patch == "moeroute2" || d.patch == "moebatch") && !m.has_moe)
+            fail(where, "kernel " + k + " wants " + d.patch + " but layout.moe is absent");
         m.kernels[k] = d;
     }
     for (const auto& [name, v] : need(j, "layer_types", where).items()) {
@@ -260,6 +262,25 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                                      std::to_string(s.args.size()));
                 }
                 parse_weights("shared_weights", g.shared_weights);
+                // the token-batched expert kernel: optional (an older set runs mx per token)
+                if (gj.contains("moe_batch")) {
+                    const json& bj = gj["moe_batch"];
+                    const std::string bw = gw + ".moe_batch";
+                    MoeBatch& b = g.moe_batch;
+                    b.nt = get<uint64_t>(bj, "nt", bw);
+                    b.args = get<std::vector<std::string>>(bj, "args", bw);
+                    if (b.nt == 0 || b.args.size() != 4 || b.args[0] != "pool")
+                        fail(bw, "wants nt > 0 and four args (pool, x, h, y)");
+                    for (const auto& [slots_s, kname] : need(bj, "kernels", bw).items()) {
+                        const size_t slots = static_cast<size_t>(std::stoull(slots_s));
+                        if (slots == 0 || slots % 8) fail(bw, "slot count " + slots_s + " is not a positive multiple of 8");
+                        auto it = m.kernels.find(kname.get<std::string>());
+                        if (it == m.kernels.end()) fail(bw, "names unknown kernel " + kname.get<std::string>());
+                        if (it->second.patch != "moebatch") fail(bw, "kernel " + it->first + " is not built with the moebatch patch table");
+                        b.kernels[slots] = it->first;
+                    }
+                    if (b.kernels.empty()) fail(bw, "names no streams");
+                }
                 if (g.kind == "linear") {
                     g.qkv_dim = get<uint64_t>(gj, "qkv_dim", gw);
                     g.vw = get<uint64_t>(gj, "vw", gw);
@@ -323,6 +344,11 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             fail(where, "global " + k + " is neither a size nor {per_row}");
         }
     }
+    // the globals come after the layer types, so the batched expert kernel's x / h / y are checked here
+    for (const auto& [name, t] : m.layer_types)
+        for (size_t i = 1; i < t.gemm_block.moe_batch.args.size(); ++i)
+            if (!m.globals.count(t.gemm_block.moe_batch.args[i]))
+                fail(where, "layer type " + name + " gemm_block.moe_batch: arg " + t.gemm_block.moe_batch.args[i] + " is not a declared global");
     const json& pack = need(j, "pack", where);
     m.embed_tensor = get<std::string>(need(pack, "embed", where), "tensor", where + " pack.embed");
     m.norm_tensor = get<std::string>(need(pack, "norm", where), "tensor", where + " pack.norm");

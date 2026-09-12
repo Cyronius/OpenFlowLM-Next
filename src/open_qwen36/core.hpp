@@ -163,7 +163,8 @@ private:
         std::unique_ptr<xrt::kernel> k;
         std::unique_ptr<xrt::bo> instr;
         std::vector<uint32_t> words;
-        std::vector<stream_patch::MoePatch> moe2;
+        std::vector<stream_patch::MoePatch> moe2;    ///< moeroute2 / moebatch: the routed-expert fills
+        size_t slots = 0;                            ///< moebatch: expert slots the stream carries
         std::vector<stream_patch::AttnPatch> attn;
         stream_patch::AttnGeometry geom;     ///< attnpos: the manifest's rows plus this kernel's window
         uint32_t* iw() { return instr->map<uint32_t*>(); }
@@ -193,6 +194,7 @@ private:
 
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
+    bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (FLM_OPEN_MOE_BATCH=0 off)
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
     // the packed pool / consts bytes (the GEMM kernels read their weight from
     // byte 0 of their own buffer; an XRT sub-buffer view is untested here).
@@ -267,6 +269,11 @@ private:
     /// The MoE block for one token on the sequential kernel (lx1 / ax1): xm, the router
     /// record and the residual into `act`, route + run, the new residual out of `xres`.
     void moe_token(int l, const float* xm, const float* res, const float* probs, const int32_t* idx, const float* w,
+                   float* out);
+    /// The routed experts over the whole block on the token-batched kernel (OPEN-MOE-BATCH):
+    /// xm / res [T, hid], the router's idx / w [T, topk] for the first t_real tokens; out [T, hid]
+    /// = res + the weighted expert outputs (padding rows carried as res).
+    void moe_block(int l, const float* xm, const float* res, const int32_t* idx, const float* w, size_t T, size_t t_real,
                    float* out);
 };
 

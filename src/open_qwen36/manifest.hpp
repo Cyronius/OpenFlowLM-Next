@@ -77,6 +77,18 @@ struct GemmWeight {
     std::vector<size_t> ops;      ///< indices into LayerType::pool / consts, in order, byte-contiguous
 };
 
+/// The token-batched expert kernel (OPEN-MOE-BATCH, open_kernels/designs/moe_batch):
+/// one dispatch streams every slot's expert once for up to `nt` of its tokens.
+/// `kernels` maps a slot count to its instruction stream (one xclbin for all); the
+/// driver takes the shortest stream that holds the experts still owed tokens,
+/// patches the slots' expert offsets (moebatch) and runs it against pool, x, h, y.
+struct MoeBatch {
+    std::map<size_t, std::string> kernels;   ///< slots -> kernel name
+    std::vector<std::string> args;           ///< pool, then the x / h / y globals
+    size_t nt = 0;                           ///< token slots per expert visit
+    bool present() const { return !kernels.empty(); }
+};
+
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
@@ -101,6 +113,8 @@ struct GemmBlockProgram {
     std::vector<Step> shared_program;
     std::map<std::string, GemmWeight> shared_weights;
     uint64_t shared_ff = 0;
+    // linear and full: the routed experts batched over the block (absent: mx per token)
+    MoeBatch moe_batch;
 };
 
 struct LayerType {
