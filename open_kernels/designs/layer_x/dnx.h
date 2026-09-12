@@ -9,12 +9,13 @@
 // zero (S' = decay*0 + k[i]*delta with k[i] = 0 for i >= 128, the hi/lo
 // records are zero-padded to 160 entries), and they contribute nothing to
 // t / o (k[i] = q[i] = 0). The updated rows leave through the result fifo in
-// 256 B elements = half rows: pass 2 runs per (row, half).
+// 256 B elements = half rows: pass 2 is called per (row, half), and the slice's
+// first call updates the whole slice in place before the copy-outs.
 //
 //   pass 1 (per slice):  t[j] += sum_i k[i] * S[i][j]
 //   delta (per head):    delta = beta * (v - decay * t);  o = 0
-//   pass 2 (per row i, half h):  S'[i][h] = decay * S[i][h] + k[i] * delta[h]
-//                                o[h]    += S'[i][h] * q[i]
+//   pass 2 (per slice, in place):  S'[i] = decay * S[i] + k[i] * delta
+//                                  o    += S'[i] * q[i]
 //   ofin (per head, half h):     ye = o[h] / sqrt(128)
 //
 // Per-head vector record (fp32[512], the first 2 KB of a 10 KB element):
@@ -159,42 +160,75 @@ static inline void dnx_delta_head(float *__restrict ds) {
   }
 }
 
-// ---- pass 2, row i of the slice at S, half hf: S'[i][hf] -> ye (64 floats); o[hf] += S' * q[i]
-static inline void dnx_row_half(const float *__restrict S, float *__restrict ds, float *__restrict ye,
-                                unsigned blk, unsigned i, unsigned hf) {
-#ifdef LX_NULL_DN
-  return;                                    // timing ablation: the streams stay, the maths goes
-#endif
+// ---- pass 2 for a whole slice, in place: S'[i] = decay * S[i] + k[i] * delta over the element's
+// rows, o += S'[i] * q[i]. The element is the core's own copy of the slice (the fifo refills it
+// from DDR next time), so S' overwrites S and the half-row calls below just copy out.
+//
+// Per row and column the arithmetic is exactly the per-(row, half) form this replaced, in the
+// same order, so the result is bit-identical. What changed is the loop: the o accumulation is a
+// true recurrence over rows (a split and three macs deep), and one half row per call it ran
+// latency-bound, 8192 calls a layer. Here the same column vector of each half runs the
+// recurrence side by side across the rows, so one chain's latency hides the other's.
+static inline void dnx_slice_update(float *__restrict S, float *__restrict ds, unsigned blk) {
   aie::set_rounding(aie::rounding_mode::conv_even);
   float *__restrict o = ds + DS_O;
   const bfloat16 *__restrict k_hl = (const bfloat16 *)(ds + DS_KHL);
   const bfloat16 *__restrict q_hl = (const bfloat16 *)(ds + DS_QHL);
   const bfloat16 *__restrict delta_hl = (const bfloat16 *)(ds + DS_DHL);
   const bfloat16 *__restrict dd = (const bfloat16 *)(ds + DS_DD);
-  const unsigned r = blk * kRowsX + i;            // row index within the (padded) head
-  const bfloat16 kh = k_hl[r], kl = k_hl[kPad + r];
-  const bfloat16 qh = q_hl[r], ql = q_hl[kPad + r];
   const bfloat16 dh = dd[0], dl = dd[1];
-  const float *__restrict Si = S + i * kD + hf * kHalf;
-  float *__restrict oh = o + hf * kHalf;
-  const bfloat16 *__restrict deh0 = delta_hl + hf * kHalf;
-  const bfloat16 *__restrict del0 = delta_hl + kD + hf * kHalf;
+  const bfloat16 *__restrict kh_r = k_hl + blk * kRowsX;
+  const bfloat16 *__restrict kl_r = k_hl + kPad + blk * kRowsX;
+  const bfloat16 *__restrict qh_r = q_hl + blk * kRowsX;
+  const bfloat16 *__restrict ql_r = q_hl + kPad + blk * kRowsX;
 #pragma clang loop unroll(disable)
-  for (unsigned j = 0; j < kHalf; j += kV) {
-    accf16 s = aie::zeros<accfloat, kV>();
-    s = mac_split(s, aie::load_v<kV>(Si + j), dh, dl);
-    const vb deh = aie::load_v<kV>(deh0 + j);
-    const vb del = aie::load_v<kV>(del0 + j);
-    s = aie::mac(s, deh, kh);
-    s = aie::mac(s, deh, kl);
-    s = aie::mac(s, del, kh);
-    const vf sn = s.template to_vector<float>();
-    aie::store_v(ye + j, sn);
-    accf16 oacc;
-    oacc.from_vector(aie::load_v<kV>(oh + j));
-    oacc = mac_split(oacc, sn, qh, ql);
-    aie::store_v(oh + j, oacc.template to_vector<float>());
+  for (unsigned jv = 0; jv < kHalf; jv += kV) {
+    const unsigned ja = jv, jb = kHalf + jv;               // the same column vector in each half
+    const vb deha = aie::load_v<kV>(delta_hl + ja), dela = aie::load_v<kV>(delta_hl + kD + ja);
+    const vb dehb = aie::load_v<kV>(delta_hl + jb), delb = aie::load_v<kV>(delta_hl + kD + jb);
+    accf16 oa, ob;
+    oa.from_vector(aie::load_v<kV>(o + ja));
+    ob.from_vector(aie::load_v<kV>(o + jb));
+    float *__restrict Sa = S + ja;
+    float *__restrict Sb = S + jb;
+#pragma clang loop min_iteration_count(DNX_ROWS)
+    for (unsigned i = 0; i < kRowsX; ++i) {
+      const bfloat16 kh = kh_r[i], kl = kl_r[i], qh = qh_r[i], ql = ql_r[i];
+      accf16 sa = aie::zeros<accfloat, kV>();
+      sa = mac_split(sa, aie::load_v<kV>(Sa), dh, dl);
+      sa = aie::mac(sa, deha, kh);
+      sa = aie::mac(sa, deha, kl);
+      sa = aie::mac(sa, dela, kh);
+      accf16 sb = aie::zeros<accfloat, kV>();
+      sb = mac_split(sb, aie::load_v<kV>(Sb), dh, dl);
+      sb = aie::mac(sb, dehb, kh);
+      sb = aie::mac(sb, dehb, kl);
+      sb = aie::mac(sb, delb, kh);
+      const vf sna = sa.template to_vector<float>();
+      const vf snb = sb.template to_vector<float>();
+      aie::store_v(Sa, sna);
+      aie::store_v(Sb, snb);
+      oa = mac_split(oa, sna, qh, ql);
+      ob = mac_split(ob, snb, qh, ql);
+      Sa += kD;
+      Sb += kD;
+    }
+    aie::store_v(o + ja, oa.template to_vector<float>());
+    aie::store_v(o + jb, ob.template to_vector<float>());
   }
+}
+
+// ---- pass 2, the half-row call (row i of the slice at S, half hf): the slice's first call does
+// the whole update in place, then every call copies its updated half row out to ye.
+static inline void dnx_row_half(float *__restrict S, float *__restrict ds, float *__restrict ye,
+                                unsigned blk, unsigned i, unsigned hf) {
+#ifdef LX_NULL_DN
+  return;                                    // timing ablation: the streams stay, the maths goes
+#endif
+  if (i == 0 && hf == 0) dnx_slice_update(S, ds, blk);
+  const float *__restrict src = S + i * kD + hf * kHalf;
+#pragma clang loop unroll(full)
+  for (unsigned j = 0; j < kHalf; j += kV) aie::store_v(ye + j, aie::load_v<kV>(src + j));
 }
 
 // ---- per head, half hf: ye = o[hf] / sqrt(128)
