@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -242,6 +243,103 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
         float* out = og + t * qw + h * g.hd;
         const float* gt = gate + t * qw + h * g.hd;
         for (size_t j = 0; j < g.hd; ++j) out[j] = o[j] * sigmoid(gt[j]);
+    }
+}
+
+void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                    const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q) {
+    const size_t qw = g.nh * g.hd, kvw = g.kvh * g.hd, half = g.rot / 2, R = g.t_real;
+    if (g.nh % g.kvh || g.t_real > g.T || g.rot > g.hd || kv_row_elems < 2 * kvw)
+        throw std::runtime_error("open_qwen36: attention_prep: inconsistent geometry");
+    const float scale = 1.0f / std::sqrt(static_cast<float>(g.hd));
+    std::fill(Q, Q + g.T * qw, 0.f);
+#pragma omp parallel for
+    for (long long tt = 0; tt < static_cast<long long>(R); ++tt) {
+        const size_t t = static_cast<size_t>(tt), p = g.pos0 + t;
+        for (size_t h = 0; h < g.nh; ++h) {
+            float* dst = Q + t * qw + h * g.hd;
+            rms_vec(q + t * qw + h * g.hd, g.hd, qn, g.eps, dst);
+            rope(dst, half, inv_freq, static_cast<double>(p));
+            for (size_t j = 0; j < g.hd; ++j) dst[j] *= scale;
+        }
+        std::vector<float> kh(kvw);
+        for (size_t h = 0; h < g.kvh; ++h) {
+            rms_vec(k + t * kvw + h * g.hd, g.hd, kn, g.eps, kh.data() + h * g.hd);
+            rope(kh.data() + h * g.hd, half, inv_freq, static_cast<double>(p));
+        }
+        for (size_t j = 0; j < kvw; ++j) {
+            kv[p * kv_row_elems + j] = f32_to_bf16(kh[j]);
+            kv[p * kv_row_elems + kvw + j] = f32_to_bf16(v[t * kvw + j]);
+        }
+    }
+}
+
+void tile_rows_as_bt(const uint16_t* rows, size_t stride, size_t n_real, size_t n, size_t k, uint16_t* out) {
+    constexpr size_t TK = 64, MAC = 8, TN = 32;
+    if (k % TK || n % TN) throw std::runtime_error("open_qwen36: tile_rows_as_bt: k or n does not tile by (64, 32)");
+    const size_t NB = n / TN;
+#pragma omp parallel for
+    for (long long kb = 0; kb < static_cast<long long>(k / TK); ++kb)
+        for (size_t nb = 0; nb < NB; ++nb) {
+            uint16_t* w = out + (kb * NB + nb) * TK * TN;
+            for (size_t si = 0; si < TK / MAC; ++si)
+                for (size_t ti = 0; ti < TN / MAC; ++ti)
+                    for (size_t s = 0; s < MAC; ++s)
+                        for (size_t t = 0; t < MAC; ++t) {
+                            const size_t r = nb * TN + ti * MAC + t;
+                            *w++ = r < n_real ? rows[r * stride + kb * TK + si * MAC + s] : 0;
+                        }
+        }
+}
+
+void tile_rows_as_b(const uint16_t* rows, size_t stride, size_t k_real, size_t k, size_t n, uint16_t* out) {
+    constexpr size_t TK = 64, MAC = 8, TN = 32;
+    if (k % TK || n % TN) throw std::runtime_error("open_qwen36: tile_rows_as_b: k or n does not tile by (64, 32)");
+    const size_t NB = n / TN;
+#pragma omp parallel for
+    for (long long kb = 0; kb < static_cast<long long>(k / TK); ++kb)
+        for (size_t nb = 0; nb < NB; ++nb) {
+            uint16_t* w = out + (kb * NB + nb) * TK * TN;
+            for (size_t si = 0; si < TK / MAC; ++si)
+                for (size_t ti = 0; ti < TN / MAC; ++ti)
+                    for (size_t s = 0; s < MAC; ++s) {
+                        const size_t r = kb * TK + si * MAC + s;
+                        for (size_t t = 0; t < MAC; ++t)
+                            *w++ = r < k_real ? rows[r * stride + nb * TN + ti * MAC + t] : 0;
+                    }
+        }
+}
+
+void softmax_chunk(size_t M, size_t L, size_t hd, size_t c0, const float* s, const size_t* pos, float* m, float* l,
+                   float* acc, uint16_t* p) {
+#pragma omp parallel for
+    for (long long rr = 0; rr < static_cast<long long>(M); ++rr) {
+        const size_t r = static_cast<size_t>(rr);
+        const float* sr = s + r * L;
+        uint16_t* pr = p + r * L;
+        const size_t valid = pos[r] >= c0 ? std::min(L, pos[r] - c0 + 1) : 0;
+        if (valid == 0) {                       // the whole chunk is past this row's position
+            std::fill(pr, pr + L, uint16_t{0});
+            continue;
+        }
+        float mc = -std::numeric_limits<float>::infinity();
+        for (size_t j = 0; j < valid; ++j) mc = std::max(mc, sr[j]);
+        const float m_new = std::max(m[r], mc);
+        if (m[r] != m_new && l[r] != 0.f) {    // an earlier chunk's max is beaten: rescale what it accumulated
+            const float a = std::exp(m[r] - m_new);
+            l[r] *= a;
+            float* ar = acc + r * hd;
+            for (size_t j = 0; j < hd; ++j) ar[j] *= a;
+        }
+        double sum = 0;
+        for (size_t j = 0; j < valid; ++j) {
+            const uint16_t b = f32_to_bf16(std::exp(sr[j] - m_new));
+            pr[j] = b;
+            sum += bf16_to_f32(b);
+        }
+        std::fill(pr + valid, pr + L, uint16_t{0});
+        l[r] += static_cast<float>(sum);
+        m[r] = m_new;
     }
 }
 

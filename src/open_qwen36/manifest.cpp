@@ -281,6 +281,36 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
                     }
                     if (b.kernels.empty()) fail(bw, "names no streams");
                 }
+                // the attention products on the NPU: optional, full attention only
+                if (g.kind == "full" && gj.contains("attn_block")) {
+                    const json& aj = gj["attn_block"];
+                    const std::string aw = gw + ".attn_block";
+                    AttnBlock& a = g.attn_block;
+                    a.m = get<uint64_t>(aj, "m", aw);
+                    a.hd = get<uint64_t>(aj, "hd", aw);
+                    a.l_max = get<uint64_t>(aj, "l_max", aw);
+                    a.args = get<std::vector<std::string>>(aj, "args", aw);
+                    if (a.m == 0 || a.m % 256 || a.hd == 0 || a.hd % 256 || a.l_max == 0 || a.l_max % 256)
+                        fail(aw, "wants m, hd and l_max as positive multiples of 256");
+                    if (a.args.size() != 3) fail(aw, "wants three args (a, b, c)");
+                    auto streams = [&](const char* key, std::map<size_t, std::string>& into) {
+                        for (const auto& [rows_s, kname] : need(aj, key, aw).items()) {
+                            const size_t rows = static_cast<size_t>(std::stoull(rows_s));
+                            if (rows == 0 || rows % 256 || rows > a.l_max)
+                                fail(aw, std::string(key) + ": window " + rows_s + " is not a positive multiple of 256 within l_max");
+                            auto it = m.kernels.find(kname.get<std::string>());
+                            if (it == m.kernels.end()) fail(aw, std::string(key) + " names unknown kernel " + kname.get<std::string>());
+                            into[rows] = it->first;
+                        }
+                    };
+                    streams("kernels_s", a.kernels_s);
+                    streams("kernels_pv", a.kernels_pv);
+                    if (a.kernels_s.empty() || !a.kernels_s.count(a.l_max)) fail(aw, "kernels_s must reach l_max");
+                    std::vector<size_t> ks, kpv;
+                    for (const auto& kv : a.kernels_s) ks.push_back(kv.first);
+                    for (const auto& kv : a.kernels_pv) kpv.push_back(kv.first);
+                    if (ks != kpv) fail(aw, "kernels_s and kernels_pv cover different windows");
+                }
                 if (g.kind == "linear") {
                     g.qkv_dim = get<uint64_t>(gj, "qkv_dim", gw);
                     g.vw = get<uint64_t>(gj, "vw", gw);
@@ -355,10 +385,14 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         }
     }
     // the globals come after the layer types, so the batched expert kernel's x / h / y are checked here
-    for (const auto& [name, t] : m.layer_types)
+    for (const auto& [name, t] : m.layer_types) {
         for (size_t i = 1; i < t.gemm_block.moe_batch.args.size(); ++i)
             if (!m.globals.count(t.gemm_block.moe_batch.args[i]))
                 fail(where, "layer type " + name + " gemm_block.moe_batch: arg " + t.gemm_block.moe_batch.args[i] + " is not a declared global");
+        for (const auto& a : t.gemm_block.attn_block.args)
+            if (!m.globals.count(a))
+                fail(where, "layer type " + name + " gemm_block.attn_block: arg " + a + " is not a declared global");
+    }
     const json& pack = need(j, "pack", where);
     m.embed_tensor = get<std::string>(need(pack, "embed", where), "tensor", where + " pack.embed");
     m.norm_tensor = get<std::string>(need(pack, "norm", where), "tensor", where + " pack.norm");

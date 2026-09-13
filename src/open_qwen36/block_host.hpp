@@ -59,6 +59,29 @@ void attention_block(const AttnGeom& g, const float* q, const float* k, const fl
                      const float* qn, const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems,
                      float* og);
 
+/// The host half of the block attention when its products run on the NPU (OPEN-PREFILL-ATTN):
+/// what attention_block does before its products and nothing after. Q [T, nh*hd] fp32 out,
+/// normed and roped with 1/sqrt(hd) folded in (a power of two at every head dim here, so the
+/// bf16 the kernel sees rounds exactly as the unscaled value would); the block's k / v normed,
+/// roped and written to the cache rows [pos0, pos0 + t_real) in bf16. Rows of Q past t_real are zero.
+void attention_prep(const AttnGeom& g, const float* q, const float* k, const float* v, const float* qn,
+                    const float* kn, const double* inv_freq, uint16_t* kv, size_t kv_row_elems, float* Q);
+
+/// rows [n, k] bf16, `stride` elements apart (the cache's K or V half), as the GEMM's tiled B for
+/// B = rows^T [k, n] -- tile_x's layout from a bf16 source. Rows at or past n_real read as zero;
+/// n a multiple of 32, k of 64.
+void tile_rows_as_bt(const uint16_t* rows, size_t stride, size_t n_real, size_t n, size_t k, uint16_t* out);
+/// rows [k, n] bf16, `stride` apart, as the tiled B for B = rows itself. Rows past k_real read as zero.
+void tile_rows_as_b(const uint16_t* rows, size_t stride, size_t k_real, size_t k, size_t n, uint16_t* out);
+
+/// One window chunk of the causal row softmax, with the running (max, sum) carried across chunks:
+/// s [M, L] fp32 scores whose column 0 is window row c0; row r's query sits at pos[r], so columns
+/// c0 + j > pos[r] are masked. Writes p [M, L] bf16 = exp(s - m_new) (zero where masked), scales
+/// acc [M, hd] and l [M] by exp(m_old - m_new), and folds the bf16-rounded p into l -- what the
+/// kernel will multiply is what the denominator counts. Start with m = -inf, l = 0, acc = 0.
+void softmax_chunk(size_t M, size_t L, size_t hd, size_t c0, const float* s, const size_t* pos, float* m, float* l,
+                   float* acc, uint16_t* p);
+
 /// The MoE router over a block: softmax of xm [T, hid] @ Wr [hid, E] into probs [T, E], the
 /// top-k by probability (lowest index on a tie, as the kernel's router_fin picks) into
 /// idx [T, topk], renormalised into w [T, topk].

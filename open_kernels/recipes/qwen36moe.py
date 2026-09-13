@@ -828,6 +828,7 @@ def pack_plan(spec: ModelSpec) -> dict:
 # and cannot run alone.
 GEMM_T = 256          # gemm_q4_prefill.py's GQP_T: a multiple of tile_n * 8 columns
 MB_NT = 8             # moe_batch.py's token slots per expert visit: one bf16 MAC tile wide
+ATTN_LMAX = 4096      # the widest attention GEMM stream (rows of window); a longer window is chunked on the host
 GEMM_ROLES = ("attn", "linear", "linear_out", "shared")   # the projections the route streams
 
 
@@ -879,6 +880,20 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     check_buffer_args("moe_batch", mb_args)
     moe_batch = {"kernels": {str(s): f"mb_s{s}" for s in mb_slots}, "args": mb_args, "nt": MB_NT}
 
+    # Block attention as two bf16 GEMMs per kv head (OPEN-PREFILL-ATTN, designs/attn_block): the
+    # group's 8 query heads x T tokens against the window, scores then values, the row softmax on
+    # the host between. The GEMM takes M and K as runtime parameters, so one xclbin carries a
+    # stream per 256 rows of window up to ATTN_LMAX; the host chunks a longer window.
+    ag_m = (spec.num_heads // spec.num_kv_heads) * T
+    ag_tiers = list(range(256, ATTN_LMAX + 1, 256))
+    ag_args = ["ag_a", "ag_b", "ag_c"]
+    check_buffer_args("attn_block", ag_args)
+    attn_block = None
+    if spec.has_full and ag_m % 256 == 0 and spec.head_dim % 256 == 0:
+        attn_block = {"m": ag_m, "hd": spec.head_dim, "l_max": ATTN_LMAX, "args": ag_args,
+                      "kernels_s": {str(L): f"ag_s{L}" for L in ag_tiers},
+                      "kernels_pv": {str(L): f"ag_pv{L}" for L in ag_tiers}}
+
     def shared_of(lt: str) -> dict:
         pool = plan[lt]["pool"]
         return {"shared_program": [run(2 * sff, hid, "gshare_w"), run(hid, sff, "gsdown_w")],
@@ -923,6 +938,8 @@ def gemm_route(spec: ModelSpec) -> dict | None:
             "a_xm": L.AA_XM, "a_rout": L.AA_ROUT, "a_res": L.AA_RES,
             **shared_of(FULL), "moe_batch": moe_batch,
         }
+        if attn_block:
+            types[FULL]["attn_block"] = attn_block
     out = {"layer_types": types, "contexts": {}, "kernels": {}, "globals": {}, "builds": {}}
     # Hardware contexts are the scarce thing (every design here takes all eight
     # columns, so contexts time-share the array): the two MoE streams share one
@@ -951,6 +968,19 @@ def gemm_route(spec: ModelSpec) -> dict | None:
     out["globals"]["mb_x"] = mb_slots[0] * hid * MB_NT * 2
     out["globals"]["mb_h"] = mb_slots[0] * ff * MB_NT * 2
     out["globals"]["mb_y"] = mb_slots[0] * hid * MB_NT * 4
+    if attn_block:
+        hd = spec.head_dim
+        out["contexts"]["ag"] = f"ag_s{ag_tiers[0]}/final.xclbin"
+        for Lw in ag_tiers:
+            for tag, K, N in (("s", hd, Lw), ("pv", Lw, hd)):
+                name = f"ag_{tag}{Lw}"
+                out["kernels"][name] = {"context": "ag", "insts": f"{name}/insts.bin", "build": name}
+                out["builds"][name] = {"design": "attn_block/attn_gemm.py", "build_dir": f"attn_block/build_{tag}{Lw}{sfx}",
+                                       "env": {"AG_M": str(ag_m), "AG_K": str(K), "AG_N": str(N)}}
+        # a: Q or P rows [m, K] bf16; b: the tiled K^T or V [K, N] bf16; c: [m, N] f32 -- sized for the widest
+        out["globals"]["ag_a"] = ag_m * ATTN_LMAX * 2
+        out["globals"]["ag_b"] = ATTN_LMAX * hd * 2
+        out["globals"]["ag_c"] = ag_m * ATTN_LMAX * 4
     for N, K in sorted(shapes):
         name, ctx = f"gemm_n{N}_k{K}", f"gemm_k{K}"
         if ctx not in out["contexts"]:
@@ -1075,6 +1105,7 @@ KERNEL_SOURCES = [
     "designs/lm_head_q8/*.py", "designs/lm_head_q8/*.cc", "designs/lm_head_q8/*.h",
     "designs/gemm_q4_prefill/*.py", "designs/gemm_q4_prefill/*.cc", "designs/gemm_q4_prefill/*.h",
     "designs/moe_batch/moe_batch.py", "designs/moe_batch/*.cc", "designs/moe_batch/*.h",
+    "designs/attn_block/attn_gemm.py", "../npu_offload/gemm_rtp/gemm_pretiled.py", "../npu_offload/gemm_rtp/npue.py",
     "include/vecmath.h", "ironutil.py", "build_design.py",
 ]
 # compiled only when a role is q8, so listing it here does not move a shipped build key

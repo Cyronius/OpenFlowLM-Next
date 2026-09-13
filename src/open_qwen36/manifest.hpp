@@ -89,6 +89,16 @@ struct MoeBatch {
     bool present() const { return !kernels.empty(); }
 };
 
+/// Block attention as two bf16 GEMMs per kv head (OPEN-PREFILL-ATTN, open_kernels/designs/attn_block):
+/// scores Q K^T then P V, the row softmax on the host between them. One stream per 256 rows of
+/// window up to l_max on one xclbin; the host chunks a longer window and merges the softmax.
+struct AttnBlock {
+    std::map<size_t, std::string> kernels_s, kernels_pv;   ///< window rows -> the stream for that width
+    std::vector<std::string> args;                         ///< the a / b / c globals
+    size_t m = 0, hd = 0, l_max = 0;                       ///< rows per product (heads per kv head x T), head dim
+    bool present() const { return !kernels_s.empty(); }
+};
+
 struct GemmBlockProgram {
     uint64_t t = 0;               ///< 0 = no route for this layer type
     std::string kind;             ///< dense | linear | full
@@ -115,6 +125,8 @@ struct GemmBlockProgram {
     uint64_t shared_ff = 0;
     // linear and full: the routed experts batched over the block (absent: mx per token)
     MoeBatch moe_batch;
+    // full: the attention products on the NPU (absent: attention on the host)
+    AttnBlock attn_block;
 };
 
 struct LayerType {

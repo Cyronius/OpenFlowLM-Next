@@ -118,12 +118,25 @@ int main(int argc, char** argv) {
           "full route: q|k|v|gate then o, the attention geometry");
     check(m.contexts.count("gemm_k2048") && m.kernels.at("gemm_n9216_k2048").context == "gemm_k2048" &&
           m.kernels.at("gemm_n1024_k2048").context == "gemm_k2048" &&
-          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 9 &&
+          m.kernels.at("mx_full").context == "mx" && m.contexts.size() == 10 &&
           m.globals.at("gemm_x_k2048") == 2048 * 256 * 2 && m.globals.at("gemm_y_n12288") == 12288 * 256 * 4 &&
           m.globals.at("gemm_x_k512") == 512 * 256 * 2 && m.globals.at("gemm_y_n1024") == 1024 * 256 * 4,
           "route contexts, kernels and globals");
-    check(m.files().size() == 26, "26 files named (9 xclbin + 17 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
-                                  "and the token-batched expert kernel one context and four streams)");
+    check(m.files().size() == 59, "59 files named (10 xclbin + 49 insts: the route adds three GEMM contexts, the MoE one, seven streams, "
+                                  "the token-batched expert kernel one context and four streams, and the attention GEMM one "
+                                  "context and 32 streams)");
+    // the attention products on the NPU (OPEN-PREFILL-ATTN): a stream per 256 rows of window, both
+    // products, on one xclbin; full attention only
+    const auto& ab = fg.attn_block;
+    check(ab.present() && !lg.attn_block.present() && ab.m == 2048 && ab.hd == 256 && ab.l_max == 4096 &&
+          ab.args == std::vector<std::string>{"ag_a", "ag_b", "ag_c"} && ab.kernels_s.size() == 16 &&
+          ab.kernels_pv.size() == 16 && ab.kernels_s.at(256) == "ag_s256" && ab.kernels_s.at(4096) == "ag_s4096" &&
+          ab.kernels_pv.at(2048) == "ag_pv2048",
+          "attn_block: 16 windows of 256 rows for each product, three buffer args, 2048 rows of head dim 256");
+    check(m.kernels.at("ag_s256").context == "ag" && m.kernels.at("ag_pv4096").context == "ag" &&
+          m.kernels.at("ag_s256").patch.empty() && m.contexts.at("ag") == "ag_s256/final.xclbin" &&
+          m.globals.at("ag_a") == 2048 * 4096 * 2 && m.globals.at("ag_b") == 4096 * 256 * 2 && m.globals.at("ag_c") == 2048 * 4096 * 4,
+          "attn_block: every stream on the ag context, no patch, the a / b / c globals sized for the widest window");
     // the token-batched expert kernel (OPEN-MOE-BATCH): four stream lengths on one xclbin, the same on both kinds
     const auto& mbk = lg.moe_batch;
     check(mbk.present() && mbk.nt == 8 && mbk.args == std::vector<std::string>{"pool", "mb_x", "mb_h", "mb_y"} &&
@@ -194,6 +207,16 @@ int main(int argc, char** argv) {
     });
     refused_manifest(argv[1], "not a declared global", "a moe_batch naming an undeclared buffer is refused", [](json& j) {
         j["layer_types"]["linear_attention"]["gemm_block"]["moe_batch"]["args"][3] = "mb_z";
+    });
+    refused_manifest(argv[1], "multiple of 256", "an attention stream whose window is not a round of columns is refused", [](json& j) {
+        auto& k = j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["kernels_s"];
+        k["300"] = k["256"];
+    });
+    refused_manifest(argv[1], "different windows", "attention streams that do not pair up per window are refused", [](json& j) {
+        j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["kernels_pv"].erase("512");
+    });
+    refused_manifest(argv[1], "not a declared global", "an attn_block naming an undeclared buffer is refused", [](json& j) {
+        j["layer_types"]["full_attention"]["gemm_block"]["attn_block"]["args"][2] = "ag_z";
     });
     refused_manifest(argv[1], "exactly 2 steps", "a linear route with a third step is refused at load", [](json& j) {
         auto& p = j["layer_types"]["linear_attention"]["gemm_block"]["program"];

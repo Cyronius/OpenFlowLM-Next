@@ -236,6 +236,7 @@ private:
     // ---- the block route (manifest.hpp's GemmBlockProgram)
     size_t gemm_block_t_ = 0;    ///< common gemm_block.t across every loaded layer type, or 0
     bool moe_batch_on_ = true;   ///< the token-batched expert kernel where the set carries it (OFLM_OPEN_MOE_BATCH=0 off)
+    bool attn_block_on_ = true;  ///< the attention products on the NPU where the set carries them (OFLM_OPEN_ATTN_BLOCK=0 off)
     bool dispatch_log_ = false;  ///< OFLM_OPEN_DISPATCH_LOG: keep per-kernel dispatch times
     std::map<std::string, DispatchStat> dispatch_stats_;
     // Per weight name, per layer: a dedicated buffer holding a contiguous run of
@@ -321,6 +322,12 @@ private:
     /// = res + the weighted expert outputs (padding rows carried as res).
     void moe_block(int l, const float* xm, const float* res, const int32_t* idx, const float* w, size_t T, size_t t_real,
                    float* out);
+    /// The full-attention layer's attention over the block as GEMM dispatches (OPEN-PREFILL-ATTN):
+    /// per kv head, the group's queries against the window's K rows for the scores, the row
+    /// softmax on the host, then against the V rows. Q [T, nh*hd] as attention_prep leaves it,
+    /// kv the layer's cache with the block's rows already written; og [T, nh*hd] out, gated.
+    void attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
+                       size_t kv_row_elems, float* og);
 };
 
 }  // namespace open_qwen36

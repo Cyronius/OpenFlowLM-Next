@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 
@@ -109,6 +110,8 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         if (types_[l]->gemm_block.t && types_[l]->gemm_block.kind == "dense") wanted["dxB"] = true;
         if (!types_[l]->gemm_block.moe_kernel.empty()) wanted[types_[l]->gemm_block.moe_kernel] = true;
         for (const auto& [slots, k] : types_[l]->gemm_block.moe_batch.kernels) wanted[k] = true;
+        for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
+        for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
     for (const auto& s : man_.tail) wanted[s.kernel] = true;
     for (const auto& [name, d] : man_.kernels)
@@ -133,6 +136,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         (gemm_block_t_ ? "" : " (no gemm_block program in this kernel set, or its layer types disagree)"));
     // the token-batched expert kernel: every stream's slot count must be what the manifest says
     if (const char* env = std::getenv("OFLM_OPEN_MOE_BATCH")) moe_batch_on_ = std::string(env) != "0";
+    if (const char* env = std::getenv("OFLM_OPEN_ATTN_BLOCK")) attn_block_on_ = std::string(env) != "0";
     dispatch_log_ = std::getenv("OFLM_OPEN_DISPATCH_LOG") != nullptr;
     bool any_batch = false;
     for (int l = 0; l < nl_; ++l)
@@ -145,6 +149,11 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (gemm_block_t_)
         log(std::string("token-batched expert kernel: ") +
             (any_batch ? (moe_batch_on_ ? "on" : "off (OFLM_OPEN_MOE_BATCH=0)") : "not in this kernel set (mx per token)"));
+    bool any_attn = false;
+    for (const auto& t : types_) any_attn = any_attn || t->gemm_block.attn_block.present();
+    if (gemm_block_t_)
+        log(std::string("block attention on the NPU: ") +
+            (any_attn ? (attn_block_on_ ? "on" : "off (OFLM_OPEN_ATTN_BLOCK=0)") : "not in this kernel set (attention on the host)"));
 }
 
 Core::~Core() = default;
@@ -1316,6 +1325,76 @@ void Core::block_layer_linear(int l, std::vector<float>& xres, size_t T, size_t 
     }
 }
 
+void Core::attention_npu(int l, const host::AttnGeom& g, const float* Q, const float* gate, const uint16_t* kv,
+                         size_t kv_row_elems, float* og) {
+    const AttnBlock& ab = types_[l]->gemm_block.attn_block;
+    const size_t T = g.T, hd = g.hd, grp = g.nh / g.kvh, M = grp * T, qw = g.nh * hd, kvw = g.kvh * hd;
+    if (M != ab.m || hd != ab.hd)
+        throw std::runtime_error("open_qwen36: attn_block was built for " + std::to_string(ab.m) + " rows of head dim " +
+                                 std::to_string(ab.hd) + ", this layer has " + std::to_string(M) + " of " + std::to_string(hd));
+    const size_t rows = g.pos0 + g.t_real;                  // the window: every cached row and the block's own
+    xrt::bo& ba = buffer(ab.args[0], 0);
+    xrt::bo& bb = buffer(ab.args[1], 0);
+    xrt::bo& bc = buffer(ab.args[2], 0);
+    if (ba.size() < M * ab.l_max * 2 || bb.size() < ab.l_max * hd * 2 || bc.size() < M * ab.l_max * 4)
+        throw std::runtime_error("open_qwen36: the attn_block globals are smaller than the widest window");
+    // row r of a product is query head r / T of the group at token r % T
+    std::vector<size_t> pos(M);
+    for (size_t r = 0; r < M; ++r) pos[r] = g.pos0 + r % T;
+    std::vector<uint16_t> qb(M * hd);
+    std::vector<float> m(M), lsum(M), acc(M * hd);
+    std::fill(og, og + T * qw, 0.f);
+    for (size_t gh = 0; gh < g.kvh; ++gh) {
+        auto th = std::chrono::steady_clock::now();
+        for (size_t hl = 0; hl < grp; ++hl)
+            for (size_t t = 0; t < T; ++t) {
+                const float* src = Q + t * qw + (gh * grp + hl) * hd;
+                uint16_t* dst = qb.data() + (hl * T + t) * hd;
+                for (size_t j = 0; j < hd; ++j) dst[j] = f32_to_bf16(src[j]);
+            }
+        std::fill(m.begin(), m.end(), -std::numeric_limits<float>::infinity());
+        std::fill(lsum.begin(), lsum.end(), 0.f);
+        std::fill(acc.begin(), acc.end(), 0.f);
+        timing_.mid_ms += ms_since(th);
+        // the window in chunks of the widest stream, the softmax merged across them
+        for (size_t c0 = 0; c0 < rows; c0 += ab.l_max) {
+            const size_t lreal = std::min(ab.l_max, rows - c0);
+            const size_t L = (lreal + 255) / 256 * 256;
+            th = std::chrono::steady_clock::now();
+            std::memcpy(ba.map<uint16_t*>(), qb.data(), M * hd * 2);
+            host::tile_rows_as_bt(kv + c0 * kv_row_elems + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
+            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * hd * 2, 0);
+            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, hd * L * 2, 0);
+            timing_.mid_ms += ms_since(th);
+            timing_.part0_ms += run(kerns_.at(ab.kernels_s.at(L)), ab.args, l);
+            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * L * 4, 0);
+            th = std::chrono::steady_clock::now();
+            host::softmax_chunk(M, L, hd, c0, bc.map<float*>(), pos.data(), m.data(), lsum.data(), acc.data(),
+                                ba.map<uint16_t*>());
+            host::tile_rows_as_b(kv + c0 * kv_row_elems + kvw + gh * hd, kv_row_elems, lreal, L, hd, bb.map<uint16_t*>());
+            ba.sync(XCL_BO_SYNC_BO_TO_DEVICE, M * L * 2, 0);
+            bb.sync(XCL_BO_SYNC_BO_TO_DEVICE, L * hd * 2, 0);
+            timing_.mid_ms += ms_since(th);
+            timing_.part0_ms += run(kerns_.at(ab.kernels_pv.at(L)), ab.args, l);
+            bc.sync(XCL_BO_SYNC_BO_FROM_DEVICE, M * hd * 4, 0);
+            th = std::chrono::steady_clock::now();
+            const float* c = bc.map<float*>();
+            for (size_t i = 0; i < M * hd; ++i) acc[i] += c[i];
+            timing_.mid_ms += ms_since(th);
+        }
+        th = std::chrono::steady_clock::now();
+        for (size_t hl = 0; hl < grp; ++hl)
+            for (size_t t = 0; t < g.t_real; ++t) {
+                const size_t r = hl * T + t, h = gh * grp + hl;
+                const float inv = 1.0f / lsum[r];
+                const float* gt = gate + t * qw + h * hd;
+                float* out = og + t * qw + h * hd;
+                for (size_t j = 0; j < hd; ++j) out[j] = acc[r * hd + j] * inv / (1.0f + std::exp(-gt[j]));
+            }
+        timing_.mid_ms += ms_since(th);
+    }
+}
+
 void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_real) {
     const LayerType& lt = *types_[l];
     const GemmBlockProgram& gb = lt.gemm_block;
@@ -1345,10 +1424,19 @@ void Core::block_layer_full(int l, std::vector<float>& xres, size_t T, size_t t_
     g.pos0 = static_cast<size_t>(pos_); g.eps = gb.eps;
     std::vector<float> og(T * qw);
     auto t0 = std::chrono::steady_clock::now();
-    host::attention_block(g, q.data(), k.data(), v.data(), gate.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
-                          st.map<uint16_t*>(), row / 2, og.data());
-    timing_.part1_ms += ms_since(t0);
-    timing_.mid_ms += ms_since(t0);
+    if (attn_block_on_ && gb.attn_block.present()) {
+        std::vector<float> Q(T * qw);
+        host::attention_prep(g, q.data(), k.data(), v.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                             st.map<uint16_t*>(), row / 2, Q.data());
+        timing_.part1_ms += ms_since(t0);
+        timing_.mid_ms += ms_since(t0);
+        attention_npu(l, g, Q.data(), gate.data(), st.map<uint16_t*>(), row / 2, og.data());
+    } else {
+        host::attention_block(g, q.data(), k.data(), v.data(), gate.data(), hc.qn.data(), hc.kn.data(), man_.rope_inv_freq.data(),
+                              st.map<uint16_t*>(), row / 2, og.data());
+        timing_.part1_ms += ms_since(t0);
+        timing_.mid_ms += ms_since(t0);
+    }
     ts = std::chrono::steady_clock::now();
     st.sync(XCL_BO_SYNC_BO_TO_DEVICE, t_real * row, static_cast<size_t>(pos_) * row);
     timing_.state_ms += ms_since(ts);
