@@ -44,9 +44,13 @@ def _paths() -> tuple[Path, Path]:
 
 
 def _arch() -> str:
-    from aie.iron.kernels._common import _detect_arch
+    """aie2p, which is what build_design.py pins the device to.
 
-    return _detect_arch()
+    IRON's own _detect_arch() reads the NPU that is present, and under WSL there is
+    none, so it falls back to aie2 - a different slot layout and different II bounds
+    for the same loop. Pass --arch to look at anything else.
+    """
+    return "aie2p"
 
 
 def _clang_cmd(src: Path, arch: str, extra: list[str]) -> list[str]:
@@ -146,7 +150,7 @@ def report(records: list[dict], mii_log: str, slots: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("source", type=Path, help="kernel .cc to compile")
-    ap.add_argument("--arch", help="aie2 / aie2p (default: the current device's)")
+    ap.add_argument("--arch", help="aie2 / aie2p (default: aie2p, what build_design.py targets)")
     ap.add_argument("--keep", type=Path, help="keep the .ll/.s/.yaml under this directory")
     ap.add_argument("cflags", nargs="*",
                     help="extra flags for the clang++ step (one source file only)")
