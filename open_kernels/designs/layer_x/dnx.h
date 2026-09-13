@@ -60,8 +60,9 @@ static inline void split16(const vf &v, vb &h, vb &l) {
   l = aie::sub(a, h).template to_vector<bfloat16>();
 }
 
-// fp32[128] -> packed bf16 [hi 0..159 | lo 0..159], entries 128..159 zero.
-static inline void split_vec_pad(const float *__restrict src, bfloat16 *__restrict hl) {
+// fp32[128] -> packed bf16 [hi 0..159 | lo 0..159], entries 128..159 zero. Out of line: it is
+// called twice per head and program memory is what the main core is short of, not cycles here.
+static __attribute__((noinline)) void split_vec_pad(const float *__restrict src, bfloat16 *__restrict hl) {
 #pragma clang loop unroll(disable)
   for (unsigned j = 0; j < kD; j += kV) {
     vb h, l;
@@ -114,16 +115,26 @@ static inline void dnx_pass1_slice(const float *__restrict S, float *__restrict 
     for (unsigned j = 0; j < kD; j += kV)
       aie::store_v(t + j, aie::zeros<float, kV>());
   }
-  const bfloat16 *kh = k_hl + blk * kRowsX;
-  const bfloat16 *kl = k_hl + kPad + blk * kRowsX;
+  const bfloat16 *__restrict kh = k_hl + blk * kRowsX;
+  const bfloat16 *__restrict kl = k_hl + kPad + blk * kRowsX;
+  // two columns (one per half) per pass over the rows: each t[j] is a chain over i, and one
+  // at a time the chain's latency was the whole cost. Same per-column order, so bit-identical.
 #pragma clang loop unroll(disable)
-  for (unsigned j = 0; j < kD; j += kV) {
-    accf16 acc;
-    acc.from_vector(aie::load_v<kV>(t + j));
+  for (unsigned j = 0; j < kHalf; j += kV) {
+    accf16 acc_a, acc_b;
+    acc_a.from_vector(aie::load_v<kV>(t + j));
+    acc_b.from_vector(aie::load_v<kV>(t + kHalf + j));
+    const float *__restrict Sa = S + j;
+    const float *__restrict Sb = S + kHalf + j;
 #pragma clang loop unroll(disable)
-    for (unsigned i = 0; i < kRowsX; ++i)
-      acc = mac_split(acc, aie::load_v<kV>(S + i * kD + j), kh[i], kl[i]);
-    aie::store_v(t + j, acc.template to_vector<float>());
+    for (unsigned i = 0; i < kRowsX; ++i) {
+      acc_a = mac_split(acc_a, aie::load_v<kV>(Sa), kh[i], kl[i]);
+      acc_b = mac_split(acc_b, aie::load_v<kV>(Sb), kh[i], kl[i]);
+      Sa += kD;
+      Sb += kD;
+    }
+    aie::store_v(t + j, acc_a.template to_vector<float>());
+    aie::store_v(t + kHalf + j, acc_b.template to_vector<float>());
   }
 }
 
@@ -181,6 +192,8 @@ static inline void dnx_slice_update(float *__restrict S, float *__restrict ds, u
   const bfloat16 *__restrict kl_r = k_hl + kPad + blk * kRowsX;
   const bfloat16 *__restrict qh_r = q_hl + blk * kRowsX;
   const bfloat16 *__restrict ql_r = q_hl + kPad + blk * kRowsX;
+  // Two chains, not four: four column vectors in flight would hide more of the recurrence but
+  // cost ~580 B more code, and the main core has ~370 B of program memory left.
 #pragma clang loop unroll(disable)
   for (unsigned jv = 0; jv < kHalf; jv += kV) {
     const unsigned ja = jv, jb = kHalf + jv;               // the same column vector in each half
