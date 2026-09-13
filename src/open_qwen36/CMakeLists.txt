@@ -1,6 +1,6 @@
-# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the FLM app
+# open_qwen36_cli — the open Qwen3.6-MoE engine driven without the OFLM app
 # (see cli.cpp). The engine's core (core.cpp, pools.cpp, manifest.cpp,
-# q4nx_file.cpp) is also compiled into flm by src/CMakeLists.txt; engine.cpp
+# q4nx_file.cpp) is also compiled into oflm by src/CMakeLists.txt; engine.cpp
 # (the causal_lm adapter) only there. manifest_test (no XRT) is the
 # OPEN-MANIFEST unit test: `ctest` runs it against the checked-in fixture.
 #
@@ -65,4 +65,7 @@ enable_testing()
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen3_4b.json"
-         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_gemma3_4b.json")
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_gemma3_4b.json"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_hy_mt2_7b.json"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen35_9b.json"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_phi4_mini_4b.json")

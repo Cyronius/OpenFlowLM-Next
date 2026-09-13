@@ -25,7 +25,8 @@ namespace open_qwen36 {
 
 namespace fs = std::filesystem;
 
-std::string Engine::find_kernels(const LM_Config& config) {
+std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
+    auto chose = [how](const char* where) { if (how) *how = where; };
     // A kernel set is a manifest.json plus every xclbin / insts.bin it names.
     auto complete = [](const fs::path& dir, std::string* why) {
         std::error_code ec;
@@ -42,14 +43,14 @@ std::string Engine::find_kernels(const LM_Config& config) {
     };
     std::string why;
     if (const char* env = std::getenv("OFLM_OPEN_KERNELS_DIR")) {
-        if (complete(env, &why)) return env;
+        if (complete(env, &why)) { chose("OFLM_OPEN_KERNELS_DIR"); return env; }
         std::fprintf(stderr, "open_qwen36: OFLM_OPEN_KERNELS_DIR=%s is not a kernel set: %s\n", env, why.c_str());
     }
     fs::path local = fs::path(config.model_path) / "open_kernels";
-    if (complete(local, &why)) return local.string();
+    if (complete(local, &why)) { chose("beside the model"); return local.string(); }
     // Every xclbins root the closed path would consider, not just the first one
-    // find_xclbin_path() happens to return: flm-add links a set under the user
-    // root ($OFLM_XCLBIN_PATH / ~/.config/flm) while the shipped sets live in the
+    // find_xclbin_path() happens to return: oflm-add links a set under the user
+    // root ($OFLM_XCLBIN_PATH / ~/.config/oflm) while the shipped sets live in the
     // install tree, and whichever root wins there would otherwise hide the other.
     std::vector<std::string> roots = utils::xclbin_roots();
     // config.exec_path is find_xclbin_path()'s single winner, already in the list above --
@@ -60,20 +61,27 @@ std::string Engine::find_kernels(const LM_Config& config) {
     }
     for (const std::string& r : roots) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
-        if (complete(cand, &why)) return cand.string();
+        if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
     }
     return {};
 }
 
-Engine::Engine(const LM_Config& config, flm_rt::device* dev, int MAX_L) : dev_(dev) {
+Engine::Engine(const LM_Config& config, oflm_rt::device* dev, int MAX_L) : dev_(dev) {
     cfg_.model_dir = config.model_path;
-    cfg_.kernel_dir = find_kernels(config);
+    std::string how;
+    cfg_.kernel_dir = find_kernels(config, &how);
     if (cfg_.kernel_dir.empty())
         throw std::runtime_error("open_qwen36: no open kernels found for " + config.model_name +
                                  " (set OFLM_OPEN_KERNELS_DIR or install xclbins/" + config.model_name + "/open_kernels)");
     cfg_.max_ctx = MAX_L > 0 ? static_cast<size_t>(MAX_L) : 4096;
     if (const char* tm = std::getenv("OFLM_OPEN_TIMEOUT_MS")) cfg_.timeout_ms = static_cast<unsigned>(std::strtoul(tm, nullptr, 10));
     cfg_.verbose = std::getenv("OFLM_OPEN_QUIET") == nullptr;
+    // Say which set won. Three rules can pick one, and every one of them yields
+    // valid output -- so a set chosen against the user's intent looks exactly
+    // like the right one. An A/B that silently ran identical kernels twice, and
+    // read as "no measurable effect", is what this line exists to prevent (#35).
+    if (cfg_.verbose)
+        std::fprintf(stderr, "open_qwen36: kernels %s (%s)\n", cfg_.kernel_dir.c_str(), how.c_str());
     core_ = std::make_unique<Core>(cfg_, dev_);
     logits_.assign(core_->vocab(), bf16(0.f));
 }
@@ -132,29 +140,42 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
         // Decode-as-prefill: exact for this architecture, one step per token, the
         // lm_head only for the last one (whose logits pick the first sampled token).
         //
-        // The block route (Core::step_gemm_block, manifest.hpp's GemmBlockProgram)
-        // whenever the kernel set carries one: the prompt in T-wide blocks, the
-        // tail padded with a repeated in-range id and the real count passed on,
-        // never falling back to step(). OFLM_OPEN_GEMM_BLOCK=0 forces the
-        // sequential path (the A/B). A prompt that has had an image is on the
-        // (t, h, w) counter, which the route does not write, so it stays sequential.
+        // 0167/#32: OFLM_OPEN_GEMM_BLOCK=1 selects the GEMM-route prefill block
+        // (Core::step_gemm_block(), manifest.hpp's GemmBlockProgram) instead --
+        // T tokens through every layer as 5 whole-array bf16 GEMM dispatches
+        // (q4_1 dequantised on-core) plus T single-token attention dispatches,
+        // instead of T sequential step() calls. Off by default so every existing
+        // measurement is unaffected. The whole prompt runs in GT-wide blocks, the
+        // tail padded with a repeated in-range id (hardware-proven exact: the
+        // real columns' output does not depend on the padding), never falling
+        // back to step(). A kernel set with no gemm_block program (GT == 0) runs
+        // exactly the sequential path this engine always has.
         return guarded([&] {
-            const char* env = std::getenv("OFLM_OPEN_GEMM_BLOCK");
-            const bool off = env && std::string(env) == "0";
-            const size_t GT = core_->gemm_block_t();
+            // Test the VALUE, not just presence: the docs say =1, and
+            // OFLM_OPEN_GEMM_BLOCK=0 switching the route ON is the kind of surprise
+            // that gets diagnosed as a different bug entirely (review on #39).
+            // getenv_oflm, not getenv, so a pre-rename FLM_* export still works (#41).
+            const std::string gemm_block_env = utils::getenv_oflm("OFLM_OPEN_GEMM_BLOCK");
             // A block costs its full-width GEMMs however few real tokens it holds, so a
             // short prompt is cheaper one token at a time; the crossover is measured, not
             // derived (Qwen3.6-35B: ~64 tokens), OFLM_OPEN_GEMM_BLOCK_MIN overrides it.
             size_t min_prompt = 64;
             if (const char* mp = std::getenv("OFLM_OPEN_GEMM_BLOCK_MIN")) min_prompt = static_cast<size_t>(std::strtoul(mp, nullptr, 10));
-            if (!off && GT > 0 && ids.size() >= min_prompt && !core_->mrope_active()) {
-                size_t i = 0;
-                while (i < ids.size()) {
-                    const size_t t_real = std::min(GT, ids.size() - i);
-                    std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
-                    block.resize(GT, block.empty() ? 0 : block.back());
-                    core_->step_gemm_block(block, t_real, i + t_real == ids.size());
-                    i += t_real;
+            // A prompt that has had an image is on the (t, h, w) counter, and the
+            // gemm-block route writes no position records - it would place these
+            // tokens at the wrong positions, so stay sequential.
+            if (gemm_block_env == "1" && ids.size() >= min_prompt && !core_->mrope_active()) {
+                const size_t GT = core_->gemm_block_t();
+                if (GT > 0) {
+                    size_t i = 0;
+                    while (i < ids.size()) {
+                        const size_t t_real = std::min(GT, ids.size() - i);
+                        std::vector<int> block(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(i + t_real));
+                        block.resize(GT, block.empty() ? 0 : block.back());  // pad the tail with a repeated in-range id
+                        core_->step_gemm_block(block, t_real, i + t_real == ids.size());
+                        i += t_real;
+                    }
+                    return logits_view();
                 }
                 return logits_view();
             }

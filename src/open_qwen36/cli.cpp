@@ -1,5 +1,5 @@
 /// \file cli.cpp
-/// \brief Drive the open Qwen3.6 engine without the FLM app: token ids in,
+/// \brief Drive the open Qwen3.6 engine without the OFLM app: token ids in,
 ///        greedy token ids and logits out. The test surface for core.cpp and
 ///        the way to run the engine on a box where the app itself does not
 ///        build (this one: no Boost / vcpkg / tokenizers-cpp).

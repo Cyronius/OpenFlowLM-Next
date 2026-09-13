@@ -33,7 +33,7 @@ void bounds(const PackOp& op, uint64_t nbytes, size_t dst_bytes) {
 /// a band is 64 rows x in_dim = in_dim/128 chunks; inside its band chunk i covers
 /// row half i%2 and k-tile i/2 (gemv_q4.h's band law); file chunk f covers rows
 /// 32*(f/ncol), cols 256*(f%ncol). Same law as recipes/pack.py (which documents
-/// its equivalence with the form phlegm verified against FLM's captured pools).
+/// its equivalence with the form phlegm verified against OFLM's captured pools).
 std::vector<size_t> std_perm(size_t nch, size_t in_dim) {
     size_t ncol = in_dim / 256, per_band = in_dim / 128;
     std::vector<size_t> perm(nch);
@@ -396,9 +396,13 @@ void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const 
     int32_t valid = static_cast<int32_t>(row - start), nf = static_cast<int32_t>(nf64);
     std::memcpy(r, &valid, 4);
     std::memcpy(r + 4, &nf, 4);
+    // Phi-3's longrope: row `row` takes long_inv_freq once it reaches switch_row (HF's own
+    // seq_len = pos + 1 > original_max_position_embeddings rule, applied per row since this
+    // engine computes one row per token). kSwitchNever means every other family: always inv_freq.
+    const std::vector<double>& freq = (row >= g.switch_row) ? g.long_inv_freq : g.inv_freq;
     for (size_t i = 0; i < half; ++i) {
-        double ang = pos[mrope_axis(i, section, interleaved)] * g.inv_freq[i];
-        float c = static_cast<float>(std::cos(ang)), s = static_cast<float>(std::sin(ang));
+        double ang = pos[mrope_axis(i, section, interleaved)] * freq[i];
+        float c = static_cast<float>(g.scale * std::cos(ang)), s = static_cast<float>(g.scale * std::sin(ang));
         std::memcpy(r + 512 + 4 * i, &c, 4);
         std::memcpy(r + 512 + 4 * half + 4 * i, &s, 4);
     }

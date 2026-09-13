@@ -2,12 +2,16 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file streaming_ostream.hpp
  * \brief Custom ostream for streaming
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-06-24
  *  \version 0.9.24
  */
 #pragma once
 
+// finish_reason is OpenAI's vocabulary, not the engine's: a streamed
+// cancellation used to go out as "cancel", which is not a value the
+// OpenAI schema has.
+#include "server/openai_compat.hpp"
 #include <ostream>
 #include <streambuf>
 #include <functional>
@@ -202,7 +206,7 @@ private:
             {"model", model_name},
             {"choices", json::array({
                 {
-                    {"finish_reason", stop_reason_to_string(meta_info.stop_reason)},
+                    {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)},
                 }
             })},
             {"usage", {
@@ -437,9 +441,9 @@ private:
                     }
                 })}
             };
-            header_print("FLM", "Tool name: " + result.tool_name);
-            header_print("FLM", "Tool args: " + result.tool_args_str);
-            header_print("FLM", "Tool JSON: " + delta["tool_calls"][0]["function"].dump());
+            header_print("OFLM", "Tool name: " + result.tool_name);
+            header_print("OFLM", "Tool args: " + result.tool_args_str);
+            header_print("OFLM", "Tool JSON: " + delta["tool_calls"][0]["function"].dump());
         }
         else if (result.type == StreamEventType::REASONING) {
             delta = {
@@ -488,7 +492,7 @@ private:
                     {"content", nullptr}
                 }},
                     //{"logprobs", nullptr},
-                    {"finish_reason", stop_reason_to_string(meta_info.stop_reason)}
+                    {"finish_reason", openai_compat::finish_reason(meta_info.stop_reason)}
                 }
             })},
             {"usage", {

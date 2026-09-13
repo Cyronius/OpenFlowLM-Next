@@ -1,6 +1,6 @@
 /// \file nanbeige.cpp
 /// \brief nanbeige class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-09-04
 /// \version 0.9.24
 /// \note This is a source file for the nanbeige class
@@ -8,19 +8,27 @@
 #include "AutoModel/modeling_nanbeige.hpp"
 
 /************              Nanbeige family            **************/
-Nanbeige::Nanbeige(flm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Nanbeige") {}
+Nanbeige::Nanbeige(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "Nanbeige") {}
 
 void Nanbeige::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
     
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    // model_type == nanbeige
-    this->lm_engine = std::make_unique<nanbeige_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+    // The engine: the open kernels when installed for this model, the closed
+    // DLL otherwise (AutoModel::_shared_select_open_engine).
+    auto open_engine = this->_shared_select_open_engine("OFLM_LLAMA_ENGINE", "Nanbeige");
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+    }
+    else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        // model_type == nanbeige
+        this->lm_engine = std::make_unique<nanbeige_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
 
-    this->lm_engine->load_weights(*this->q4nx);
+        this->lm_engine->load_weights(*this->q4nx);
 
-    //free the q4nx
-    this->q4nx.reset();
+        //free the q4nx
+        this->q4nx.reset();
+    }
     
     this->lm_engine->clear_context();
     this->setup_tokenizer(model_path);
@@ -88,10 +96,9 @@ bool Nanbeige::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, st
 
     // hardware
     int restore_idx = -1;
-    nanbeige_npu *nanbeige_engine = dynamic_cast<nanbeige_npu*>(this->lm_engine.get());
-
+    // through the causal_lm interface, so the open engine works here too
     if (meta_info.restore_allowed) {
-        restore_idx = nanbeige_engine->restore();
+        restore_idx = this->lm_engine->restore();
         this->total_tokens = restore_idx;
         this->token_history = checkpoint_his; // restore the token history to be consistent with the restored KV cache, which is crucial for correct functioning of _shared_insert's prefix-matching logic
     }
@@ -99,7 +106,7 @@ bool Nanbeige::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, st
     bool success = this->_shared_insert(meta_info, tokens, is_cancelled, nullptr);
 
     checkpoint_his = token_history;
-    int checkpoint_idx = nanbeige_engine->checkpoint();
+    int checkpoint_idx = this->lm_engine->checkpoint();
 
     return success;
 }
@@ -180,7 +187,7 @@ std::string Nanbeige::generate(chat_meta_info_t& meta_info, int length_limit, st
         header_print("WARNING", "Max length reached, stopping generation...");
     }
     std::cout << std::endl;
-    header_print("FLM", "Model RAW Output: \n" + result);
+    header_print("OFLM", "Model RAW Output: \n" + result);
     return result;
 }
 

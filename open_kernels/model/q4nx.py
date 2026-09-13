@@ -1,4 +1,4 @@
-"""Read FLM's `.q4nx` weight container (format 1.0.2: q4_1 chunks).
+"""Read OFLM's `.q4nx` weight container (format 1.0.2: q4_1 chunks).
 
 The container is a safetensors file: an 8-byte header length, a JSON header of
 tensor name -> {dtype, shape, data_offsets}, then the data. BF16/F32 tensors are
@@ -18,7 +18,7 @@ The chunk format is PER TENSOR. The stock Qwen3.6-35B keeps only its lm_head at
 q8; its fine-tunes (Darwin, Grug, BigBang, Aquila-mini, Ornith 1.5, and
 Atomic-Germ's own NPU2 mirror) pack attention, linear-attention and shared-expert
 projections at q8 and only the routed experts at q4_1; Qwen3.5 dense containers
-store `ssm_out_proj` and alpha / beta at q8; a container written by FLM 1.0.3+
+store `ssm_out_proj` and alpha / beta at q8; a container written by OFLM 1.0.3+
 holds Q4_K (4736 B, `dq_chunks_q4_k`). So nothing is refused at open: each tensor
 is classified from its own shape, and `dq_tile` reads all three. A chunk size that
 is none of them is refused when that tensor is read, naming it (1280 / 2560 are a
@@ -124,7 +124,7 @@ def dq_chunks_q8(chunks):
 def dq_chunks_q4_k(chunks):
     """[n, 4736] raw Q4_K chunk bytes -> [n, 32, 8, 32] f32 (row, block, lane).
 
-    The container's own values, with no bf16 collapse: `q4k_block_t` from the FLM 1.0.3
+    The container's own values, with no bf16 collapse: `q4k_block_t` from the OFLM 1.0.3
     decoding kernels holds the same 32-row x 256-K tile a q4_1 chunk does, with a uint8
     scale and a uint8 min per (32-column group, row) -- index `g*32 + r`, the q4_1 index --
     against one bf16 pair `(S, M)` per row, `M` already negated:
@@ -197,6 +197,23 @@ class Q4NX:
         return np.frombuffer(self.raw(name), dtype=np.float32).reshape(t["shape"])
 
     def embed(self, token, hidden=2048):
+        # A token id past the end of the table, or a `hidden` that disagrees
+        # with the table's own row width, used to read whatever bytes follow
+        # the tensor in the container -- silently, returning plausible garbage
+        # rather than an error. Raise rather than assert: an assert disappears
+        # under `python -O` / PYTHONOPTIMIZE, which is exactly when a silent
+        # out-of-bounds read is least welcome.
+        vocab_size, row = self.tensors["model.embed_tokens.weight"]["shape"]
+        if not 0 <= token < vocab_size:
+            raise IndexError(
+                f"Q4NX.embed: token {token} is out of range for a {vocab_size}-row "
+                f"embedding table (model.embed_tokens.weight) -- valid ids are "
+                f"0..{vocab_size - 1}")
+        if hidden != row:
+            raise ValueError(
+                f"Q4NX.embed: hidden={hidden} does not match the embedding "
+                f"table's row width {row}; the row stride would be wrong and "
+                f"every token would read the wrong bytes")
         o0 = self.tensors["model.embed_tokens.weight"]["data_offsets"][0]
         b = self.data_base + o0 + token * hidden * 2
         return bf16_to_f32(np.frombuffer(self.mm[b: b + hidden * 2], dtype=np.uint16)).astype(np.float64)

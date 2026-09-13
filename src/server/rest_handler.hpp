@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
  * \file rest_handler.hpp
  * \brief RestHandler class and related declarations
- * \author FastFlowLM Team
+ * \author OpenFlowLM Team
  * \date 2025-06-24
  *  \version 0.9.24
  */
@@ -32,6 +32,7 @@ struct CancellationToken;
 ///@brief Stream callback type for sending streaming responses
 using StreamResponseCallback = std::function<void(const json&, bool)>; // data, is_final
 
+#include "server/openai_compat.hpp"
 class RestHandler {
 public:
     RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args);
@@ -108,11 +109,16 @@ public:
         std::shared_ptr<CancellationToken> cancellation_token = nullptr);
 
 private:
-    bool ensure_model_loaded(const std::string& model_tag);
+    using ModelLoad = openai_compat::ModelLoad;
+    /// \param model_field_present the request carried a "model" key. Without it an
+    ///        omitted field and an explicit "" are the same string -- see
+    ///        openai_compat::preflight().
+    ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
     void configure_chat_engine_parameters(const json& options, const json& request);
-    json build_nstream_response(std::string response_text);
+    json build_nstream_response(std::string response_text,
+                                stop_reason_t stop_reason = EOT_DETECTED);
 
 
     std::unique_ptr<AutoModel> auto_chat_engine;
@@ -120,7 +126,7 @@ private:
     std::unique_ptr<Whisper> whisper_engine;
     std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine;
 #endif
-    flm_rt::device npu_device_inst;
+    oflm_rt::device npu_device_inst;
     model_list& supported_models;
     ModelDownloader& downloader;
     std::string current_model_tag;

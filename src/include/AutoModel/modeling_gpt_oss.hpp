@@ -1,6 +1,6 @@
 /// \file modeling_gpt_oss.hpp
 /// \brief modeling_gpt_oss class
-/// \author FastFlowLM Team
+/// \author OpenFlowLM Team
 /// \date 2025-10-01
 /// \version 0.9.24
 /// \note This is a source file for the gpt-oss class
@@ -11,9 +11,8 @@
 class GPT_OSS : public AutoModel {
 private:
 
-    bool enable_think = true;
-
     std::string reasoning_effort = "low";
+    std::string default_reasoning_effort = "low";
     std::string model_identity = "You are ChatGPT, a large language model trained by OpenAI.";
     std::string role = "developer";
 
@@ -33,7 +32,7 @@ private:
         accumulated_text.clear();
     }
 public:
-    GPT_OSS(flm_rt::device* npu_device_inst);
+    GPT_OSS(oflm_rt::device* npu_device_inst);
 
     void load_model(std::string model_path, json model_info, int default_context_length = -1, bool enable_preemption = false) override;
     std::string apply_chat_template(nlohmann::ordered_json& messages, nlohmann::ordered_json tools = nlohmann::ordered_json::object()) override;
@@ -49,6 +48,17 @@ public:
     StreamResult parse_stream_content(const std::string content);
     chat_template_type_t get_chat_template_type() {
         return chat_template_type_t::harmony;
+    }
+
+    // apply_chat_template reads reasoning_effort directly, so the base reset of
+    // extra_context is not enough to keep one request's effort out of the next
+    void snapshot_request_defaults() override {
+        AutoModel::snapshot_request_defaults();
+        default_reasoning_effort = reasoning_effort;
+    }
+    void reset_request_defaults() override {
+        AutoModel::reset_request_defaults();
+        reasoning_effort = default_reasoning_effort;
     }
 
     /// \brief Override configure_parameter to handle GPT-oss-specific parameters
