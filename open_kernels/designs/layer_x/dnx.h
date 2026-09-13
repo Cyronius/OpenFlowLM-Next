@@ -194,19 +194,20 @@ static inline void dnx_slice_update(float *__restrict S, float *__restrict ds, u
   const bfloat16 *__restrict ql_r = q_hl + kPad + blk * kRowsX;
   // Two chains, not four: four column vectors in flight would hide more of the recurrence but
   // cost ~580 B more code, and the main core has ~370 B of program memory left.
+  // S' and o go in two passes over the same rows rather than one. Together they keep more
+  // accumulators live than the core has, and the single loop spilled four of them to stack and
+  // back every row - half its bundles. S' is in L1 by the second pass, so re-reading it is
+  // cheaper than the spills were.
 #pragma clang loop unroll(disable)
   for (unsigned jv = 0; jv < kHalf; jv += kV) {
     const unsigned ja = jv, jb = kHalf + jv;               // the same column vector in each half
     const vb deha = aie::load_v<kV>(delta_hl + ja), dela = aie::load_v<kV>(delta_hl + kD + ja);
     const vb dehb = aie::load_v<kV>(delta_hl + jb), delb = aie::load_v<kV>(delta_hl + kD + jb);
-    accf16 oa, ob;
-    oa.from_vector(aie::load_v<kV>(o + ja));
-    ob.from_vector(aie::load_v<kV>(o + jb));
     float *__restrict Sa = S + ja;
     float *__restrict Sb = S + jb;
 #pragma clang loop min_iteration_count(DNX_ROWS)
     for (unsigned i = 0; i < kRowsX; ++i) {
-      const bfloat16 kh = kh_r[i], kl = kl_r[i], qh = qh_r[i], ql = ql_r[i];
+      const bfloat16 kh = kh_r[i], kl = kl_r[i];
       accf16 sa = aie::zeros<accfloat, kV>();
       sa = mac_split(sa, aie::load_v<kV>(Sa), dh, dl);
       sa = aie::mac(sa, deha, kh);
@@ -217,14 +218,22 @@ static inline void dnx_slice_update(float *__restrict S, float *__restrict ds, u
       sb = aie::mac(sb, dehb, kh);
       sb = aie::mac(sb, dehb, kl);
       sb = aie::mac(sb, delb, kh);
-      const vf sna = sa.template to_vector<float>();
-      const vf snb = sb.template to_vector<float>();
-      aie::store_v(Sa, sna);
-      aie::store_v(Sb, snb);
-      oa = mac_split(oa, sna, qh, ql);
-      ob = mac_split(ob, snb, qh, ql);
+      aie::store_v(Sa, sa.template to_vector<float>());
+      aie::store_v(Sb, sb.template to_vector<float>());
       Sa += kD;
       Sb += kD;
+    }
+    accf16 oa, ob;
+    oa.from_vector(aie::load_v<kV>(o + ja));
+    ob.from_vector(aie::load_v<kV>(o + jb));
+    const float *__restrict Ra = S + ja;
+    const float *__restrict Rb = S + jb;
+#pragma clang loop min_iteration_count(DNX_ROWS)
+    for (unsigned i = 0; i < kRowsX; ++i) {
+      oa = mac_split(oa, aie::load_v<kV>(Ra), qh_r[i], ql_r[i]);
+      ob = mac_split(ob, aie::load_v<kV>(Rb), qh_r[i], ql_r[i]);
+      Ra += kD;
+      Rb += kD;
     }
     aie::store_v(o + ja, oa.template to_vector<float>());
     aie::store_v(o + jb, ob.template to_vector<float>());
