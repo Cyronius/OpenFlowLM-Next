@@ -81,7 +81,11 @@ else:
 # GEMM_Q4K re-expresses the same weights with 6-bit sub-scales, so its
 # reference is make_q4k.py's exact product, not gemv_q4's.
 ref_file = HERE / "ref_q4k.bin" if q4k else GEMV / "ref_qkv.bin"
-ref = np.fromfile(ref_file, np.float32).astype(np.float64)[:N]
+# make_test.py --n / --k build bigger shapes by repeating the verified block:
+# bands repeat the reference, k-tiles scale it (the sixth layout field).
+kx = int(fields[5]) if len(fields) > 5 else 1
+ref = np.fromfile(ref_file, np.float32).astype(np.float64)
+ref = (ref[:N] if N <= ref.size else np.tile(ref, N // ref.size)) * kx
 
 ok = True
 for i in range(m):

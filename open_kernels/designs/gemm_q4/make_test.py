@@ -12,6 +12,12 @@ band-major, so the first N/64 bands are output rows 0..N-1 and the reference is
 just ref_qkv.bin truncated. That is how the output-tiled shapes are tested - a
 core owning fewer bands is what lets M grow.
 
+Larger shapes are built from the same verified block. `--n` above 8192 (a multiple
+of it) repeats the bands, so the reference is ref_qkv.bin repeated. `--k` above
+2048 (a multiple of it) repeats each band's eight k-tiles and the activation
+alongside them, so the reference is ref_qkv.bin times K/2048. Neither needs a new
+capture, and the check stays exact.
+
 Writes x_m<M>.bin and run_m<M>.cfg next to this file; check with check.py <M>.
 """
 from __future__ import annotations
@@ -24,12 +30,13 @@ import numpy as np
 HERE = Path(__file__).parent
 GEMV = HERE.parent / "gemv_q4"
 
-K = 2048
-RS, KT = 2, 8                 # row split, k-tiles per band (K = 2048)
+RS = 2                        # row split
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--m", type=int, default=4)
 ap.add_argument("--n", type=int, default=8192, help="output rows (GEMM_N)")
+ap.add_argument("--k", type=int, default=2048,
+                help="inner width (GEMM_K), a multiple of 2048: the fixture's k-tiles repeat")
 ap.add_argument("--build", default=None)
 ap.add_argument("--cores", type=int, default=8)
 ap.add_argument("--blocked", action="store_true",
@@ -47,7 +54,12 @@ if a.preq:
     a.q4k = True
     a.blocked = True
 
-N = a.n
+N, K = a.n, a.k
+assert K % 2048 == 0, f"--k must be a multiple of 2048, got {K}"
+assert N <= 8192 or N % 8192 == 0, f"--n above 8192 must be a multiple of it, got {N}"
+KX = K // 2048                # how many times the fixture's k-tiles repeat
+KT = K // 256                 # k-tiles per band
+assert not (a.preq and KX > 1), "prep_host.py builds the K = 2048 table only"
 TILE = 4736 if a.q4k else 5120          # bytes per 32x256 chunk
 W_BYTES = N * K * TILE // 8192
 build = a.build or f"build_pc2_m{a.m}"
@@ -59,8 +71,8 @@ if a.preq:
     x_name = x_path.name
 else:
     x1 = np.fromfile(GEMV / "x_qkv.bin", np.uint8)
-    assert x1.size == 2 * K, f"expected {2*K} bytes of bf16 activation, got {x1.size}"
-    np.tile(x1, a.m).tofile(HERE / f"x_m{a.m}.bin")
+    assert x1.size == 2 * 2048, f"expected {2*2048} bytes of bf16 activation, got {x1.size}"
+    np.tile(np.tile(x1, KX), a.m).tofile(HERE / f"x_m{a.m}.bin")
     x_bytes = 2 * K * a.m
     x_name = f"x_m{a.m}.bin"
 
@@ -76,9 +88,14 @@ x_file = x_name
 # column's L2 object is exactly that.
 src = HERE / "w_q4k_pool.bin" if a.q4k else GEMV / "w_qkv.bin"
 w_file = "w_q4k_pool.bin" if a.q4k else "../gemv_q4/w_qkv.bin"
-if a.blocked or a.cores > 8 or N != 8192:
+if a.blocked or a.cores > 8 or N != 8192 or K != 2048:
     bpc = (N // 64) // a.cores                      # bands per core
-    w = np.fromfile(src, np.uint8)[:W_BYTES]
+    # The verified block is [128 bands][8 k-tiles][RS][TILE]. Repeating bands
+    # (N) and k-tiles (K) keeps every chunk a real one.
+    base = np.fromfile(src, np.uint8)[:8192 * 2048 * TILE // 8192]
+    base = base.reshape(128, 8, RS, TILE)
+    base = base[:N // 64] if N <= 8192 else np.tile(base, (N // 8192, 1, 1, 1))
+    w = np.tile(base, (1, KX, 1, 1)).reshape(-1)
     assert w.size == W_BYTES, (w.size, W_BYTES)
     bpt = a.bpt or bpc                              # bands per output tile
     assert bpc % bpt == 0, (bpc, bpt)
@@ -99,6 +116,8 @@ if a.blocked or a.cores > 8 or N != 8192:
         tag += f"p{a.per_call}"
     if N != 8192:
         tag += f"n{N}"
+    if K != 2048:
+        tag += f"k{K}"
     name = f"w_{tag}.bin"
     np.ascontiguousarray(g).reshape(-1).tofile(HERE / name)
     w_file = name
@@ -119,8 +138,8 @@ mode = "blocked" if a.blocked else "naive"
 (HERE / f"run_m{a.m}.cfg").write_text(cfg, encoding="utf-8", newline="\n")
 (HERE / f"layout_m{a.m}.txt").write_text(
     f"{a.cores} {mode} {N} {a.bpt or (N // 64) // a.cores} "
-    f"{'q4k' if a.q4k else 'q41'}", encoding="utf-8")
+    f"{'q4k' if a.q4k else 'q41'} {KX}", encoding="utf-8")
 print(f"wrote {x_file} ({x_bytes} B) and run_m{a.m}.cfg -> {build}"
-      f"  [N={N}, {a.cores} cores, {mode}{', preq' if a.preq else ''}]")
+      f"  [N={N}, K={K}, {a.cores} cores, {mode}{', preq' if a.preq else ''}]")
 print(f"run:   (cd designs/gemm_q4 && run_kernel run_m{a.m}.cfg "
       f"&& python check.py {a.m})")
