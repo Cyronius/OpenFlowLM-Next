@@ -34,10 +34,13 @@ import subprocess
 import sys
 import time
 
-from common import EVAL_DIR, GGUF_ROOT, MODELS, RESULTS_ROOT
+from common import EVAL_DIR, EVAL_SET, GGUF_ROOT, MODELS, RESULTS_ROOT
 
 QUANTS = ('Q8_0', 'Q4_1')
 GREEDY = ['--temperature', '0']
+# 2048 holds the longest prompt (~340) plus the largest budget (768); the driver's own default
+# (8192) sizes llama.cpp's buffers for 8K and decodes markedly slower on the iGPU.
+DRIVER_DEFAULTS = ['--ctx', '2048']
 
 SETTINGS = {
     'wedlm': [(f'w{w}_tau{t}', ['--window', str(w), '--tau', str(t)])
@@ -80,7 +83,7 @@ def driver_cmd(args, model, quant, knobs, prompts, part, run_dir):
            '--out', part]
     if args.trace:
         cmd += ['--trace', os.path.join(run_dir, 'trace')]
-    return cmd + knobs + GREEDY + args.driver_arg
+    return cmd + knobs + GREEDY + DRIVER_DEFAULTS + args.driver_arg
 
 
 def score_cmd(model, results, out_dir, extra=()):
@@ -133,6 +136,10 @@ def main():
     ap.add_argument('--rescore', action='store_true',
                     help='re-score every existing output (e.g. after installing lm_eval)')
     ap.add_argument('--dry-run', action='store_true', help='print the commands only')
+    ap.add_argument('--settings', nargs='+', default=None,
+                    help='run only these setting names (e.g. w6_tau0.4 tau0.9 default ar)')
+    ap.add_argument('--set', default=EVAL_SET,
+                    help='the eval set to tokenise (eval_set_core.jsonl: the 60-item first pass)')
     args = ap.parse_args()
     dry, root = args.dry_run, args.results_root
     if not dry and not os.path.exists(args.exe):
@@ -149,10 +156,12 @@ def main():
             print(f'  prompts: {prompts} (exists)')
         else:
             run([sys.executable, os.path.join(EVAL_DIR, 'tokenize_set.py'), '--model', model,
-                 '--out', prompts], dry)
+                 '--out', prompts, '--set', args.set], dry)
 
         for quant in args.quants:
             for setting, knobs in SETTINGS[model]:
+                if args.settings and setting not in args.settings:
+                    continue
                 run_dir = os.path.join(model_dir, quant, setting)
                 out = os.path.join(run_dir, 'out.jsonl')
                 print(f'-- {model} {quant} {setting}', flush=True)

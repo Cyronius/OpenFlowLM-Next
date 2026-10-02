@@ -830,8 +830,18 @@ def load_model(kind: str, hf: Path, cfg: dict, dtype_name: str, attn: str, notes
     print(f"loading {cls.__name__} from {hf} ({dtype_name}, attn {attn}; transformers {transformers.__version__}, "
           f"torch {torch.__version__}, {torch.get_num_threads()} threads) ...", flush=True)
     t0 = time.time()
+    # transformers 5.x no longer gives every config a pad_token_id; SDAR's model reads it
+    # (modeling_sdar.py:442) and it only sets the embedding's padding_idx, which inference never
+    # touches. Passing it keeps that attribute present for every model.
+    extra = {}
+    if "pad_token_id" not in cfg:
+        config = transformers.AutoConfig.from_pretrained(str(hf), trust_remote_code=True, local_files_only=True)
+        if not hasattr(config, "pad_token_id"):
+            config.pad_token_id = None
+            notes.append("config.json has no pad_token_id and 5.x gives no default: set it to None")
+        extra["config"] = config
     model, info = cls.from_pretrained(str(hf), dtype=dtype, attn_implementation=attn, trust_remote_code=True,
-                                      output_loading_info=True, local_files_only=True)
+                                      output_loading_info=True, local_files_only=True, **extra)
     model.eval()
     print(f"loaded in {time.time() - t0:.0f} s", flush=True)
 
