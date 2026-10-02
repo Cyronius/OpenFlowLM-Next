@@ -1,0 +1,95 @@
+# Plan: diffusion language models on the open engine
+
+**Status:** in progress (branch `feat/dllm`). Design detail and measurements live in the
+worktree's `.claude/plans/diffusion-lm-support.md` and `dflash-verify-pass-probe.md`.
+
+Three diffusion LMs, each a decode policy over passes of several token rows:
+- **WeDLM-8B-Instruct:** Qwen3-8B shape; causal attention over reordered rows.
+- **SDAR-8B-Chat-b16:** Qwen3-8B shape; 16-token blocks with in-block bidirectional
+  attention.
+- **LLaDA2.2-mini:** a 16B MoE; 32-token blocks, block routing, DELETE/INSERT edits.
+
+The policies are engine-independent (`src/open_dllm/`). The llama.cpp reference driver
+(`utilities/dllm-ref/`) runs them first; the open engine runs them later.
+
+## New requirements
+
+### OPEN-DLLM-WEDLM: the WeDLM decode policy reproduces the reference's passes
+**Applies to:** openflowlm-next (`src/open_dllm/policy_wedlm.cpp`)
+**Test category:** test (`src/open_dllm/wedlm_test.cpp`; fixture
+`specs/open-engine/tests/fixtures/dllm_wedlm.json`, recorded by
+`utilities/dllm-ref/ref_wedlm.py` from tencent/WeDLM's own engine code with a scripted model)
+
+Given the same logits, `make_wedlm` issues the same passes as WeDLM's streaming decoder:
+- **Prefill:** one causal pass over the prompt, no logits.
+- **Each step's rows:** the W + p rows (p = leading filled slots), filled slots then masks,
+  each at slot ctx + its physical index and RoPE position ctx + its window index.
+- **Fill:** mask rows with entropy + λ·distance < τ, else the first argmin.
+- **Commit:** the p leading slots, one pass later, ending at the first stop id or
+  `max_new_tokens`, inclusive.
+
+**Acceptance criteria:** every recorded pass matches exactly on rows (token, pos, slot),
+attention mode, logit rows, `keep()` and taken tokens, as does the final output. That
+holds across the fixture's 5 scenarios: defaults; one fill per step; a budget hit
+mid-commit; 2W-row passes; exact entropy ties.
+
+### OPEN-DLLM-SDAR: the SDAR decode policy reproduces generate.py's passes
+**Applies to:** openflowlm-next (`src/open_dllm/policy_sdar.cpp`)
+**Test category:** test (`src/open_dllm/sdar_test.cpp`; fixture `dllm_sdar.json`, recorded by
+`utilities/dllm-ref/ref_sdar.py` from JetAstra/SDAR `generate.py`, vendored verbatim)
+
+`make_sdar` issues the same passes as `generate.py`:
+- **Prefill:** one block-attention pass per full prompt block, aligned to absolute
+  position 0.
+- **The prompt's tail** rides in the first decode block.
+- **Denoise passes** are not kept: `keep()` = block start.
+- **Fill:** dynamic low-confidence filling with the per-step minimum, clamped to the masks
+  left.
+- **Commit:** one commit pass per finished block, `keep()` = block end.
+- **Stopping:** after the block holding the first generated stop id, which is taken
+  inclusive.
+
+Greedy is T = 0. That's the published OpenCompass setting, T=1 / `top_k=1` with confidence
+read before the filter, not `generate.py`'s own `top_k=1`.
+
+**Acceptance criteria:** every recorded pass matches exactly across the 10 scenarios.
+These cover dynamic and static modes, aligned and unaligned prompts, the clamp, a stop
+mid-block, budget hits, and an empty prompt.
+
+### OPEN-DLLM-LLADA2: the LLaDA2.2 decode policy reproduces the reference's passes
+**Applies to:** openflowlm-next (`src/open_dllm/policy_llada2.cpp`)
+**Test category:** test (`src/open_dllm/llada2_test.cpp`; fixture `dllm_llada2.json`, recorded
+by `utilities/dllm-ref/ref_llada2.py` running `modeling_llada2_moe.py`'s own decode methods)
+
+`make_llada2` reproduces the reference's per-block loop:
+- mask→token fills by threshold with the spread schedule as the minimum;
+- token→token edits above `editing_threshold`;
+- the final round that re-picks DELETE/INSERT;
+- seen-state resampling;
+- DELETE drops a token and INSERT opens a mask slot, within the block.
+
+A block's K/V is kept only from a pass over its final tokens: the normal exit's no-change
+pass, or one extra commit pass on any other exit.
+
+**Acceptance criteria:** every recorded pass matches exactly across the 16 scenarios. They
+cover threshold and schedule fills, T2T edits, DELETE, INSERT on a token and on a mask, the
+post-step budget, the step budget with leftover masks, sampled paths with a single
+possible outcome, seeded resampling, and block 32 / steps 32.
+
+## Planned requirements (not yet built)
+
+- **OPEN-DLLM-PASS:** the engine's multi-row pass.
+- **OPEN-DLLM-COMMIT:** commit and rewind.
+- **OPEN-DLLM-BLOCK-PREFILL:** block-causal prefill.
+- **OPEN-DLLM-DETECT:** choosing the policy from `model_type`.
+- **OPEN-MOE-BLOCK-ROUTING:** block routing in the MoE.
+- **OPEN-FAMILY-LLADA2MOE:** LLaDA2.2-mini on the open kernels.
+- **OPEN-DLLM-SERVE:** streaming through `oflm serve`.
+
+Their definitions and test categories are in the worktree plan. They are added here before
+their code lands.
+
+## Spec merge
+
+When a requirement's code is done, its section moves into `specs/open-engine/spec.md`, and
+this plan is archived once all of them have moved.
