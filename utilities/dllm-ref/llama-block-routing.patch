@@ -1,0 +1,151 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 5212e19a..05f5a627 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1870,6 +1870,33 @@ ggml_tensor * llm_graph_context::build_ffn(
+     return cur;
+ }
+ 
++const llama_block_routing_params & llama_block_routing_get() {
++    static const llama_block_routing_params params = [] {
++        llama_block_routing_params res;
++
++        const char * env = getenv("LLAMA_BLOCK_ROUTING");
++        if (env == nullptr || env[0] == '\0') {
++            return res;
++        }
++
++        int block = 0;
++        int pool  = 0;
++        if (sscanf(env, "%d:%d", &block, &pool) != 2 || block <= 0 || pool <= 0) {
++            LLAMA_LOG_WARN("llama_block_routing_get: ignoring LLAMA_BLOCK_ROUTING='%s', expected <block>:<pool> with both > 0\n", env);
++            return res;
++        }
++
++        res.block = block;
++        res.pool  = pool;
++
++        LLAMA_LOG_INFO("llama_block_routing_get: LLAMA_BLOCK_ROUTING: block = %d tokens, pool = %d experts\n", block, pool);
++
++        return res;
++    }();
++
++    return params;
++}
++
+ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * cur,
+          ggml_tensor * gate_inp,
+@@ -2002,9 +2029,25 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(selection_probs, "ffn_moe_probs_biased", il);
+     }
+ 
++    // LLAMA_BLOCK_ROUTING=<block>:<pool> (LLaDA2, modeling_llada2_moe.py LLaDA2MoeGate.block_routing): for each run
++    // of <block> consecutive tokens, only the <pool> experts whose biased score, maxed over the block's tokens, is
++    // highest may be selected; each token then takes its top n_expert_used of those. The weights still come from the
++    // unbiased probs below. Applies only when n_tokens is a whole number of blocks; any other ubatch (the n_tokens = 1
++    // reservation graph, a ragged last ubatch) keeps per-token routing. The reference has no group-limited routing,
++    // so it is skipped when block routing applies.
++    const llama_block_routing_params & block_routing = llama_block_routing_get();
++    const bool use_block_routing =
++        block_routing.block > 0 &&
++        arch == LLM_ARCH_BAILINGMOE2 &&
++        gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID &&
++        exp_probs_b != nullptr &&
++        selected_experts_in == nullptr &&
++        n_tokens > 0 && n_tokens % block_routing.block == 0 &&
++        block_routing.pool >= n_expert_used && block_routing.pool < n_expert;
++
+     // select top n_group_used expert groups
+     // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
+-    if (hparams.n_expert_groups > 1 && n_tokens > 0) {
++    if (hparams.n_expert_groups > 1 && n_tokens > 0 && !use_block_routing) {
+         const int64_t n_exp_per_group = n_expert / hparams.n_expert_groups;
+ 
+         // organize experts into n_expert_groups
+@@ -2027,6 +2070,30 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(selection_probs, "ffn_moe_probs_masked", il);
+     }
+ 
++    if (use_block_routing) {
++        const int64_t n_block  = block_routing.block;
++        const int64_t n_blocks = n_tokens / n_block;
++
++        ggml_tensor * block_scores = ggml_reshape_3d(ctx0, selection_probs, n_expert, n_block, n_blocks); // [n_expert, n_block, n_blocks]
++
++        // max over each block's tokens: put the tokens in dim 0, then one max-pool window over the whole row
++        ggml_tensor * block_max = ggml_cont(ctx0, ggml_transpose(ctx0, block_scores)); // [n_block, n_expert, n_blocks]
++        block_max = ggml_pool_1d(ctx0, block_max, GGML_OP_POOL_MAX, block_routing.block, block_routing.block, 0); // [1, n_expert, n_blocks]
++        cb(block_max, "ffn_moe_block_max", il);
++
++        ggml_tensor * block_pool = ggml_argsort_top_k(ctx0, ggml_reshape_2d(ctx0, block_max, n_expert, n_blocks), block_routing.pool); // [pool, n_blocks]
++        cb(block_pool, "ffn_moe_block_pool", il);
++
++        // 0 for the block's pool, -INF for every other expert
++        ggml_tensor * block_keep = ggml_fill(ctx0, ggml_get_rows(ctx0, block_max, block_pool), 0.0f); // [1, pool, n_blocks]
++        ggml_tensor * block_mask = ggml_set_rows(ctx0, ggml_fill(ctx0, block_max, -INFINITY), block_keep, block_pool); // [1, n_expert, n_blocks]
++        block_mask = ggml_reshape_3d(ctx0, block_mask, n_expert, 1, n_blocks); // [n_expert, 1, n_blocks]
++
++        selection_probs = ggml_add(ctx0, block_scores, block_mask); // broadcast over the block's tokens
++        selection_probs = ggml_reshape_2d(ctx0, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
++        cb(selection_probs, "ffn_moe_probs_block", il);
++    }
++
+     // select experts
+     ggml_tensor * selected_experts = selected_experts_in;
+     if (selected_experts == nullptr) {
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 94324c74..464a3296 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -947,6 +947,15 @@ struct llm_graph_qkv {
+     ggml_tensor * v; // [n_embd_head, n_head_kv, n_tokens]
+ };
+ 
++// env: LLAMA_BLOCK_ROUTING=<block>:<pool> -- block-level expert routing (LLaDA2), see build_moe_ffn
++struct llama_block_routing_params {
++    int32_t block = 0; // tokens per routing block; 0 = off (unset or malformed)
++    int32_t pool  = 0; // experts a block may use
++};
++
++// parsed once
++const llama_block_routing_params & llama_block_routing_get();
++
+ struct llm_graph_context {
+     const llm_arch arch;
+ 
+diff --git a/src/models/bailingmoe2.cpp b/src/models/bailingmoe2.cpp
+index 5000e9c6..1ad6123b 100644
+--- a/src/models/bailingmoe2.cpp
++++ b/src/models/bailingmoe2.cpp
+@@ -108,6 +108,10 @@ llama_model_bailingmoe2::graph::graph(const llama_model & model, const llm_graph
+ 
+     ggml_tensor * inp_out_ids = build_inp_out_ids();
+ 
++    // LLAMA_BLOCK_ROUTING: a token's experts depend on every token of its block, so the last layer
++    // keeps all rows through its MoE and drops the non-output rows after it
++    const bool out_ids_after_ffn = llama_block_routing_get().block > 0;
++
+     for (int il = 0; il < n_layer; ++il) {
+         ggml_tensor * inpSA = inpL;
+ 
+@@ -141,7 +145,7 @@ llama_model_bailingmoe2::graph::graph(const llama_model & model, const llm_graph
+                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+         }
+ 
+-        if (il == n_layer - 1 && inp_out_ids) {
++        if (il == n_layer - 1 && inp_out_ids && !out_ids_after_ffn) {
+             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
+             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
+         }
+@@ -190,6 +194,10 @@ llama_model_bailingmoe2::graph::graph(const llama_model & model, const llm_graph
+ 
+         cur = ggml_add(ctx0, cur, sa_out);
+ 
++        if (il == n_layer - 1 && inp_out_ids && out_ids_after_ffn) {
++            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++        }
++
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+ 
