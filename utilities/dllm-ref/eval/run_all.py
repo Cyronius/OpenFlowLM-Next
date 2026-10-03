@@ -44,7 +44,8 @@ DRIVER_DEFAULTS = ['--ctx', '2048']
 
 SETTINGS = {
     'wedlm': [(f'w{w}_tau{t}', ['--window', str(w), '--tau', str(t)])
-              for w in (4, 6) for t in (0.4, 0.6)],
+              for w in (4, 6) for t in (0.4, 0.6)]
+             + [('w16_tau0.4', ['--window', '16', '--tau', '0.4'])],
     'sdar': [(f'tau{t}', ['--tau', str(t)]) for t in (0.9, 0.95)],
     'llada2': [('default', [])],
     'qwen3': [('ar', [])],
