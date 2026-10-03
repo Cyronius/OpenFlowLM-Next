@@ -208,7 +208,36 @@ for _m in ("socket", "urllib", "http", "multiprocessing", "ctypes", "ipdb", "job
 del _b, _os, _sh, _sp, _sys, _n, _m
 '''
 
-_FENCE = re.compile(r'```[ \t]*([A-Za-z0-9_+.-]*)[^\n]*\n(.*?)(?:```|\Z)', re.S)
+_FENCE_LINE = re.compile(r'^\s*```[ \t]*([A-Za-z0-9_+.-]*)[^\n]*$')
+
+
+def _fenced_blocks(response):
+    """(lang, body) of each fenced block, read line by line. A fence line that directly follows
+    another fence line (blank lines aside) is the same fence repeated and neither opens nor
+    closes anything: models double their fences -- Qwen3-8B writes "```python" twice and
+    "```" twice when the prompt itself is fenced -- and pairing them naively yields an empty
+    block, then code mixed with fences and the prose after it. An unclosed last block runs to
+    the end of the response."""
+    blocks, cur, lang, after_fence = [], None, '', False
+    for line in response.split('\n'):
+        m = _FENCE_LINE.match(line)
+        if m:
+            if after_fence:
+                continue
+            after_fence = True
+            if cur is None:
+                cur, lang = [], m.group(1).lower()
+            else:
+                blocks.append((lang, '\n'.join(cur)))
+                cur = None
+            continue
+        if line.strip():
+            after_fence = False
+        if cur is not None:
+            cur.append(line)
+    if cur is not None:
+        blocks.append((lang, '\n'.join(cur)))
+    return blocks
 
 
 def _defines(code, name):
@@ -217,7 +246,7 @@ def _defines(code, name):
 
 def extract_code(response, entry_point):
     """The code the model meant as its answer, or None if there is none."""
-    blocks = [(lang.lower(), body) for lang, body in _FENCE.findall(response)]
+    blocks = _fenced_blocks(response)
     py = [b for lang, b in blocks if lang in ('', 'python', 'py', 'python3')]
     cands = [b for b in (py or [b for _, b in blocks]) if b.strip()]
     if cands:
@@ -531,7 +560,8 @@ def chat_markdown(model, items, runs):
 
 def selftest(items, timeout):
     """Check the harness on known answers: GSM8K golds written in \\boxed{} and in
-    prose, and HumanEval's canonical solutions as a fenced function and as a bare body."""
+    prose, and HumanEval's canonical solutions as a fenced function (also with its fences
+    doubled and prose after it) and as a bare body."""
     bad = []
     for it in items:
         meta = it['meta']
@@ -542,13 +572,16 @@ def selftest(items, timeout):
                     bad.append((it['id'], resp))
         elif it['category'] == 'code':
             fn = f"Here you go:\n```python\n{meta['prompt']}{meta['canonical_solution']}```\nDone."
-            for how, resp in (('function', fn), ('body', meta['canonical_solution'])):
+            # the fences doubled, then an explanation with a quote in it: what Qwen3-8B writes
+            doubled = (f"Here you go:\n\n```python\n```python\n{meta['prompt']}{meta['canonical_solution']}"
+                       f"```\n```\n\n### Explanation:\n- It's the obvious approach, and it works.")
+            for how, resp in (('function', fn), ('function', doubled), ('body', meta['canonical_solution'])):
                 v = score_code(meta, resp, timeout)
                 if not v['passed'] or v['how'] != how:
                     bad.append((it['id'], how, v))
     n_math = sum(it['category'] == 'math' for it in items)
     n_code = sum(it['category'] == 'code' for it in items)
-    print(f'selftest: {n_math} GSM8K x2, {n_code} HumanEval x2: '
+    print(f'selftest: {n_math} GSM8K x2, {n_code} HumanEval x3: '
           + ('all pass' if not bad else f'{len(bad)} FAILURES'))
     for b in bad:
         print('  ', b)
