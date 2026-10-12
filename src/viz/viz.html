@@ -53,9 +53,9 @@ body {
 button { font: inherit; color: inherit; }
 #app {
   display: grid; height: 100vh; gap: 10px; padding: 10px 12px 12px;
-  grid-template-columns: 236px minmax(0, 1fr) 356px;
-  grid-template-rows: auto minmax(360px, 1fr) auto;
-  grid-template-areas: "top top top" "layers stage explain" "tl tl tl";
+  grid-template-columns: minmax(0, 1fr) 356px;
+  grid-template-rows: auto auto minmax(340px, 1fr) auto;
+  grid-template-areas: "top top" "layers layers" "stage explain" "tl tl";
 }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(6px); }
 header.top { grid-area: top; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 4px 4px 2px; }
@@ -80,27 +80,34 @@ h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: .01em; white-
 .icon { background: transparent; border: 1px solid var(--line2); border-radius: 8px; width: 34px; height: 32px; cursor: pointer; color: var(--dim); }
 .icon:hover, .badge:hover, .mode:not(:disabled):hover { filter: brightness(1.25); }
 
-aside.layers { grid-area: layers; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.sec-h { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px 8px; font-size: 10.5px;
+aside.layers { grid-area: layers; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.sec-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 8px 12px 6px; font-size: 10.5px;
   letter-spacing: .18em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); }
 .sec-h span { font-family: var(--mono); letter-spacing: 0; text-transform: none; }
-#layer-list { list-style: none; margin: 0; padding: 6px 6px 10px; overflow-y: auto; flex: 1; scrollbar-width: thin; }
-#layer-list li { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px;
-  cursor: pointer; font-family: var(--mono); font-size: 11.5px; color: var(--dim); position: relative; }
-#layer-list li:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
-#layer-list li .ix { color: var(--faint); text-align: right; }
-#layer-list li .ty { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
-#layer-list li .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
-#layer-list li .pr { display: flex; gap: 3px; }
-#layer-list li .pr i { width: 5px; height: 12px; border-radius: 1.5px; background: var(--line2); }
+#l-legend { display: flex; gap: 4px 14px; flex-wrap: wrap; }
+#l-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+#layer-list { list-style: none; margin: 0; padding: 14px 10px 8px; display: flex; gap: 3px; align-items: stretch; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: thin; position: relative; }
+#layer-list li { flex: 1 1 0; min-width: 24px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 0 6px; border-radius: 6px;
+  cursor: pointer; font-family: var(--mono); font-size: 10.5px; color: var(--dim); position: relative; background: color-mix(in srgb, var(--ink) 4%, transparent); }
+#layer-list li:hover { background: color-mix(in srgb, var(--ink) 11%, transparent); }
+#layer-list li .bar { align-self: stretch; height: 5px; border-radius: 6px 6px 0 0; }
+#layer-list li .ix { color: var(--faint); white-space: nowrap; }
+#layer-list li .pr { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; padding: 0 3px; }
+#layer-list li .pr i { width: 4px; height: 16px; border-radius: 1.5px; background: var(--line2); }
 #layer-list li.done { color: var(--faint); }
+#layer-list li.done .bar { opacity: .4; }
 #layer-list li.done .pr i { background: color-mix(in srgb, var(--dim) 45%, transparent); }
-#layer-list li.cur { color: var(--ink); background: color-mix(in srgb, var(--act) 12%, transparent); }
-#layer-list li.cur::before { content: ""; position: absolute; left: -6px; top: 3px; bottom: 3px; width: 3px; border-radius: 2px; background: var(--act);
-  box-shadow: 0 0 10px var(--act); }
+#layer-list li.cur { color: var(--ink); background: color-mix(in srgb, var(--act) 14%, transparent); outline: 1px solid color-mix(in srgb, var(--act) 60%, transparent); }
+#layer-list li.cur .ix { color: var(--ink); }
+#layer-list li.cur::before { content: ""; position: absolute; top: -9px; left: 50%; margin-left: -5px; border: 5px solid transparent; border-top-color: var(--act);
+  border-bottom: 0; filter: drop-shadow(0 0 4px var(--act)); }
 #layer-list li .pr i.on { background: var(--act); box-shadow: 0 0 6px var(--act); }
-#layer-list li.sep { display: block; cursor: default; padding-top: 8px; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); font-family: var(--display); }
-#layer-list li.sep:hover { background: none; }
+#layer-list li.tail { flex: 0 0 62px; text-align: center; }
+#layer-list li.tail .ix { white-space: normal; padding: 0 3px; line-height: 1.15; }
+#layer-list li.cap { flex: 0 0 22px; cursor: default; justify-content: center; padding: 0; background: none; }
+#layer-list li.cap span { writing-mode: vertical-rl; transform: rotate(180deg); font-family: var(--display); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); }
+#layer-list li.cap:hover { background: none; }
 
 main.stage { grid-area: stage; position: relative; min-height: 0; overflow: hidden; }
 main.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -163,17 +170,15 @@ input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border: 0; bord
 :focus-visible { outline: 2px solid var(--act); outline-offset: 2px; }
 
 @media (max-width: 1180px) {
-  #app { height: auto; grid-template-columns: 200px minmax(0, 1fr); grid-template-rows: auto 560px auto auto;
-    grid-template-areas: "top top" "layers stage" "tl tl" "explain explain"; }
-  aside.layers { max-height: 560px; }
+  #app { height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 560px auto auto;
+    grid-template-areas: "top" "layers" "stage" "tl" "explain"; }
 }
 @media (max-width: 760px) {
   header.top { flex-direction: column; align-items: stretch; gap: 10px; }
   .chips { flex: none; }
   .modes, .badge { align-self: flex-start; }
-  #app { padding: 8px 16px; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 520px auto auto auto;
-    grid-template-areas: "top" "stage" "tl" "explain" "layers"; }
-  aside.layers { max-height: 320px; }
+  #app { padding: 8px 16px; grid-template-rows: auto auto 520px auto auto; }
+  #layer-list li { flex: 0 0 28px; }
   .speed { margin-left: 0; }
   .speed output { min-width: 0; }
   input[type=range] { width: 120px; }
@@ -196,7 +201,7 @@ input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border: 0; bord
   </header>
 
   <aside class="layers panel" aria-label="Layers">
-    <div class="sec-h">Model <span id="l-count"></span></div>
+    <div class="sec-h">Model <div id="l-legend"></div><span id="l-count"></span></div>
     <ol id="layer-list"></ol>
   </aside>
 
@@ -408,16 +413,15 @@ function header() {
 function buildLayers() {
   const ol = $('#layer-list');
   const items = [];
-  items.push(`<li class="sep">host · embed</li>`);
+  items.push(`<li class="cap"><span>host · embed</span></li>`);
   V.layers.forEach((lt, i) => {
     const prog = V.layer_types[lt].program;
-    const pills = prog.map(s => `<i title="${esc(s.op === 'run' ? s.kernel : 'host ' + s.op)}" style="${s.op === 'run' ? '' : 'width:3px;height:7px'}"></i>`).join('');
-    items.push(`<li data-l="${i}" title="Layer ${i}: ${esc(LT_NAME[lt] || lt)}"><span class="ix">${i}</span>` +
-      `<span class="ty"><span class="sw" style="background:${ltColor(lt)}"></span>${esc(LT_NAME[lt] || lt)}</span><span class="pr">${pills}</span></li>`);
+    const pills = prog.map(s => `<i title="${esc(s.op === 'run' ? s.kernel : 'host ' + s.op)}" style="${s.op === 'run' ? '' : 'height:8px;align-self:center'}"></i>`).join('');
+    items.push(`<li data-l="${i}" title="Layer ${i}: ${esc(LT_NAME[lt] || lt)}"><span class="bar" style="background:${ltColor(lt)}"></span><span class="ix">${i}</span><span class="pr">${pills}</span></li>`);
   });
-  items.push(`<li class="sep">tail</li>`);
-  for (const s of V.tail.filter(s => s.op === 'run')) items.push(`<li data-tail="${esc(s.kernel)}"><span class="ix">·</span><span class="ty"><span class="sw" style="background:${C.tail}"></span>${s.kernel === 'ln' ? 'final norm' : s.kernel === 'lm' ? 'lm_head → logits' : esc(s.kernel)}</span><span class="pr"><i></i></span></li>`);
-  items.push(`<li class="sep">host · sample</li>`);
+  for (const s of V.tail.filter(s => s.op === 'run')) items.push(`<li class="tail" data-tail="${esc(s.kernel)}"><span class="bar" style="background:${C.tail}"></span><span class="ix">${s.kernel === 'ln' ? 'final norm' : s.kernel === 'lm' ? 'lm_head → logits' : esc(s.kernel)}</span><span class="pr"><i></i></span></li>`);
+  items.push(`<li class="cap"><span>host · sample</span></li>`);
+  $('#l-legend').innerHTML = [...new Set(V.layers)].map(lt => `<span><i style="background:${ltColor(lt)}"></i>${esc(LT_NAME[lt] || lt)}</span>`).join('');
   ol.innerHTML = items.join('');
   ol.addEventListener('mouseenter', () => st.layerHover = true);
   ol.addEventListener('mouseleave', () => st.layerHover = false);
@@ -463,8 +467,8 @@ function markLayers(ev) {
   if (!st.layerHover) {
     const cur = document.querySelector('#layer-list li.cur');
     if (cur) {
-      const ol = $('#layer-list'), r = cur.offsetTop - ol.offsetTop;
-      if (r < ol.scrollTop + 20 || r > ol.scrollTop + ol.clientHeight - 40) ol.scrollTo({ top: r - ol.clientHeight / 2, behavior: reduced ? 'auto' : 'smooth' });
+      const ol = $('#layer-list'), r = cur.offsetLeft - ol.offsetLeft;
+      if (r < ol.scrollLeft + 20 || r > ol.scrollLeft + ol.clientWidth - 40) ol.scrollTo({ left: r - ol.clientWidth / 2, behavior: reduced ? 'auto' : 'smooth' });
     }
   }
 }
