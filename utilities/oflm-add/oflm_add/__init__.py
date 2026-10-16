@@ -205,6 +205,7 @@ FAMILY_ALIASES = [
     # llama_npu refuses hidden_size 2560 outright.
     ("granite", "granite"),
     ("hunyuan", "hunyuan"),
+    ("hy-mt", "hunyuan"),        # tencent/Hy-MT2-1.8B-GGUF: Tencent's HunYuan translation models
     ("crow", "qwen3.5"),
     ("huihui", "qwen3.5"),
     ("qwythos", "qwen3.5"),
@@ -248,6 +249,7 @@ GGUF_ARCH_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan-dense": "hunyuan",     # what llama.cpp writes for HunYuan V1 dense (Hy-MT2)
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -262,6 +264,7 @@ CONFIG_MODEL_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "hunyuan_v1_dense": "hunyuan",
     "gpt_oss": "gpt-oss",
 }
 
@@ -707,7 +710,7 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
                 g = json.loads(Path(cand).read_text(encoding="utf-8"))
             except Exception:
                 g = None
-            if g and (need_eos and isinstance(g.get("eos_token_id"), list) or
+            if g and (need_eos and isinstance(g.get("eos_token_id"), (list, int)) or
                       need_bos and isinstance(g.get("bos_token_id"), int)):
                 break
     if not g:
@@ -715,8 +718,10 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
             "needs eos_token_id in tokenizer_config.json")
         return
     changed = False
-    if need_eos and isinstance(g.get("eos_token_id"), list):
-        cfg["eos_token_id"] = g["eos_token_id"]
+    eos = g.get("eos_token_id")
+    if need_eos and isinstance(eos, (list, int)):
+        # HF allows a single id here (Hy-MT2); the engine reads a list
+        cfg["eos_token_id"] = eos if isinstance(eos, list) else [eos]
         changed = True
     if need_bos and isinstance(g.get("bos_token_id"), int):
         cfg["bos_token_id"] = g["bos_token_id"]

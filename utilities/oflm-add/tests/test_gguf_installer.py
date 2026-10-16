@@ -133,6 +133,7 @@ def test_gguf_arch_map_covers_common_families(tmp_path):
         "phi4": "phi4",
         "granite": "granite",
         "hunyuan": "hunyuan",
+        "hunyuan-dense": "hunyuan",
     }
     for arch, family in cases.items():
         gguf = tmp_path / f"{arch}-Q4_K_M.gguf"
@@ -148,6 +149,7 @@ def test_gguf_arch_map_covers_common_families(tmp_path):
 def test_config_model_type_resolves_family():
     assert oflm_add.family_from_config_dict({"model_type": "qwen3"}) == "qwen3"
     assert oflm_add.family_from_config_dict({"model_type": "llama"}) == "llama3"
+    assert oflm_add.family_from_config_dict({"model_type": "hunyuan_v1_dense"}) == "hunyuan"
     assert oflm_add.family_from_config_dict(
         {"architectures": ["Qwen3ForCausalLM"]}) == "qwen3"
     assert oflm_add.family_from_config_dict(
@@ -158,6 +160,23 @@ def test_config_model_type_resolves_family():
     assert oflm_add.family_from_config_dict({"model_type": "mixtral"}) is None
     assert oflm_add.family_from_config_dict({}) is None
     assert oflm_add.family_from_config_dict(None) is None
+
+
+def test_tencent_hy_mt2_gguf_repo_installs_as_hunyuan():
+    # Traces: OPEN-FAMILY-HUNYUAN (canonical spec: specs/open-engine/spec.md)
+    assert oflm_add.derive_family({}, "Hy-MT2-1.8B-GGUF") == "hunyuan"
+    assert oflm_add.derive_tag("Hy-MT2-1.8B-GGUF") == "hy-mt2:1.8b"
+
+
+def test_single_eos_id_in_generation_config_becomes_a_list(tmp_path):
+    # Traces: OPEN-FAMILY-HUNYUAN -- Hy-MT2 ships eos_token_id as one int; the engine reads a list
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(
+        {"bos_token": "<s>", "eos_token": "</s>"}), encoding="utf-8")
+    (tmp_path / "generation_config.json").write_text(json.dumps(
+        {"bos_token_id": 120000, "eos_token_id": 120020}), encoding="utf-8")
+    oflm_add.normalize_tokenizer_config(tmp_path, str(tmp_path), [])
+    cfg = json.loads((tmp_path / "tokenizer_config.json").read_text(encoding="utf-8"))
+    assert cfg["eos_token_id"] == [120020] and cfg["bos_token_id"] == 120000
 
 
 def test_derive_tag_accepts_size_guess():
