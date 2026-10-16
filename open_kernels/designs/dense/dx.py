@@ -169,6 +169,8 @@ N_OG = NHL // OGH                                      # og elements a core emit
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 if SPEC.norm_groups != 1:                  # ln.h defaults it to 1; adding the flag would change
     LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")   # every other family's build line (K2: 2)
+if HID != SPEC.hidden:                     # a zero-padded residual: the RMS divides by the model's width
+    LN_FLAGS.append(f"-DLN_DIV={SPEC.hidden}")
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

@@ -28,6 +28,13 @@
 #endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
+// LN_DIV: the model's own width when LN_N is zero-padded past it (OPEN-PACK-PAD); the pad adds
+// nothing to the sum of squares, so dividing by the real width gives the unpadded RMS exactly
+#ifdef LN_DIV
+#define LN_INV_N (1.0f / LN_DIV)
+#else
+#define LN_INV_N (1.0f / kN)
+#endif
 static constexpr unsigned kV = 32;
 static_assert(kHalf % kV == 0, "LN_N must be a multiple of 64");
 #if LN_GROUPS == 2
@@ -49,7 +56,7 @@ static inline float ln_inv(const float *__restrict x0, const float *__restrict x
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
-  return srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kN) + LN_EPS);
+  return srsqrt(aie::reduce_add(ss.template to_vector<float>()) * LN_INV_N + LN_EPS);
 }
 
 #if LN_GROUPS == 2

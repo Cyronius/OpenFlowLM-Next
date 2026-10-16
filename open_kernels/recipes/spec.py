@@ -13,7 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field, fields
+import struct
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
@@ -280,7 +281,9 @@ class ModelSpec:
         mt = cfg.get("model_type")
         if mt not in HF_FAMILIES:
             raise SpecError(f"model_type {mt!r} has no recipe (known: {sorted(HF_FAMILIES)})")
-        return HF_FAMILIES[mt](cfg, real_vocab)
+        spec = HF_FAMILIES[mt](cfg, real_vocab)
+        # a tokenizer id past the head's rows (Gemma 3 1B's <image_soft_token>) can never be a logit
+        return replace(spec, real_vocab=spec.vocab) if spec.real_vocab > spec.vocab else spec
 
     @classmethod
     def from_gguf_metadata(cls, md: Mapping[str, Any]) -> "ModelSpec":
@@ -289,6 +292,17 @@ class ModelSpec:
         if arch not in GGUF_FAMILIES:
             raise SpecError(f"general.architecture {arch!r} has no recipe (known: {sorted(GGUF_FAMILIES)})")
         return GGUF_FAMILIES[arch](md)
+
+
+def _f32_decimal(x: float) -> float:
+    """GGUF stores float metadata as f32, so 1e-6 reads back as 9.99999997e-07; the shortest
+    decimal that rounds to the same f32 is the value the source config wrote."""
+    f = struct.unpack("<f", struct.pack("<f", x))[0]
+    for p in range(1, 10):
+        d = float(f"{f:.{p}g}")
+        if struct.unpack("<f", struct.pack("<f", d))[0] == f:
+            return d
+    return f
 
 
 def _need(d: Mapping[str, Any], key: str, what: str = "config.json"):
@@ -1095,111 +1109,6 @@ def _hunyuan_gguf(md: Mapping[str, Any]) -> ModelSpec:
     )
 
 
-def _gemma3_layer_types(n: int, cfg: Mapping[str, Any]) -> tuple[str, ...]:
-    if "layer_types" in cfg:
-        m = {"sliding_attention": DENSE_LOCAL, "full_attention": DENSE}
-        bad = sorted({t for t in cfg["layer_types"] if t not in m})
-        if bad:
-            raise SpecError(f"gemma3: unknown layer type(s) {bad}")
-        lt = tuple(m[t] for t in cfg["layer_types"])
-    else:
-        pat = int(cfg.get("sliding_window_pattern", 6))
-        lt = tuple(DENSE if (l + 1) % pat == 0 else DENSE_LOCAL for l in range(n))
-    if len(lt) != n:
-        raise SpecError(f"gemma3: layer_types has {len(lt)} entries, num_hidden_layers is {n}")
-    return lt
-
-
-def _gemma3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    """Gemma 3 (text): GQA with q/k RMSNorm, GeGLU-tanh FFN, sandwich norms, 5:1 sliding / global layers,
-    a local RoPE theta and a linearly scaled global one. The container stores the norms' 1 + w and the
-    sqrt(hidden)-scaled embeddings, so neither is a recipe transform."""
-    tc = cfg.get("text_config", cfg)
-    n = _need(tc, "num_hidden_layers")
-    hd = _need(tc, "head_dim")
-    vocab = _need(tc, "vocab_size")
-    if tc.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
-        raise SpecError(f"gemma3: hidden_activation {tc.get('hidden_activation')!r} is not gelu_pytorch_tanh")
-    if tc.get("final_logit_softcapping") or tc.get("attn_logit_softcapping"):
-        raise SpecError("gemma3: logit softcapping is not supported (Gemma 3 has none)")
-    qps = tc.get("query_pre_attn_scalar", hd)
-    if abs(float(qps) - hd) > 1e-6:
-        raise SpecError(f"gemma3: query_pre_attn_scalar {qps} != head_dim {hd} (attn.h scales by 1/sqrt(HD))")
-    sc = tc.get("rope_scaling")
-    scaling = None
-    if sc:
-        if sc.get("rope_type", sc.get("type")) != "linear":
-            raise SpecError(f"gemma3: rope_scaling type {sc.get('rope_type')!r} is not supported (linear only)")
-        scaling = {"rope_type": "linear", "factor": float(sc["factor"])}
-    return ModelSpec(
-        family="gemma3",
-        hidden=_need(tc, "hidden_size"),
-        num_layers=n,
-        layer_types=_gemma3_layer_types(n, tc),
-        vocab=vocab,
-        real_vocab=real_vocab if real_vocab is not None else vocab,
-        num_heads=_need(tc, "num_attention_heads"),
-        num_kv_heads=_need(tc, "num_key_value_heads"),
-        head_dim=hd,
-        rotary_dim=hd,
-        rope_theta=float(_need(tc, "rope_theta")),
-        rope_scaling=scaling,
-        rope_local_theta=float(tc.get("rope_local_base_freq", 10000.0)),
-        sliding_window=int(_need(tc, "sliding_window")),
-        qk_norm=True,
-        attn_gate=False,
-        intermediate=_need(tc, "intermediate_size"),
-        activation="gelu_tanh",
-        sandwich_norms=True,
-        norm_eps=float(tc.get("rms_norm_eps", 1e-6)),
-        quant="q4_1",
-        extra={"model_type": cfg.get("model_type", tc.get("model_type")), "source": "hf_config"},
-    )
-
-
-def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
-    a = md["general.architecture"]
-
-    def k(name: str):
-        return _need(md, f"{a}.{name}", "GGUF metadata")
-
-    n = k("block_count")
-    hd = k("attention.key_length")
-    vocab = md.get(f"{a}.vocab_size")
-    if vocab is None:
-        toks = md.get("tokenizer.ggml.tokens")
-        if toks is None:
-            raise SpecError(f"GGUF metadata lacks '{a}.vocab_size' and 'tokenizer.ggml.tokens'")
-        vocab = len(toks)
-    pat = int(md.get(f"{a}.attention.sliding_window_pattern", 6))
-    factor = md.get(f"{a}.rope.scaling.factor")
-    return ModelSpec(
-        family="gemma3",
-        hidden=k("embedding_length"),
-        num_layers=n,
-        layer_types=tuple(DENSE if (l + 1) % pat == 0 else DENSE_LOCAL for l in range(n)),
-        vocab=vocab,
-        real_vocab=vocab,
-        num_heads=k("attention.head_count"),
-        num_kv_heads=k("attention.head_count_kv"),
-        head_dim=hd,
-        rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
-        rope_theta=float(k("rope.freq_base")),
-        rope_scaling={"rope_type": "linear", "factor": float(factor)} if factor else None,
-        rope_local_theta=float(md.get(f"{a}.rope.local_freq_base", 10000.0)),
-        sliding_window=int(k("attention.sliding_window")),
-        qk_norm=True,
-        attn_gate=False,
-        intermediate=k("feed_forward_length"),
-        activation="gelu_tanh",
-        sandwich_norms=True,
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
-        quant="q4_1",
-        extra={"architecture": a, "source": "gguf"},
-    )
-
-
-
 # Granite's four scalar multipliers, and why the recipe can ignore them.
 #
 # IBM Granite is Llama plus four scalars that transformers applies at run time:
@@ -1435,7 +1344,8 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         head_dim=hd,
         rotary_dim=md.get(f"{a}.rope.dimension_count", hd),
         rope_theta=float(k("rope.freq_base")),
-        rope_scaling={"rope_type": "linear", "factor": float(factor)} if factor else None,
+        # a linear factor of 1 is no scaling at all (Gemma 3 1B's GGUF writes one; its config.json has none)
+        rope_scaling={"rope_type": "linear", "factor": float(factor)} if factor and float(factor) != 1.0 else None,
         rope_local_theta=float(md.get(f"{a}.rope.local_freq_base", 10000.0)),
         sliding_window=int(k("attention.sliding_window")),
         qk_norm=True,
@@ -1443,7 +1353,7 @@ def _gemma3_gguf(md: Mapping[str, Any]) -> ModelSpec:
         intermediate=k("feed_forward_length"),
         activation="gelu_tanh",
         sandwich_norms=True,
-        norm_eps=float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6)),
+        norm_eps=_f32_decimal(float(md.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6))),
         quant="q4_1",
         extra={"architecture": a, "source": "gguf"},
     )

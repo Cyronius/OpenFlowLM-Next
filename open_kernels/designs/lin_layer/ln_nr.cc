@@ -21,6 +21,11 @@
 #endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
+#ifdef LN_DIV
+#define LN_INV_N (1.0f / LN_DIV)   // the model's own width under a zero-padded LN_N (ln.h)
+#else
+#define LN_INV_N (1.0f / kN)
+#endif
 static constexpr unsigned kV = 32;
 static_assert(kHalf % kV == 0, "LN_N must be a multiple of 64");
 #if LN_GROUPS == 2
@@ -77,7 +82,7 @@ void ln_nr(const float *__restrict x0, const float *__restrict x1, const bfloat1
     ss = aie::mac(ss, h, l);
     ss = aie::mac(ss, h, l);
   }
-  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * (1.0f / kN) + LN_EPS);
+  const float inv = srsqrt(aie::reduce_add(ss.template to_vector<float>()) * LN_INV_N + LN_EPS);
   const bfloat16 ih = (bfloat16)inv;
   const bfloat16 il = (bfloat16)(inv - (float)ih);
 #pragma clang loop unroll(disable)

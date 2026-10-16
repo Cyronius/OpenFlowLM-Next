@@ -216,6 +216,12 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (5120, 1),
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
+    Template("ln_div", "designs/ln/ln.h",
+             combos=(combination(
+                 # (width, real): a zero-padded width whose RMS divides by the model's own (LN_DIV,
+                 # OPEN-PACK-PAD); every unpadded norm is the `ln` point above
+                 keys=("width", "real")),),
+             note="the divisor is a compile-time macro; a new (width, real) pair needs a slice run"),
     Template("router", "designs/router/router.h",
              {"experts": values(256), "topk": values(8)}),
     Template("moe", "designs/layer_x/moe_*.cc",

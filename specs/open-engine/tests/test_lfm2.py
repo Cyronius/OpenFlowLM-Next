@@ -179,6 +179,7 @@ def test_no_shipped_models_hash_moved():
     frozen = {
         "gemma3-12b.json": "sha256:df7005de2191d524c50ed90b8bb41f92ff222d2699a532652689a5fbdce21c46",
         "gemma3-4b.json": "sha256:3496169f71a4b2d6679065fb35888493ccf695084625797ce8f200e6f0d84681",
+        "gemma3-1b.json": "sha256:11ba253f30e51292f464a3c363d64edd98bfed2d986aed4262bf7a6ce82f171e",
         "granite42-3b.json": "sha256:695134de825eb93e39a7b31008bb5791d2e27c8744c0980c2ed8edbe083b5656",
         "hy-mt2-7b.json": "sha256:857e09843a229d259ec52d5174560e429af3597b446142eab140977a571cd1d7",
         "llama31-8b.json": "sha256:e4baa37e429635bc133b50b9bdac750abb02e6ce58c0d10efcb06bc2bd29a4bb",

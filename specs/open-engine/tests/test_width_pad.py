@@ -63,6 +63,9 @@ def test_pad_width_is_idempotent_and_moves_no_shipped_family():
     assert M.pad_width(3072, 8) == 3072
     for p in SPECS:
         spec = load_spec(p)
+        if spec.family in dense.DENSE_FAMILIES and dense.padded(spec):
+            assert p.name == "gemma3-1b.json", "the one shipped family built zero-padded (OPEN-PACK-PAD)"
+            continue
         n = dense.cores_for(spec)
         for field in ("hidden", "intermediate", "attn_q_width", "attn_kv_width"):
             w = getattr(spec, field)

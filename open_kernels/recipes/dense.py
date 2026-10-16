@@ -43,7 +43,8 @@ from dataclasses import dataclass, replace
 from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .qwen36moe import ATTN_LMAX  # Path A: the widest attention GEMM stream (window chunk)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, chunk_bytes, q4_bytes,
-                        proj_op, q4_chunks, mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
+                        pad_width, proj_op, q4_chunks, mixed_check, quant_check, require_gemv, role_bytes, roundup,
+                        tab_bytes)
 from .spec import DENSE, DENSE_LOCAL, ModelSpec
 
 
@@ -189,13 +190,32 @@ def cores_for(spec: ModelSpec) -> int:
     return 1
 
 
+def widths(spec: ModelSpec) -> tuple[int, int, int]:
+    """(main cores, hidden, intermediate) the kernels and pools are built at (OPEN-PACK-PAD).
+
+    A spec whose hidden and intermediate are whole 256-column k-tiles gets its own widths at
+    cores_for's count, so no shipped family moves. One that is not (Gemma 3 1B: hidden 1152
+    is 4.5 k-tiles) takes the most cores its q and kv widths allow and pads hidden and
+    intermediate with zeros to pad_width there. The extra pool rows and columns are zero and
+    the norms divide by the model's own width, so the padding adds exactly nothing."""
+    if spec.hidden % 256 == 0 and spec.intermediate % 256 == 0:
+        return cores_for(spec), spec.hidden, spec.intermediate
+    qw, kvw = spec.attn_q_width, spec.attn_kv_width
+    n = next(c for c in range(LIMITS["n_cols"], 0, -1) if qw % (BAND_ROWS * c) == 0 and kvw % (BAND_ROWS * c) == 0)
+    return n, pad_width(spec.hidden, n), pad_width(spec.intermediate, n)
+
+
+def padded(spec: ModelSpec) -> bool:
+    return widths(spec)[1:] != (spec.hidden, spec.intermediate)
+
+
 def pool_quant(spec: ModelSpec) -> str:
     """The pool's q4 chunk layout; mixed q8 specs retain the ordinary q4 base layout."""
     return "q4_1_f32" if spec.quant == "q4_1_f32" else "q4_1"
 
 
 def _check(spec: ModelSpec) -> None:
-    n = cores_for(spec)
+    n, H, F = widths(spec)
     if spec.family not in DENSE_FAMILIES:
         raise OpRangeError(f"dense recipe given a {spec.family!r} spec")
     if spec.activation not in ("silu", "gelu_tanh"):
@@ -213,24 +233,29 @@ def _check(spec: ModelSpec) -> None:
         raise OpRangeError("dense: every layer must be a dense layer with an FFN")
     if spec.attn_gate:
         raise OpRangeError("dense: the attention gate is a MoE-family feature; dx.py has no gate elements")
-    for what, v in (("hidden", spec.hidden), ("intermediate", spec.intermediate), ("q width", spec.attn_q_width),
+    for what, v in (("hidden", H), ("intermediate", F), ("q width", spec.attn_q_width),
                     ("kv width", spec.attn_kv_width)):
         if v % (BAND_ROWS * n):
             raise OpRangeError(f"qwen3: {what} {v} is not a multiple of {BAND_ROWS * n} (64-row bands over {n} cores)")
-    if spec.hidden % 256 or spec.intermediate % 256:
+    if H % 256 or F % 256:
         raise OpRangeError("qwen3: hidden and intermediate must be multiples of 256 (one q4 k-tile)")
     if spec.num_kv_heads % 2 and spec.num_kv_heads != 1:
         raise OpRangeError("qwen3: an odd kv-head count above one does not split into ain elements")
-    require("ln", width=spec.hidden, groups=spec.norm_groups)
+    if padded(spec) and (spec.norm_groups != 1 or spec.hidden % 32 or spec.intermediate % 32):
+        raise OpRangeError(f"dense: a padded width needs one norm group and whole 32-value blocks "
+                           f"(hidden {spec.hidden}, intermediate {spec.intermediate})")
+    require("ln", width=H, groups=spec.norm_groups)
+    if H != spec.hidden:
+        require("ln_div", width=H, real=spec.hidden)
     require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
             rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
             qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
     pc = per_call(spec)
-    require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
-    require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
-    require_gemv(spec, "ffn", spec.hidden, spec.intermediate // n, pc)
-    require_gemv(spec, "ffn", spec.intermediate, spec.hidden // n, pc)
-    require("lm_head_q4", K=spec.hidden, vocab=lm_rows(spec))
+    require_gemv(spec, "attn", H, spec.attn_q_width // n, pc)
+    require_gemv(spec, "attn", spec.attn_q_width, H // n, pc)
+    require_gemv(spec, "ffn", H, F // n, pc)
+    require_gemv(spec, "ffn", F, H // n, pc)
+    require("lm_head_q4", K=H, vocab=lm_rows(spec))
 
 
 L1_BUDGET = 60 * 1024      # a main core's 64 KB data memory less IRON's own bookkeeping
@@ -240,7 +265,8 @@ STACK = 0x1800
 def per_call(spec: ModelSpec) -> int:
     """Chunks per weight element: 2 (10 KB, as the MoE designs) unless the widest activation table
     leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB)."""
-    wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
+    _, H, F = widths(spec)
+    wide = max(H, spec.attn_q_width, F)
     for pc in (2, 1):
         ch = chunk_bytes(pool_quant(spec))
         # Gemma 3 12B's f32-scale twin is 768 B over physical tile memory with
@@ -261,8 +287,8 @@ from .attnknobs import (PROBE_VARS, RB_SUPPORTED, FAST_ATTENTION, MAX_ATTN_CORES
 
 
 def geometry(spec: ModelSpec) -> DenseGeometry:
-    n = cores_for(spec)
-    hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
+    n, hid, ff = widths(spec)
+    nh, kvh, hd = spec.num_heads, spec.num_kv_heads, spec.head_dim
     qw, kvw = nh * hd, kvh * hd
     e_a = attn_elem(spec)
     _ptab_check(spec, e_a)
@@ -298,8 +324,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
 
 
 def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
-    n = cores_for(spec)
-    hid, ff = spec.hidden, spec.intermediate
+    n, hid, ff = widths(spec)
     G = geometry(spec)
     eln, e_a = hid * 2, attn_elem(spec)
     if 2 * G.HD * 2 > e_a or 512 + 4 * spec.rotary_dim > _ptab_row(spec):
@@ -359,19 +384,32 @@ def recipe(spec: ModelSpec, max_ctx: int = 4096) -> DenseRecipe:
     return DenseRecipe(spec=spec, layout=layout(spec, max_ctx), geo=geometry(spec), max_ctx=max_ctx)
 
 
+def _pad(op: dict, src_rows: int, src_cols: int, rows: int, cols: int) -> dict:
+    """OPEN-PACK-PAD: name the file tensor's own shape on an op whose pool is padded past it."""
+    if cols != src_cols:
+        op["src_dim"] = src_cols
+    if rows != src_rows:
+        op["src_rows"] = src_rows
+    return op
+
+
 def pack_plan(spec: ModelSpec) -> dict:
     L, G = layout(spec), geometry(spec)
-    hid, ff = spec.hidden, spec.intermediate
+    _, hid, ff = widths(spec)
+    h, f = spec.hidden, spec.intermediate
     pre = "model.layers.{l}."
+
+    def proj(role, name, dst, rows, cols, src_rows, src_cols):
+        return _pad(proj_op(spec, role, pre + name, dst, rows, cols, cols), src_rows, src_cols, rows, cols)
     one = {
             "pool": [
-                proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, G.QW),
-                proj_op(spec, "ffn", pre + "mlp.up_proj.weight", L.POOL_UP, ff, hid, hid),
-                proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, hid),
-                proj_op(spec, "ffn", pre + "mlp.down_proj.weight", L.POOL_DOWN, hid, ff, ff),
+                proj("attn", "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, G.QW, h),
+                proj("attn", "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, G.KVW, h),
+                proj("attn", "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, G.KVW, h),
+                proj("attn", "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, h, G.QW),
+                proj("ffn", "mlp.up_proj.weight", L.POOL_UP, ff, hid, f, h),
+                proj("ffn", "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, f, h),
+                proj("ffn", "mlp.down_proj.weight", L.POOL_DOWN, hid, ff, h, f),
             ],
             "consts": [
                 {"op": "put", "tensor": pre + "input_layernorm.weight", "dst": L.CD_LNW, "cap": L.ELN},
@@ -392,11 +430,13 @@ def pack_plan(spec: ModelSpec) -> dict:
         "pool_bytes": L.POOL_BYTES, "chunk_bytes": chunk_bytes(pool_quant(spec)),
         "layer_types": {lt: one for lt in sorted(set(spec.layer_types))},
         "lm_head": {"pool_bytes": L.LMHEAD_POOL_BYTES,
-                    "ops": [{"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
-                             "tensor": "lm_head.weight", "dst": 0,
-                              "nch": q4_chunks(lm_rows(spec), hid, pool_quant(spec)), "in_dim": hid}]},
-        "embed": {"tensor": "model.embed_tokens.weight", "dim": hid,
-                  **({"scale": hid ** 0.5} if spec.quant == "q4_1_f32" and spec.family == "gemma3" else {})},
+                    "ops": [_pad({"op": "std_perm_gguf" if spec.quant == "q4_1_f32" else "std_perm",
+                                  "tensor": "lm_head.weight", "dst": 0,
+                                  "nch": q4_chunks(lm_rows(spec), hid, pool_quant(spec)), "in_dim": hid},
+                                 lm_rows(spec), h, lm_rows(spec), hid)]},
+        # the model's own width: the engine zero-extends the row into its padded residual
+        "embed": {"tensor": "model.embed_tokens.weight", "dim": h,
+                  **({"scale": h ** 0.5} if spec.quant == "q4_1_f32" and spec.family == "gemma3" else {})},
         "norm": {"tensor": "model.norm.weight", "bytes": hid * 2},
     }
 
@@ -439,6 +479,8 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     if G.QKVB or G.PTAB_ELEMS > 1:
         return None
     if spec.num_kv_heads == 1:                 # dx_attn.py walks two elements per cached row
+        return None
+    if padded(spec):                           # the host chain's norms divide by the buffer width
         return None
     hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
     # ---- the NPU block-attention option (Path A, OPEN-PREFILL-ATTN) ----
@@ -612,6 +654,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
     neither key, unchanged. The attention scale rides on the table as `scale` for any family that
     has one (Phi-3 only, today)."""
     L, G = layout(spec, max_ctx), geometry(spec)
+    H = G.HID
     sc = spec.rope_scaling
     longrope = bool(sc) and sc.get("rope_type") == "longrope"
     f32 = spec.quant == "q4_1_f32"
@@ -624,8 +667,8 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
         "layer_types": {},
         "tail": [{"op": "run", "kernel": "ln", "args": ["xres", "zero", "normw", "xresf", "hn"]},
                  {"op": "run", "kernel": "lm", "args": ["lmpool", "hn", "logits"]}],
-        "globals": {"xres": spec.hidden * 4, "zero": spec.hidden * 4, "normw": spec.hidden * 2,
-                    "xresf": spec.hidden * 4, "hn": spec.hidden * 2, "logits": lm_rows(spec) * 4,
+        "globals": {"xres": H * 4, "zero": H * 4, "normw": H * 2,
+                    "xresf": H * 4, "hn": H * 2, "logits": lm_rows(spec) * 4,
                     "lmpool": L.LMHEAD_POOL_BYTES},
     }
     types = sorted(set(spec.layer_types))
@@ -672,7 +715,7 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 def builds(spec: ModelSpec) -> dict[str, dict]:
     """Every kernel set the recipe ships: the q4nx build of each weight-consuming
     design AND its GGUF-direct f32-scale twin (`*_f32`, see programs())."""
-    n = cores_for(spec)
+    n, H, _ = widths(spec)
     qh = spec.quant_hash()
     sfx = f"_q{qh}" if qh else ""          # a q8 variant is a different kernel set (OPEN-QUANT-Q8)
     # ln's build dir carries the groups: a width/eps pair is shared by models of DIFFERENT
@@ -685,13 +728,14 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
     b = {
         "dx": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}{sfx}", "env": {}},
         "ln": {"design": "ln/ln.py", "build_dir": f"ln/build_{spec.hidden}_{spec.norm_eps:g}{gsfx}",
-               "env": {"LN_N": str(spec.hidden), "LN_EPS": f"{spec.norm_eps:g}", **genv}},
+               "env": {"LN_N": str(H), "LN_EPS": f"{spec.norm_eps:g}", **genv,
+                       **({"LN_DIV": str(spec.hidden)} if H != spec.hidden else {})}},
         "lm_head_q4": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}",
-                       "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden), "LMHEAD_CORES": str(n)}},
+                       "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(H), "LMHEAD_CORES": str(n)}},
         "dx_f32": {"design": "dense/dx.py", "build_dir": f"dense/build_{spec.family}_h{spec.hidden}_f32",
                    "env": {"GEMV_SCALES_F32": "1"}},
         "lm_head_q4_f32": {"design": "lm_head_q4/lm_head_q4.py", "build_dir": f"lm_head_q4/build_{lm_rows(spec)}_f32",
-                           "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(spec.hidden),
+                           "env": {"LMHEAD_N": str(lm_rows(spec)), "LMHEAD_K": str(H),
                                    "LMHEAD_CORES": str(n), "LMHEAD_SCALES_F32": "1"}},
     }
     r = gemm_route(spec)
@@ -702,7 +746,7 @@ def builds(spec: ModelSpec) -> dict[str, dict]:
 
 def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
     L = layout(spec, max_ctx)
-    return {"hidden": spec.hidden, "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
+    return {"hidden": widths(spec)[1], "vocab": lm_rows(spec), "real_vocab": spec.real_vocab,
             "chunk_bytes": chunk_bytes(pool_quant(spec)), "pool_bytes": L.POOL_BYTES,
             "lmhead_pool_bytes": L.LMHEAD_POOL_BYTES,
             "kv_row": L.KV_ROW, "ptab_row": L.PTAB_ROW, "rotary_dim": spec.rotary_dim, "rope_theta": spec.rope_theta,

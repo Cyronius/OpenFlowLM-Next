@@ -1072,6 +1072,36 @@ engine -- the open one has no vision path.
 
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
 
+**Gemma 3 1B (`gemma3:1b`), from Google's QAT Q4_0 GGUF.** The 1B is a GGUF-direct model only
+(`recipes/specs/gemma3-1b.json`): four heads over ONE kv head (OPEN-ATTN-ONE-KV-HEAD) and a
+hidden width of 1152, which is not a whole number of k-tiles, so it runs zero-padded to 1280
+on four cores (OPEN-PACK-PAD). Three things about the GGUF route surfaced here and are part of
+this requirement:
+
+- The GGUF names Gemma's four norms the llama.cpp way: `post_attention_norm` is HF's
+  `post_attention_layernorm` and `ffn_norm` is its `pre_feedforward_layernorm`. The engine's
+  name map had the two swapped; it now resolves them by what the file holds
+  (`GgufFile::resolve`, checked against the HF safetensors: the right pair differs by 0.1-0.4,
+  the swapped one by 52).
+- Its head is the tied F16 embedding, which the q4 pool cannot hold, so it is re-quantized to
+  q4_1 at load with the same law as a Q8_0 head (`std_perm_gguf`). The 26 layers keep the
+  file's Q4_0 exactly.
+- The GGUF and the QAT checkpoint's own `config.json` disagree on the sliding window (1024
+  against 512). The kernel set is built at 512, the window the model was trained with, and a
+  model directory without a `config.json` is refused rather than run at the GGUF's 1024.
+  The GGUF derivation also reads an f32 `1e-6` and a linear RoPE factor of 1 as the config's
+  own values, so both sources give the same `spec_hash`.
+
+**Acceptance criteria (unit), 1B:** `tests/test_gemma3_1b.py`.
+
+**Procedure (manual), 1B:** export `recipes/specs/gemma3-1b.json` (with
+`OPEN_KERNELS_UNVALIDATED=1` until the points are in the catalogue); write the fp64 reference
+from the GGUF (`model/make_decode.py --gguf <file> --model-dir <dir with config.json> --ids
+<prompt> --layers 2`, which writes `ref_ids.txt`); run `open_qwen36_cli --model <dir with
+model.gguf + config.json> --kernels <set> --layers 2 --ids <ref_ids> --prefill-logits
+--dump-logits <out>/y`; compare with `model/compare_decode.py`. Then the same over all 26
+layers, then `oflm-add` the GGUF repo, `oflm serve`, and `oflm-test --llm --model gemma3:1b`.
+
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
@@ -2292,6 +2322,53 @@ through its own op rather than through `std_perm`, because the file raster is a
 supertile as well as half-width: OPEN-PACK-CHUNK-FUSE. The container also pads K to
 2944 on its own, which is what makes `band_bytes(2880)` the wrong refusal to reason
 about, and the pad from 2944 to the pool's 3072 falls out of the same op.
+
+### OPEN-PACK-PAD: a dense model whose widths are not whole k-tiles runs zero-padded
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `designs/ln/ln.h`, `designs/lin_layer/ln_nr.cc`,
+`designs/ln/ln.py`, `designs/dense/dx.py`, `src/open_qwen36/pools.cpp`, `gguf_file.cpp`, `manifest.cpp`)
+**Verification:** test -- `tests/test_gemma3_1b.py` for the layout the recipe derives;
+`src/open_qwen36/gguf_pack_test.cpp` (ctest `GGUF-PACK`) for the packer
+
+The q4 kernels read whole 256-column k-tiles and give each main core whole 64-row bands. A
+dense model whose hidden or intermediate width is not a whole number of k-tiles (Gemma 3 1B's
+hidden 1152 is 4.5) shall run with that width padded with zeros, and the padding shall add
+exactly nothing:
+
+- **The widths.** `dense.widths` keeps every spec whose hidden and intermediate are whole
+  k-tiles at its own widths and `cores_for` count, so no shipped kernel set moves. Otherwise
+  it takes the most cores the q and kv widths allow and pads hidden and intermediate to
+  `pad_width` there (OPEN-WIDTH-PAD): the 1B runs on four cores at 1280 / 6912.
+- **The pools.** A padded projection's pack op names the GGUF tensor's own shape (`src_dim`
+  for its columns, `src_rows` for its rows). `std_perm_gguf` packs the real blocks exactly
+  and leaves every scale, min and code of the pad at zero, so a padded weight reads as +0.
+  The file must hold exactly the shape the op names, or the pack is refused. A `.q4nx`
+  container cannot be padded: `std_perm` refuses a padded op by name.
+- **The activations.** The residual is the padded width. The embedding row is zero-extended
+  into it (`GgufFile::embed_row`, the GGUF side of OPEN-EMBED-STRIDE), a norm weight narrower
+  than its slot is zero-extended (`pack_norm`), and since every padded weight row is zero the
+  pad of the residual stays zero through every layer.
+- **The norms.** Every RMSNorm over the residual divides its sum of squares by the model's own
+  width (`LN_DIV`), not the padded one; the pad contributes nothing to the sum. Without the
+  flag the kernels preprocess to exactly what they did (OPEN-WIDTH-PAD's 1.0328 is the
+  silent error this prevents).
+- **What a config is checked against** stays the model's own width: `hf_config_check`'s
+  `hidden_size` is 1152 while the manifest's `layout.hidden`, the buffer width, is 1280.
+
+The block-prefill route is not built for a padded spec (its host chain normalises by the
+buffer width); prefill runs through `step()`.
+
+**Acceptance criteria (unit):**
+- Gemma 3 1B gives `widths == (4, 1280, 6912)`; every shipped dense spec keeps its own widths,
+  its plans carry no `src_dim` / `src_rows`, and its `ln` build has no `LN_DIV`.
+- The 1B's GGUF plan pads q, k, v, up, gate and the head in K (`src_dim` 1152 into 1280) and
+  o and down in rows (`src_rows` 1152 of 1280); the norm global is 2560 bytes, the embedding
+  row 1152 wide with scale `sqrt(1152)`; `ln` builds at `LN_N 1280`, `LN_DIV 1152`.
+- A Q4_0 source of 96 x 288 packed into a 128 x 512 pool reads back bit-exactly where it
+  exists and as +0 everywhere else, over a dirty destination; a plan that misstates the
+  file's rows is refused.
+- An F16 source whose blocks are exactly q4_1 at fp16 scales re-quantizes back exactly, padded
+  columns zero (Gemma 3's tied F16 embedding is the head).
+- `embed_row` zero-extends to a wider buffer and refuses a narrower one; `pack_norm` likewise.
 
 ### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
