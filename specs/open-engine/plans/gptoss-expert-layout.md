@@ -301,6 +301,13 @@ Order: 1 and 2 on the host while 3 runs on the NPU; then 4 and 5; then 6; then 7
 9. About five weeks of focused work to a model that decodes through `oflm serve` (four if eight cores
 turn out to keep pace after all), not counting 10.
 
+**If step 3 stalls, the rest need not wait.** The same layout runs exactly on the q8 GEMV that
+already exists: the experts as int8 (exact, above) in its 16-row half-tiles with K padded to 3072,
+the biases in the 768 bytes each half-tile leaves free, the same bands, blocks and two phases. That
+brings the whole layer up with exact numerics at twice the expert bytes (21.7 GB resident, fine on
+this box), and the MXFP4 tile then replaces it as a speed and memory step rather than a correctness
+one.
+
 **Spec impact of the build**, for its own plan (names are proposals):
 - New: `OPEN-GPTOSS-GGUF` (the spec and tensor names from the GGUF), `OPEN-PACK-EXPERT-MX4` (the pack
   op, NumPy and C++ byte-identical), `OPEN-GEMV-MX4` (the tile against a reference, and the rate
