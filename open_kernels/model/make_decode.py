@@ -152,6 +152,10 @@ def main() -> int:
                          "pool, as it did before OPEN-QUANT-Q8. Run it beside the default (q8 projections "
                          "streamed at q8) for the A/B that says what the q8 GEMV buys. The KERNELS must "
                          "have been exported the same way (OPEN_KERNELS_FORCE_Q4_1=1)")
+    ap.add_argument("--gguf", default=None,
+                    help="read the weights from this GGUF the way the engine packs them (model/gguf_model.py) and "
+                         "write only the reference: open_qwen36_cli packs the pools itself (--ids from ref_ids.txt)")
+    ap.add_argument("--ids", default=None, help="comma-separated prompt ids, fed in order before the greedy tokens")
     ap.add_argument("--strict-routing", action="store_true",
                     help="MoE: keep the reference's own top-8 even where a previous run shows the NPU picked differently")
     a = ap.parse_args()
@@ -172,7 +176,11 @@ def main() -> int:
             "lm_head": m["pack"]["lm_head"], "embed": m["pack"]["embed"], "norm": m["pack"]["norm"]}
     nl = min(a.layers, spec.num_layers)
     types = list(spec.layer_types[:nl])
-    q = Q4NX(md / "model.q4nx")
+    if a.gguf:
+        from gguf_model import GGUFModel
+        q = GGUFModel(a.gguf, embed_scale=m["gguf"]["pack"]["embed"].get("scale", 1.0))
+    else:
+        q = Q4NX(md / "model.q4nx")
     # The reference reads what the NPU holds, tensor by tensor: a projection the plan
     # streams at q8 (`q8_perm`) as the container's own q8, every other q8 tensor through
     # the packer's q4_1 (OPEN-QUANT-Q8). So the comparison always measures the kernels.
@@ -192,7 +200,7 @@ def main() -> int:
                                                 "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
-    if not a.cfg_only:
+    if not a.cfg_only and not a.gguf:
         write(out / "zero.bin", np.zeros(spec.hidden, np.float32))
         for lt, d in m["layer_types"].items():
             st = d["buffers"]["state"]
@@ -216,6 +224,7 @@ def main() -> int:
             PK.build_lmhead_pool(plan, q).tofile(lmf)
             print("  lm_head pool", flush=True)
 
+    if not a.cfg_only:
         # ---- the reference: the same token sequence, in fp64, on CPU
         if spec.family == "qwen36moe":
             import replica as R
@@ -228,7 +237,8 @@ def main() -> int:
             S = {l: np.zeros((spec.lin_value_heads, spec.lin_value_dim, spec.lin_value_dim)) for l in range(nl)}
         K = {l: np.zeros((0, spec.num_kv_heads, spec.head_dim)) for l in range(nl)}
         V = {l: np.zeros((0, spec.num_kv_heads, spec.head_dim)) for l in range(nl)}
-        tok = tok0
+        prompt = [int(i) for i in a.ids.split(",")] if a.ids else [tok0]
+        tok, ids = prompt[0], []
         for t in range(a.tokens):
             x = q.embed(tok, spec.hidden)
             write(out / f"xres{t}.bin", x.astype(np.float32))
@@ -262,8 +272,14 @@ def main() -> int:
             else:
                 _, logits = RD.final_logits(q, spec, xr)
             write(out / f"ref_logits{sfx(t)}.bin", logits.astype(np.float32))
+            ids.append(tok)
             tok = int(logits[:spec.real_vocab].argmax())
             print(f"  token {t} (position {t}): reference argmax {tok}", flush=True)
+            if t + 1 < len(prompt):
+                tok = prompt[t + 1]
+        (out / "ref_ids.txt").write_text(",".join(str(i) for i in ids) + "\n")
+        if a.gguf:
+            return 0
 
     cfg = build_cfg(m, nl, a.tokens, out, pool_dir, a.max_ctx)
     (out / "run_decode.cfg").write_text(cfg, newline="\n")
