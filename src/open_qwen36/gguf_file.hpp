@@ -50,7 +50,7 @@ public:
     GgufFile(const GgufFile&) = delete;
     GgufFile& operator=(const GgufFile&) = delete;
 
-    bool has(const std::string& name) const override { return tensors_.count(gguf_name(name)) != 0; }
+    bool has(const std::string& name) const override { return tensors_.count(resolve(name)) != 0; }
     /// Raw bytes of a tensor (the GGUF's own block layout; a view into the mapping).
     const uint8_t* raw(const std::string& name, size_t* nbytes = nullptr) const override;
     /// One embedding row as f32, dequantized from whatever type stores it.
@@ -71,6 +71,9 @@ public:
     /// HF-style name -> GGUF name (the manifest speaks the q4nx/HF convention;
     /// a GGUF speaks llama.cpp's blk.N.attn_q one). Unknown names pass through.
     static std::string gguf_name(const std::string& name);
+    /// gguf_name, then the one name that depends on the file: a sandwich-norm GGUF (Gemma)
+    /// stores HF's post_attention_layernorm as post_attention_norm.
+    std::string resolve(const std::string& name) const;
     /// GGUF metadata: string / u64 accessors (the config derivation's source).
     bool kv_has(const std::string& key) const { return meta_.count(key) != 0; }
     std::string kv_str(const std::string& key) const;
