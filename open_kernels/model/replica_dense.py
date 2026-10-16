@@ -153,4 +153,6 @@ def lmhead_q4_logits(m, hn, spec, block=2048):
 
 def final_logits(m, spec, x_res):
     hn = (rms(x_res, spec.norm_eps) * m.bf16("model.norm.weight")).astype(np.float32)
+    if hasattr(m, "lm_logits"):          # a GGUF (model/gguf_src.py) reads its own head
+        return hn, m.lm_logits(hn)
     return hn, lmhead_q4_logits(m, hn, spec)

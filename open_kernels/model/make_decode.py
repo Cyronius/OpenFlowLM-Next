@@ -166,13 +166,23 @@ def main() -> int:
     md = Path(a.model_dir)
     spec = spec_from_model_dir(md)
     m = manifest(spec, a.max_ctx)
+    # a GGUF install runs the f32-scale twin set, as the engine does when model.q4nx is absent
+    gguf = (md / "model.gguf").is_file() and not (md / "model.q4nx").is_file()
+    if gguf:
+        if "gguf" not in m:
+            raise SystemExit(f"{spec.family}: this recipe has no GGUF-direct kernel set")
+        m = m["gguf"]
     lay = m["layout"]
     plan = {"pool_bytes": m["pack"]["pool_bytes"], "chunk_bytes": m["pack"]["chunk_bytes"],
             "layer_types": {lt: d["pack"] for lt, d in m["layer_types"].items()},
             "lm_head": m["pack"]["lm_head"], "embed": m["pack"]["embed"], "norm": m["pack"]["norm"]}
     nl = min(a.layers, spec.num_layers)
     types = list(spec.layer_types[:nl])
-    q = Q4NX(md / "model.q4nx")
+    if gguf:
+        from gguf_src import GgufSource
+        q = GgufSource(md / "model.gguf")
+    else:
+        q = Q4NX(md / "model.q4nx")
     # The reference reads what the NPU holds, tensor by tensor: a projection the plan
     # streams at q8 (`q8_perm`) as the container's own q8, every other q8 tensor through
     # the packer's q4_1 (OPEN-QUANT-Q8). So the comparison always measures the kernels.

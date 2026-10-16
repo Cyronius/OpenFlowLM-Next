@@ -165,6 +165,61 @@ def test_checked_in_spec_is_the_derivation(unvalidated):
     assert got == want
 
 
+HF_HY_MT2_1_8B = dict(HF_HY_MT2_7B, hidden_size=2048, intermediate_size=6144, num_attention_heads=16,
+                      num_key_value_heads=4, vocab_size=120818, org_vocab_size=120818)
+# what tencent/Hy-MT2-1.8B-GGUF (Q8_0) actually carries: f32 scalars, no vocab_size key
+GGUF_HY_MT2_1_8B = {
+    "general.architecture": "hunyuan-dense", "hunyuan-dense.embedding_length": 2048,
+    "hunyuan-dense.block_count": 32, "hunyuan-dense.attention.head_count": 16,
+    "hunyuan-dense.attention.head_count_kv": 4, "hunyuan-dense.attention.key_length": 128,
+    "hunyuan-dense.feed_forward_length": 6144, "hunyuan-dense.rope.freq_base": 11158840.0,
+    "hunyuan-dense.rope.scaling.type": "none", "hunyuan-dense.rope.scaling.factor": 1.0,
+    "hunyuan-dense.attention.layer_norm_rms_epsilon": float(np.float32(1e-5)),
+    "tokenizer.ggml.tokens": ["t"] * 120818,
+}
+
+
+def test_1_8b_gguf_agrees_with_config_json_up_to_f32():
+    """Every shape field agrees. The GGUF stores the folded base and eps as f32, so those two
+    differ in the last bits and the spec hash with them: kernels link by the config.json
+    derivation, which is the one oflm-add computes at install."""
+    a = ModelSpec.from_hf_config(HF_HY_MT2_1_8B, real_vocab=120818).to_dict()
+    b = ModelSpec.from_gguf_metadata(GGUF_HY_MT2_1_8B).to_dict()
+    for d in (a, b):
+        d.pop("extra")
+    assert b["vocab"] == b["real_vocab"] == 120818
+    assert b["rope_theta"] == float(np.float32(a["rope_theta"])) and b["norm_eps"] == float(np.float32(1e-5))
+    for k in ("rope_theta", "norm_eps"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+def test_1_8b_geometry_and_padded_head():
+    """16 heads over 4 kv: one 1024-byte attention element per kv row half, the record one
+    element wide, four attention cores of four heads; the tied head rounds 120818 up to 1888 bands."""
+    spec = ModelSpec.from_hf_config(HF_HY_MT2_1_8B, real_vocab=120818)
+    R = DR.recipe(spec)
+    L, G = R.layout, R.geo
+    assert (G.N_CORES, G.PER_CALL, G.HPE, G.HPO) == (8, 2, 2, 4)
+    assert (G.Q_AIN_ELEMS, G.K_AIN_ELEMS, G.OG_AOUT_ELEMS, G.PTAB_ELEMS) == (8, 2, 4, 1)
+    assert (G.ACORES, G.NHL, G.RB) == (4, 4, 4) and G.QKNORM_POST is True
+    assert (L.E_A, L.KV_ROW, L.PTAB_ROW) == (1024, 2048, 1024)
+    assert DR.lm_rows(spec) == 120832 and L.LMHEAD_BANDS == 1888
+    gg = manifest(spec)["gguf"]
+    assert gg["pack"]["lm_head"]["ops"][0]["op"] == "std_perm_gguf"
+    assert gg["layout"]["vocab"] == 120832 and gg["layout"]["real_vocab"] == 120818
+
+
+def test_1_8b_checked_in_spec_is_the_derivation():
+    from pathlib import Path
+
+    p = Path(DR.__file__).resolve().parent / "specs" / "hy-mt2-1.8b.json"
+    got = load_spec(p).to_dict()
+    want = ModelSpec.from_hf_config(HF_HY_MT2_1_8B, real_vocab=120818).to_dict()
+    got.pop("extra"), want.pop("extra")
+    assert got == want
+
+
 def test_replica_norms_after_rope():
     """The fp64 oracle implements the family's order, so the whole-layer compare
     tests it rather than agreeing with the kernel by construction."""

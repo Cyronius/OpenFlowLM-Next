@@ -611,6 +611,15 @@ def apply_op(op: dict, m, layer: int, dst: np.ndarray) -> None:
             raise ValueError(f"{op['tensor']}: too few chunks, need {c0 + op['nch']}")
         n = op["nch"] * CH
         dst[op["dst"]:op["dst"] + n] = sel[std_perm(op["nch"], op["in_dim"])].reshape(-1)
+    elif kind == "std_perm_gguf":
+        # the GGUF-direct pool (pools.cpp std_perm_gguf): only a GGUF reader knows its blocks
+        name = _name(op, "tensor", layer)
+        if not hasattr(m, "std_perm_gguf"):
+            raise ValueError(f"std_perm_gguf {name}: the weight file is not a GGUF (model/gguf_src.py)")
+        out = m.std_perm_gguf(name, op["nch"], op["in_dim"])
+        if op["dst"] + out.size > len(dst):
+            raise ValueError(f"std_perm_gguf {name}: {out.size} B at dst {op['dst']} runs past the {len(dst)} B buffer")
+        dst[op["dst"]:op["dst"] + out.size] = out
     elif kind == "std_fuse":
         # OPEN-PACK-CHUNK-FUSE: a std_perm band whose source chunks are half-width. The
         # container holds 32 rows x 128 columns per chunk in the supertile raster
