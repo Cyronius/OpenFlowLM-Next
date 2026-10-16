@@ -16,15 +16,16 @@ from recipes.spec import DENSE, DENSE_LOCAL, DENSE_LOCAL_SHARED, DENSE_SHARED, M
 
 FIX = Path(__file__).resolve().parent / "fixtures"
 HDR = json.loads((FIX / "gguf_gemma4_e4b_header.json").read_text(encoding="utf-8"))
+HDR_E2B = json.loads((FIX / "gguf_gemma4_e2b_header.json").read_text(encoding="utf-8"))
 CFG_E4B = json.loads((FIX / "config_gemma4_e4b.json").read_text(encoding="utf-8"))
 CFG_E2B = json.loads((FIX / "config_gemma4_e2b.json").read_text(encoding="utf-8"))
 
 
-def gguf_md(with_rope_freqs=True):
-    md = dict(HDR["metadata"])
-    md["tokenizer.ggml.tokens"] = [""] * HDR["vocab"]
+def gguf_md(with_rope_freqs=True, hdr=HDR):
+    md = dict(hdr["metadata"])
+    md["tokenizer.ggml.tokens"] = [""] * hdr["vocab"]
     if with_rope_freqs:
-        md["gemma4.rope_freqs"] = HDR["rope_freqs"]
+        md["gemma4.rope_freqs"] = hdr["rope_freqs"]
     return md
 
 
@@ -75,6 +76,19 @@ def test_e2b_doubles_the_shared_layers_ffn_and_has_one_kv_head():
     s = ModelSpec.from_hf_config(CFG_E2B)
     assert (s.num_layers, s.num_kv_heads, s.intermediate, s.intermediate_shared) == (35, 1, 6144, 12288)
     assert G4.kv_sources(s)[15:] == [13 if t == DENSE_LOCAL_SHARED else 14 for t in s.layer_types[15:]]
+
+
+def test_e2b_gguf_and_hf_config_derive_the_same_spec():
+    # the GGUF lists feed_forward_length per layer (6144 x 15, then 12288 x 20)
+    g = ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B))
+    assert g.spec_hash() == ModelSpec.from_hf_config(CFG_E2B).spec_hash()
+    assert (g.hidden, g.global_head_dim, g.global_rotary_dim, g.ple_dim) == (1536, 512, 128, 256)
+
+
+def test_the_shipped_e2b_spec_is_the_derived_one():
+    from recipes.load import load_spec
+    shipped = load_spec(Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs" / "gemma4-e2b.json")
+    assert shipped.spec_hash() == ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B)).spec_hash()
 
 
 @pytest.mark.parametrize("key,val", [("attention_k_eq_v", True), ("enable_moe_block", True),
@@ -147,6 +161,58 @@ def test_part_geometry(unvalidated, monkeypatch, e4b, part, hd, rot, pair, cs_of
     assert L.PTAB_ROW == 2048 and L.KV_ROW == 2 * 2 * hd * 2     # [K | V] rows of 2 kv heads, bf16
     if shared:                       # no k / v projection in the pool
         assert L.POOL_K == L.POOL_V == L.POOL_O
+
+
+# ---- E2B: one kv head, and a twice-wider FFN in the KV-shared layers
+@pytest.fixture
+def e2b():
+    return ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B))
+
+
+def test_e2b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, e2b):
+    have = HDR_E2B["tensors"]
+    by_kind, glob, per_layer = plan_names(e2b)
+    assert set(glob) <= set(have)
+    for l, kind in enumerate(e2b.layer_types):
+        names = [n.replace("{l}", str(l)) for n in by_kind[kind] + per_layer]
+        assert set(names) <= set(have), sorted(set(names) - set(have))
+    p = G4.pack_plan(e2b)
+    for kind, l in ((DENSE_LOCAL, 0), (DENSE, 4), (DENSE_LOCAL_SHARED, 15), (DENSE_SHARED, 19)):
+        for op in p["layer_types"][kind]["pool"]:
+            dims, ty = have[op["tensor"].replace("{l}", str(l))]
+            assert ty == "Q4_0" and op["op"] == "std_perm_gguf"
+            assert op["in_dim"] == dims[0] and op["nch"] * 8192 == dims[0] * dims[1]
+    assert have["blk.15.ffn_up.weight"][0] == [1536, 12288] and have["blk.14.ffn_up.weight"][0] == [1536, 6144]
+    assert not any(f"blk.{l}.attn_k.weight" in have for l in range(15, 35))
+
+
+@pytest.mark.parametrize("part,hd,rot,ff,n,e_a,elems,shared", [
+    ("local", 256, 256, 6144, 4, 1024, 2, False), ("global", 512, 128, 6144, 8, 2048, 1, False),
+    ("local_shared", 256, 256, 12288, 4, 1024, 2, True), ("global_shared", 512, 128, 12288, 8, 2048, 1, True)])
+def test_e2b_part_geometry(unvalidated, monkeypatch, e2b, part, hd, rot, ff, n, e_a, elems, shared):
+    """One kv head: the element is the whole cache row and cos / sin stay at 512 (attn.h reads them across
+    the sliding kinds' two record elements). The sliding kinds' 256-wide kv projection splits over 4
+    cores, the global kinds' 512-wide one over 8; each kind is its own xclbin and pool layout."""
+    monkeypatch.setenv("G4_PART", part)
+    R = G4.recipe(e2b)
+    G, L = R.geo, R.layout
+    assert (G.HD, G.ROT, G.FF, G.N_CORES, G.KVH, G.KV_SHARED) == (hd, rot, ff, n, 1, shared)
+    assert (L.E_A, L.KV_ROW, L.PTAB_ROW, G.PTAB_ELEMS, G.PTAB_CS_ELEM, G.PTAB_CS_OFF) == (e_a, e_a, 2048, elems, 1, 512)
+    assert G.PER_CALL == 1
+
+
+def test_only_e2b_caps_the_chunks_per_element(e4b, e2b):
+    # the 12288-wide FFN table leaves room for one chunk per element; the generated TUs are shared by every kind
+    assert G4.per_call_cap(e4b) is None
+    assert G4.per_call_cap(e2b) == 1
+
+
+def test_e2b_manifest_rows_and_sources(unvalidated, e2b):
+    m = manifest(e2b)
+    assert m["kv_source"][15:] == [13 if t == DENSE_LOCAL_SHARED else 14 for t in e2b.layer_types[15:]]
+    assert {k: v["kv_row"] for k, v in m["kernels"].items() if "kv_row" in v} == {
+        "dx_local": 1024, "dx": 2048, "dx_local_shared": 1024, "dx_shared": 2048}
+    assert (m["globals"]["ptab_local"]["per_row"], m["globals"]["ptab_local"]["cs_off"]) == (2048, 512)
 
 
 def test_other_families_keep_their_attention_defaults():

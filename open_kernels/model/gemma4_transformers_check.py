@@ -7,7 +7,7 @@ inputs. The embedding and the per-layer table are cut to the prompt's tokens (th
 rows), so nothing near the whole model is ever in fp32. Both sides see the same numbers; what is compared is
 the math.
 
-    python gemma4_transformers_check.py <model.gguf> [--ids 2,105,...] [--layers 0,5,24,29]
+    python gemma4_transformers_check.py <model.gguf> [--ids 2,105,...] [--layers 0,5,24,29]   (E2B: --layers 0,4,15,19)
 """
 from __future__ import annotations
 
@@ -44,15 +44,19 @@ def main() -> int:
     uniq = sorted(set(ids))
     remap = {t: i for i, t in enumerate(uniq)}
     small = [remap[t] for t in ids]
+    # E2B lists one FFN width per layer, twice as wide in its KV-shared layers (use_double_wide_mlp)
+    ff = g.md["gemma4.feed_forward_length"]
+    ffs = [int(f) for f in ff] if isinstance(ff, (list, tuple)) else [int(ff)] * G.n_layers
+    double = any(f == 2 * ffs[0] for f in ffs)
 
     cfg = Gemma4TextConfig(
-        vocab_size=len(uniq), hidden_size=G.hidden, intermediate_size=int(g.md["gemma4.feed_forward_length"]),
+        vocab_size=len(uniq), hidden_size=G.hidden, intermediate_size=ffs[0],
         num_hidden_layers=len(layers), num_attention_heads=G.nh, num_key_value_heads=G.kvh, head_dim=G.hd,
         global_head_dim=G.ghd, hidden_activation="gelu_pytorch_tanh", rms_norm_eps=G.eps, sliding_window=G.window,
         layer_types=["sliding_attention" if k == "sliding" else "full_attention" for k in kinds],
         final_logit_softcapping=G.softcap or None, vocab_size_per_layer_input=len(uniq),
         hidden_size_per_layer_input=G.ple, num_kv_shared_layers=nsh, attention_k_eq_v=False,
-        use_double_wide_mlp=False, tie_word_embeddings=True, pad_token_id=0,
+        use_double_wide_mlp=double, tie_word_embeddings=True, pad_token_id=0,
         rope_parameters={"full_attention": {"rope_type": "proportional", "partial_rotary_factor": G.grot / G.ghd,
                                             "rope_theta": G.theta},
                          "sliding_attention": {"rope_type": "default", "rope_theta": G.theta_local}})

@@ -59,14 +59,28 @@ def kinds(spec: ModelSpec) -> list[str]:
     return [k for k in KINDS if k in spec.layer_types]
 
 
-def sub_spec(spec: ModelSpec, kind: str) -> ModelSpec:
-    """One layer kind as the dense recipe sees it: its head width, rotation and FFN width."""
+def _kind_spec(spec: ModelSpec, kind: str) -> ModelSpec:
     glob = kind in (DENSE, DENSE_SHARED)
     hd = (spec.global_head_dim or spec.head_dim) if glob else spec.head_dim
     rot = (spec.global_rotary_dim or hd) if glob else spec.rotary_dim
     ff = (spec.intermediate_shared or spec.intermediate) if kind in OWN else spec.intermediate
     return replace(spec, layer_types=(kind,), num_layers=1, head_dim=hd, rotary_dim=rot, intermediate=ff,
                    global_head_dim=0, global_rotary_dim=0, intermediate_shared=0, extra={})
+
+
+def per_call_cap(spec: ModelSpec) -> int | None:
+    """E2B's KV-shared layers have a twice-wider FFN, whose activation table leaves room for one chunk
+    per weight element where the other kinds take two. The dense kernel TUs are generated once per
+    export, so every kind takes the smaller; None when the kinds agree (E4B), which changes nothing."""
+    pcs = {D.per_call(_kind_spec(spec, k)) for k in kinds(spec)}
+    return min(pcs) if len(pcs) > 1 else None
+
+
+def sub_spec(spec: ModelSpec, kind: str) -> ModelSpec:
+    """One layer kind as the dense recipe sees it: its head width, rotation and FFN width."""
+    s = _kind_spec(spec, kind)
+    cap = per_call_cap(spec)
+    return replace(s, extra={"per_call": cap}) if cap else s
 
 
 def kv_sources(spec: ModelSpec) -> list[int]:

@@ -49,6 +49,32 @@ python ../utilities/core_sizes.py designs/dense/build_gemma4_h2560_global      #
 
 ## Equivalence evidence for the shared design files
 
-`python utilities/mlir_equiv.py dump <dir> --root <pristine tree>` before, `dump` after, `diff`, then
-`ppcheck <after> <pristine tree>`: MLIR identical for every dense spec, and every (kernel source, flags)
-pair preprocesses to the same tokens.
+Three checks, each against a pristine tree (`git archive <rev> open_kernels utilities | tar -x -C <dir>`),
+all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` is a worked example):
+
+- `python utilities/attn_flags.py` in both trees (copy the new script into the old one): every spec's
+  attention flags, one `<spec>@<build>` line per Gemma 4 kind. Identical lines = identical build lines.
+- `python utilities/mlir_equiv.py --root <tree>/open_kernels --out <dir>` for both, then `cmp` each
+  `<spec>.<build>.mlir`: identical MLIR.
+- `ALL_SPECS=1 OLD_DIR=<pristine>/open_kernels bash utilities/attn_pp_identical.sh`: every attention TU
+  preprocesses to the same tokens at every spec's flags. The worktree's copy has CRLF line endings
+  (autocrlf), which WSL bash refuses: run an LF copy inside a snapshot of the tree, not the worktree file.
+
+## E2B (one kv head)
+
+- Needs the one-kv-head attention point (OPEN-ATTN-ONE-KV-HEAD, cherry-picked from feat/gemma3-1b).
+- Its shared layers' 12288-wide FFN fits one chunk per weight element, the others two; the generated
+  dense TUs are per export, so `gemma4.per_call_cap` pins every kind to one (E4B: no cap, no change).
+- Sliding kinds run on 4 cores (256-row kv projection), global kinds on 8; each kind is its own xclbin.
+- A KV-shared kind at one kv head reads this position's row back as one element: `ATTN_KV_SHARED`
+  selects the one-pointer `attn_step_new` (dx.py adds the flag only there).
+- Validate the replica first: `gemma4_transformers_check.py <e2b gguf> --layers 0,4,15,19`.
+
+## Serving (`oflm serve`)
+
+- Google's tokenizer_config.json names `<bos>` with no ids, and oflm exits at load without
+  `bos_token_id` / `eos_token_id`: oflm-add merges them from the source directory's
+  generation_config.json (bos 2, eos [1, 106, 50]).
+- Google's config.json nests the text model under `text_config`; the adapter lifts absent keys to the
+  top level on the open path, or the sampler is built with vocab 0 and the server crashes on the first
+  token.

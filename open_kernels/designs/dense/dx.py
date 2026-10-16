@@ -172,6 +172,8 @@ if G.ROPE_PAIR != G.ROT // 2:
     ATTN_FLAGS.append(f"-DATTN_ROPE_PAIR={G.ROPE_PAIR}")
 SHARED = G.KV_SHARED                                   # no k / v: the window and this position's row come from another layer's cache
 assert not (SHARED and (QKVB or STOP != 99)), "dx.py: a KV-shared layer has no bias stream or debug stops"
+if SHARED and G.KVH == 1:                              # this position's row is one fifo element (attn_step_new.cc)
+    ATTN_FLAGS.append("-DATTN_KV_SHARED=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.

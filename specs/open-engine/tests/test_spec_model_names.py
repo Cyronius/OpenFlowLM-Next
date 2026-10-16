@@ -38,6 +38,7 @@ EXPECTED = {
     "qwen3-4b": "Qwen3-4B-NPU2",
     "qwen3-8b": "Qwen3-8B-NPU2",
     "gemma4-e4b": "Gemma4-E4B-IT-NPU2",      # the directory FLM's catalogue keeps this model's kernels in
+    "gemma4-e2b": "Gemma4-E2B-IT-NPU2",
 }
 
 

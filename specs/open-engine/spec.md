@@ -1106,10 +1106,18 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 - The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
   layers, hidden 2560, 8 heads over 2 kv, head dims 256 / 512, global rotation 128, ff 10240,
   per-layer input 256, softcap 30, layers 24-41 KV-shared, sources 22 / 23.
-- E2B derives ff 12288 in its 20 shared layers and one kv head (its kernels wait on the one-kv-head
-  attention point).
-- Every tensor the plan and the host stages name is in the real E4B file's table; the shared kinds
-  name no `attn_k` / `attn_v` / `attn_k_norm`, and the file has none for layers 24-41.
+- E2B: its GGUF (which lists one FFN width per layer) and transformers' config derive the same spec,
+  `recipes/specs/gemma4-e2b.json`: 35 layers, hidden 1536, 8 heads over ONE kv head, ff 6144, and
+  12288 in its 20 KV-shared layers, sources 13 / 14. Every kind takes one chunk per weight element:
+  the 12288-wide activation table leaves room for no more, and the generated kernel TUs are shared by
+  every kind of an export. The sliding kinds split over 4 cores (their kv projection is 256 rows),
+  the global kinds over 8. At one kv head the attention element is the whole cache row
+  (OPEN-ATTN-ONE-KV-HEAD), cos / sin stay at record offset 512 (read across the sliding kinds' two
+  record elements), and a KV-shared kind takes this position's row back as one element
+  (`ATTN_KV_SHARED`).
+- Every tensor the plan and the host stages name is in the real E4B and E2B files' tables, at the
+  widths the plan packs; the shared kinds name no `attn_k` / `attn_v` / `attn_k_norm`, and the files
+  have none for layers 24-41 (E4B) and 15-34 (E2B).
 - The four kinds' geometry: head dim, rotation, pair distance, cos / sin offset (1024 on the sliding
   kinds, whose 1024-byte fifo element cannot hold 512 + 1024 bytes), record elements, no k / v pool
   on a shared kind. Every other family keeps the attention defaults, so its build line does not
@@ -1118,9 +1126,10 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 
 **Verification (manual):**
 1. Replica against transformers: `python open_kernels/model/gemma4_transformers_check.py <model.gguf>`
-   builds a four-layer Gemma4ForCausalLM (real layers 0, 5, 24, 29: both kinds, own and shared caches)
-   with the GGUF's dequantized weights and compares every layer, the final norm and the soft-capped
-   logits with `replica_gemma4.py` in fp64. Pass: worst relative difference under 1e-4.
+   builds a four-layer Gemma4ForCausalLM (real layers 0, 5, 24, 29: both kinds, own and shared caches;
+   E2B: `--layers 0,4,15,19`, which also covers the double-wide FFN) with the GGUF's dequantized weights
+   and compares every layer, the final norm and the soft-capped logits with `replica_gemma4.py` in fp64.
+   Pass: worst relative difference under 1e-4.
 2. Probe: `export_qwen36_kernels.py --spec recipes/specs/gemma4-e4b.json --only dx_local,dx_global`
    (and the two `_shared` sets) under `OPEN_KERNELS_UNVALIDATED=1` links, and `utilities/core_sizes.py`
    reports every core within its 16384 B of program memory.
@@ -1130,7 +1139,8 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 
 **Result 2026-10-16 (replica):** the four-layer slice (layers 0, 5, 24, 29; 13 tokens) agrees with
 fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
-same argmax.
+same argmax. E2B (layers 0, 4, 15, 19: one kv head, the 12288-wide FFN in the shared pair): 1.2e-6 at
+worst, same argmax.
 
 **Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
 soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split

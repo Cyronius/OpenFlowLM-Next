@@ -271,7 +271,9 @@ STACK = 0x1800
 
 def per_call(spec: ModelSpec) -> int:
     """Chunks per weight element: 2 (10 KB, as the MoE designs) unless the widest activation table
-    leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB)."""
+    leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB).
+    A family whose layer kinds share one export's generated kernel TUs may cap it lower through
+    `extra["per_call"]` (Gemma 4 E2B, recipes/gemma4.py); no other spec carries that key."""
     wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
     for pc in (2, 1):
         ch = chunk_bytes(pool_quant(spec))
@@ -281,7 +283,8 @@ def per_call(spec: ModelSpec) -> int:
         stack = 0x1400 if pool_quant(spec) == "q4_1_f32" else STACK
         l1 = tab_bytes(wide) + 2 * pc * ch + 2 * ELEM + 2 * BAND_ROWS * 4 + 2 * BAND_ROWS * 4 + stack
         if l1 <= L1_BUDGET:
-            return pc
+            cap = (spec.extra or {}).get("per_call")
+            return min(pc, int(cap)) if cap else pc
     raise OpRangeError(f"dense: a {wide}-wide activation table does not leave room for the streams in a core's L1")
 
 

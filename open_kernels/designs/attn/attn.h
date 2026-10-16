@@ -92,6 +92,9 @@
 #ifndef ATTN_ROPE_PAIR
 #define ATTN_ROPE_PAIR (ATTN_ROT / 2)   // pairs are (i, i + this); Gemma 4's proportional RoPE pairs across the head
 #endif
+#ifndef ATTN_KV_SHARED
+#define ATTN_KV_SHARED 0     // 1: a KV-shared layer at one kv head reads this position's row back as one element
+#endif
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
