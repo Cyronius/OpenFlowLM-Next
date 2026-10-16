@@ -1839,7 +1839,7 @@ WHISPER_FAMILY = "whisper-v3"
 WHISPER_SIDECARS = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"]
 # Every type the engine's GGUF reader widens to bf16 (gguf_file.cpp dequant_row).
 WHISPER_GGUF_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K"}
-# The engine holds bf16 whatever the file, so the quant only trades download size against rounding.
+# Every quant is widened to bf16 at load, so the choice trades download size against rounding, not memory.
 WHISPER_GGUF_PREFERENCE = ["Q8_0", "F16", "Q6_K", "Q5_K_M", "Q4_K_M"]
 WHISPER_GGUF_RE = re.compile(r"[.\-_ ](BF16|F16|F32|I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
 WHISPER_KERNELS_FORMAT = "oflm-open-whisper-kernels-v1"
@@ -2005,7 +2005,6 @@ def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, sy
         raise SystemExit(f"No Whisper weights the open engine reads in {repo} ({why}).")
 
     user_list = user_registry_path(args.config)
-    target = models_root_dir(args.models_root) / dir_name
     kv = None
     if gguf_name:
         if local_dir:
@@ -2036,7 +2035,18 @@ def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, sy
         if wrong:
             raise SystemExit(f"Not whisper-large-v3-turbo's geometry, the only one the open engine runs "
                              f"(have, want): {wrong}")
+    # One directory per quant, so a second --quant install never serves another quant's model.gguf.
+    if gguf_name and not dir_name.lower().endswith("-" + quant.lower()):
+        dir_name = f"{dir_name}-{quant}"
+    target = models_root_dir(args.models_root) / dir_name
     tag = args.tag or f"{WHISPER_FAMILY}:turbo-{variant}"
+    family, _, name = tag.partition(":")
+    if family != WHISPER_FAMILY or not name:
+        raise SystemExit(f"--tag {tag}: a Whisper tag has the form {WHISPER_FAMILY}:<name>. oflm serve takes only "
+                         f"whisper tags for --asrmodel, and keeps {WHISPER_FAMILY} out of the chat model list.")
+    if name in ((system_registry.get("models") or {}).get(family) or {}):
+        raise SystemExit(f"--tag {tag} is a shipped model's tag: oflm would size these files against that model's "
+                         f"download records, call them missing and download it again. Choose another name.")
 
     if args.dry_run:
         print(f"repo directory : {dir_name}")
@@ -2051,18 +2061,18 @@ def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, sy
     target.mkdir(parents=True, exist_ok=True)
     want = WHISPER_SIDECARS + (["model.gguf"] if gguf_name else ["model.safetensors"])
     if local_dir:
-        copy_from_dir(local_dir, target, force=args.force, gguf_name=gguf_name, want=want)
+        got = copy_from_dir(local_dir, target, force=args.force, gguf_name=gguf_name, want=want)
     else:
-        if cache:
-            copy_from_dir(cache, target, force=args.force, gguf_name=gguf_name, want=want)
-        fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=False,
-                     quiet=args.quiet, gguf_name=gguf_name, want=want)
+        got = copy_from_dir(cache, target, force=args.force, gguf_name=gguf_name, want=want) if cache else []
+        # What the HF cache just supplied is current, so --force downloads only the rest.
+        got += fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=args.force,
+                            quiet=args.quiet, gguf_name=gguf_name, want=[f for f in want if f not in got])
     for f in WHISPER_SIDECARS:
-        if (target / f).is_file():
+        if f in got or ((target / f).is_file() and not args.force):
             continue
         for b in bases:
             try:
-                if fetch_from_repo(b, f, target / f, modelscope=modelscope):
+                if fetch_from_repo(b, f, target / f, modelscope=modelscope, force=args.force):
                     log(f"[INFO]   {f} <- {b}")
                     break
             except Exception as ex:
