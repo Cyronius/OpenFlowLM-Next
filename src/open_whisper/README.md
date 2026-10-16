@@ -17,12 +17,17 @@ in the first place, since it never touches the array).
 
 ## Files
 
-- `weights.hpp/.cpp` -- loads `model.open.safetensors` (via
-  `open_qwen36::Q4nxFile`, which is a plain safetensors reader and needed no
-  changes), checks `weights_manifest.json`'s format and `config.json`'s
-  geometry, and pre-tiles every `[K,N]` GEMM operand with `tile_b()` (ported
-  with attribution from NpuEmbeddings' `npue_pack.cpp`, whose `tile_b` is not
-  exported from that translation unit).
+- `weights.hpp/.cpp` -- loads the encoder's weights, checks a container's
+  `weights_manifest.json` format and `config.json`'s geometry, and pre-tiles
+  every `[K,N]` GEMM operand with `tile_b()` (ported with attribution from
+  NpuEmbeddings' `npue_pack.cpp`, whose `tile_b` is not exported from that
+  translation unit).
+- `weight_source.hpp/.cpp` -- the container's tensors from whichever file the
+  model directory holds: `model.open.safetensors` as built, OpenAI's
+  `model.safetensors`, or a GGUF (`open_qwen36::GgufFile`), the last two
+  rearranged at load as q4nx-build's converter does (OPEN-WHISPER-STOCK,
+  OPEN-WHISPER-GGUF). `weight_source_test.cpp` checks them against the
+  converter's own output.
 - `kernels.hpp/.cpp` -- opens the kernel set (under `oflm`, the directory
   `whisper_engine_select.cpp`'s `find_open_kernels` chose -- see "Kernel set
   placement"; the standalone CLI takes `--kernels`, else
@@ -233,8 +238,10 @@ decoding; it exists to gate correctness, not to claim a decode rate.
 and the closed `whisper_npu` in `src/common/whisper/
 whisper_engine_select.cpp`, the sole factory `make_whisper_engine()` declared
 in `whisper/whisper_engine.hpp`. Auto picks open when the model directory has
-BOTH `model.open.safetensors` and a kernel set (`OFLM_WHISPER_KERNELS_DIR`,
-else `<model_dir>/open_kernels`, else `<xclbins root>/xclbins/<model name>/open_kernels`); else closed when `model.q4nx` is there;
+BOTH open-engine weights (`model.open.safetensors`, `model.safetensors` or
+`model.gguf`) and a kernel set (`OFLM_WHISPER_KERNELS_DIR`,
+else `<model_dir>/open_kernels`, else `<xclbins root>/xclbins/<model name>/open_kernels`,
+else any complete set built for this `config.json`, 2026-10-16); else closed when `model.q4nx` is there;
 else it refuses, naming both missing paths. Every branch logs which rule
 fired (`modeling_whisper.cpp` also logs `describe()` right after, so a load
 prints two lines: which rule chose an engine, then which engine and kernel

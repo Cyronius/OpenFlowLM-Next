@@ -122,6 +122,20 @@ def test_repo_url_names_the_base_checkpoint():
     assert oflm_add.hf_repo_from_url("https://example.com/x/y") is None
 
 
+def test_another_whisper_size_is_refused_before_anything_is_copied(tmp_path):
+    import pytest
+    src = tmp_path / "whisper-small"
+    write_sidecars(src)
+    cfg = json.loads((src / "config.json").read_text())
+    (src / "config.json").write_text(json.dumps({**cfg, "d_model": 768, "encoder_layers": 12}))
+    (src / "model.safetensors").write_bytes(b"\0" * 8)
+    args = SimpleNamespace(tag=None, quant=None, config=str(tmp_path / "reg.json"), models_root=str(tmp_path / "m"),
+                           xclbin_dir=None, force=False, no_verify=False, quiet=True, dry_run=False)
+    with pytest.raises(SystemExit, match="d_model"):
+        oflm_add.install_whisper(args, str(src), src, False, "whisper-small", {}, None, {})
+    assert not (tmp_path / "m").exists()
+
+
 def test_local_gguf_install_registers_the_open_engine_entry(tmp_path, monkeypatch):
     src = tmp_path / "whisper-gguf"
     src.mkdir()

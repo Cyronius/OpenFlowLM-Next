@@ -2030,6 +2030,12 @@ def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, sy
                   if b not in bases]
     else:
         quant, variant, weights, bases = "F16", "safetensors", "safetensors", []
+        peek = peek_config_dict(None if local_dir else repo, modelscope, local_dirs=[local_dir, cache])
+        wrong = {k: ((peek or {}).get(k), v) for k, (v, _) in WHISPER_GEOMETRY.items()
+                 if (peek or {}).get(k) != v}
+        if wrong:
+            raise SystemExit(f"Not whisper-large-v3-turbo's geometry, the only one the open engine runs "
+                             f"(have, want): {wrong}")
     tag = args.tag or f"{WHISPER_FAMILY}:turbo-{variant}"
 
     if args.dry_run:

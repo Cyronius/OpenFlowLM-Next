@@ -199,10 +199,10 @@ merges, special ids and suppress lists, but not every value the host reads: gene
 on conventions for those, and would differ from OpenAI's without failing anywhere. The
 fetched files are OpenAI's own, checked against the metadata.
 
-**Test (2026-10-16):** 7 unit tests: quant choice, the GGUF checks, every sidecar check
+**Test (2026-10-16):** 8 unit tests: quant choice, the GGUF checks, every sidecar check
 (merges, vocabulary, a special id, a suppress list), the tokenizer_config fields, kernel
-discovery by geometry under another name, and a local GGUF install end to end with the
-fetch stubbed.
+discovery by geometry under another name, another Whisper size refused before anything is
+copied, and a local GGUF install end to end with the fetch stubbed.
 
 **Verification (manual), 2026-10-16:** installing the Q8_0 GGUF from a local directory into
 a scratch registry fetched the four files from openai/whisper-large-v3-turbo; config.json,
