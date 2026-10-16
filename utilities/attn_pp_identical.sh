@@ -64,9 +64,10 @@ if [ -n "$ALL_SPECS" ]; then
   declare -A SEEN
   while IFS= read -r l; do
     tag=${l%%|*}
+    stem=${tag%%@*}
     # a spec the reference tree does not have is a new point: nothing to compare against
-    if [ -n "$OLD_DIR" ]; then [ -f "$OLD_DIR/recipes/specs/$tag.json" ] || continue
-    else git -C "$W" cat-file -e "$REF:open_kernels/recipes/specs/$tag.json" 2>/dev/null || continue; fi
+    if [ -n "$OLD_DIR" ]; then [ -f "$OLD_DIR/recipes/specs/$stem.json" ] || continue
+    else git -C "$W" cat-file -e "$REF:open_kernels/recipes/specs/$stem.json" 2>/dev/null || continue; fi
     [ -n "${SEEN[${l#*|}]}" ] && { echo "same flags as ${SEEN[${l#*|}]}: $tag"; continue; }
     SEEN[${l#*|}]=$tag
     SETS+=("spec-$l")
