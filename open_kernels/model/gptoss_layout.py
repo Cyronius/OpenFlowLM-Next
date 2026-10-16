@@ -1,25 +1,13 @@
-"""GPT-OSS's routed experts on the eight main cores: the layout chosen in
-specs/open-engine/plans/gptoss-expert-layout.md, as host arithmetic the IRON design will be written
-from (2026-10-16).
+"""GPT-OSS's expert layout on the main cores as host arithmetic (2026-10-16; plans/gptoss-expert-layout.md).
 
     python -I open_kernels/model/gptoss_layout.py                      # geometry and stream check
     python -I open_kernels/model/gptoss_layout.py --gguf <MXFP4 .gguf>  # + a one-layer slice on real weights
-
-The layout, in one paragraph. The experts stay MXFP4. A pool tile is 32 rows x 288 columns in 5120
-bytes -- the same element size every q4_1 projection streams in, so one weight fifo serves the whole
-layer -- and 2880 is exactly ten of them, so nothing is padded along K. A projection is 45 bands of 64
-rows; the cores take 6,6,6,6,6,5,5,5 of them, so nothing is padded along the rows either. The 32 rows'
-output biases ride in the first tile of each band half and seed the accumulator. Each expert is one
-contiguous block (gate and up bands interleaved, then down), so routing patches every fill of a slot
-by one stride. A token runs in two phases: every slot's gate|up and clamped SwiGLU, then -- after one
-barrier -- every slot's down against its own h, so a core holds one activation table at a time.
 
 Traces: OPEN-GPTOSS-EXPERT-LAYOUT (specs/open-engine/spec.md).
 """
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,8 +103,7 @@ class Layout:
 
 def layout(hidden: int = 2880, ff: int = 2880, experts: int = 32, topk: int = 4, n_cores: int = 8,
            pad_rows: bool = False, table_k: int | None = None) -> Layout:
-    """`table_k` is the widest activation the core holds a table for; the MoE dispatch alone
-    needs max(hidden, ff), a core that also runs the attention projections needs their K."""
+    """`table_k`: the widest K the core prepares (4096 when it also runs o_proj)."""
     for what, k in (("hidden", hidden), ("ff", ff)):
         if k % TILE_COLS:
             raise ValueError(f"{what} {k} is not a whole number of {TILE_COLS}-column MXFP4 tiles")
@@ -168,8 +155,7 @@ def core_program(L: Layout, c: int) -> list[tuple]:
 
 @dataclass(frozen=True)
 class Act:
-    """The per-layer act buffer offsets the MoE dispatch touches (bytes). The residual region
-    is a whole w element past the last core's slice, which its header fill reads."""
+    """Act offsets; the residual region runs a w element past the last core's slice, which its header fill reads."""
     xm: int = 0
     rout: int = 2 * ELEM
     res: int = 2 * ELEM + CALL_BYTES
@@ -178,8 +164,7 @@ class Act:
 
 
 def host_sequence(L: Layout, A: Act = Act()) -> list[tuple]:
-    """The runtime sequence's DMA tasks in issue order: (kind, fifo, core, buffer, offset, bytes, slot).
-    Pool offsets are slot s's PLACEHOLDER expert, s; routing rewrites them."""
+    """DMA tasks in issue order, (kind, fifo, core, buffer, offset, bytes, slot); slot s reads placeholder expert s."""
     seq: list[tuple] = [("fill", "x", -1, "act", A.xm, L.xm_elems * ELEM, -1)]
     for c in range(L.n_cores):
         seq.append(("fill", "w", c, "act", A.rout, CALL_BYTES, -1))
@@ -205,10 +190,7 @@ def host_sequence(L: Layout, A: Act = Act()) -> list[tuple]:
 
 
 def check(L: Layout, A: Act = Act()) -> dict:
-    """The three refusals OPEN-MOE-WIDE-FF records for qwen36moe's layout -- the core
-    assignment, the core scratch, the expert hidden's element count -- asked of this one, plus
-    the stream balances a hang on hardware would otherwise be the first sign of. Raises on the
-    first failure; returns the numbers on success."""
+    """OPEN-MOE-WIDE-FF's three checks and the per-fifo stream balances; raises on the first failure."""
     seq = host_sequence(L, A)
     rows_up = sum(L.up_bands) * BAND_ROWS
     rows_down = sum(L.down_bands) * BAND_ROWS
@@ -277,8 +259,7 @@ def check(L: Layout, A: Act = Act()) -> dict:
 # ---- bytes, for the decision document
 def expert_stream_bytes(fmt: str, hidden: int = 2880, ff: int = 2880, topk: int = 4, layers: int = 24,
                         pad_rows: bool = False, pad_k: bool = False) -> int:
-    """Expert bytes one token streams (all layers). q4_1 tiles are 32 x 256 in 5120 B, so K is
-    padded to the next 256 whatever the rows do; MXFP4 tiles are 32 x 288 in 5120 B."""
+    """Expert bytes one token streams over all layers; a q4_1 tile is 32 x 256, so q4_1 always pads K."""
     if fmt == "mxfp4":
         kt = TILE_COLS
     elif fmt == "q4_1":
@@ -295,8 +276,7 @@ def expert_stream_bytes(fmt: str, hidden: int = 2880, ff: int = 2880, topk: int 
 
 # ---- the tile packer: GGUF MXFP4 blocks -> pool bytes, and back
 def gguf_blocks(raw: np.ndarray, rows: int, cols: int) -> tuple[np.ndarray, np.ndarray]:
-    """(codes [rows, cols] uint8, exponents [rows, cols // 32] uint8) of one expert matrix stored as
-    GGUF MXFP4 blocks: 17 bytes per 32 values, element j the low nibble of byte j, j + 16 its high."""
+    """(codes, exponents) of GGUF MXFP4 blocks: 17 B per 32 values, element j low nibble of byte j, j + 16 high."""
     blk = np.asarray(raw, np.uint8).reshape(rows, cols // 32, 17)
     q = blk[:, :, 1:]
     codes = np.concatenate([q & 0x0F, q >> 4], axis=2).reshape(rows, cols)
@@ -332,8 +312,7 @@ def unpack_tile(t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def pack_projection(codes: np.ndarray, exps: np.ndarray, bias: np.ndarray) -> np.ndarray:
-    """One projection [rows, K] into its bands: band b, chunk i = row half i % 2, k-tile i // 2
-    (gemv_q4.h's band law), the bias in each band half's k-tile 0."""
+    """[rows, K] into bands, chunk i = row half i % 2, k-tile i // 2 (gemv_q4.h's law); bias in k-tile 0."""
     rows, K = codes.shape
     nk = K // TILE_COLS
     out = np.empty((rows // BAND_ROWS, 2 * nk, TILE_BYTES), np.uint8)
@@ -348,8 +327,7 @@ def pack_projection(codes: np.ndarray, exps: np.ndarray, bias: np.ndarray) -> np
 
 
 def pack_expert(gate, up, down) -> np.ndarray:
-    """One expert block: gate and up interleaved band by band, then down. Each argument is
-    (codes, exps, bias) for that projection."""
+    """One expert block from (codes, exps, bias) per projection: gate and up interleaved by band, then down."""
     g, u, d = (pack_projection(*p) for p in (gate, up, down))
     gu = np.stack([g, u], axis=1).reshape(-1)
     return np.concatenate([gu, d.reshape(-1)])
@@ -388,8 +366,7 @@ def table_quant(x) -> np.ndarray:
 
 
 def emulate_block(L: Layout, xm, res, Wg, bg, Wu, bu, Wd, bd, ids, wts) -> np.ndarray:
-    """The block output the cores would write: every core's bands in f32 over the table-quantized
-    activations, h rounded to bf16 by its table prep, biases from the tiles."""
+    """The block output the cores write: f32 per core band over table-quantized activations, h through bf16."""
     from replica_gptoss import clamped_swiglu
     xq = table_quant(xm)
     acc = np.zeros(L.hidden, np.float32)
@@ -431,9 +408,7 @@ def _q8_0_row(path, base, t, row: int, cols: int) -> np.ndarray:
 
 
 def slice_check(path: str, layer: int = 0, token: int = 13225) -> dict:
-    """Layer `layer`'s router and its four routed experts from the GGUF: pack the experts into
-    tiles and read them back (must be exact), then the layout's block output against the fp64
-    replica on a realistic xm (a token's embedding through the post-attention norm)."""
+    """One layer's routed experts packed and read back (must be exact), then the block against fp64."""
     from replica_gptoss import expert_ffn, route
     tensors, base = _gguf(path)
     H = 2880

@@ -1,26 +1,25 @@
-// MXFP4 GEMV tile, compile-only probe for the gpt-oss expert decision (2026-10-16):
-// gemv_q4_tile's walk with e2m1 codes decoded to int8 in registers and one E8M0 scale per row block.
-//
-//   python open_kernels/kernel_remarks.py utilities/aie-probes/gemv_mx4_probe.cc -Os \
-//       -I open_kernels/designs/gemv_q4                               (WSL, ironenv142 active)
-//
-// Tile: 32 rows x 32*MX4_NB columns. E8M0 plane [0, 32*NB) at kb*32 + r, then two nibble planes
-// (rows 0-15, 16-31) in gemv_q4.h's order: byte = (k*8 + row pair), low nibble the even row.
+// MXFP4 GEMV tile for a compile-only Peano look at its cost (2026-10-16; plans/gptoss-expert-layout.md).
+//   python open_kernels/kernel_remarks.py utilities/aie-probes/gemv_mx4_probe.cc -Os -I open_kernels/designs/gemv_q4
 #include "aie_kernel_utils.h"
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
 #include "gemv_tab.h"
 
+// The tile of open_kernels/model/gptoss_layout.py: nibble planes at 0 and 2304, E8M0 at 4608, bias at 4928.
 #ifndef MX4_NB
-#define MX4_NB 10
+#define MX4_NB 9
 #endif
 static constexpr unsigned kRows = 32;
 static constexpr unsigned kNB = MX4_NB;
 static constexpr unsigned kTileK = 32 * kNB;
-static constexpr unsigned kEBytes = 32 * kNB;
 static constexpr unsigned kPlane = 8 * kTileK;
+static constexpr unsigned kBiasOff = 4928;
 
+#ifndef MX4_DECODE
+#define MX4_DECODE 1
+#endif
+#if MX4_DECODE == 1
 // codes 0..15 (bit 3 the sign) -> 2 x e2m1 as int8: mag = max(t, 2t-4, 4t-16), t = code & 7
 static inline aie::vector<int8_t, 64> e2m1x2(const aie::vector<uint8_t, 64> &c) {
   const aie::vector<int8_t, 64> t = aie::bit_and((uint8_t)7, c).template cast_to<int8_t>();
@@ -31,23 +30,38 @@ static inline aie::vector<int8_t, 64> e2m1x2(const aie::vector<uint8_t, 64> &c) 
   const auto neg = aie::ge(c, (uint8_t)8);
   return aie::select(mag, aie::neg(mag), neg);
 }
+#else
+// codes re-ordered by value at pack time (0..14) -> 2 x e2m1 + 12, no compare or select; the 12
+// comes back out through the block sums the way q4_1's minimum does
+static inline aie::vector<int8_t, 64> e2m1x2(const aie::vector<uint8_t, 64> &c) {
+  const aie::vector<int8_t, 64> t = c.template cast_to<int8_t>();
+  const aie::vector<int8_t, 64> t2 = aie::add(t, t);
+  const aie::vector<int8_t, 64> t4 = aie::add(t2, t2);
+  const aie::vector<int8_t, 64> lo = aie::min(aie::min(aie::add(t, (int8_t)5), aie::add(t2, (int8_t)2)), t4);
+  return aie::max(lo, aie::max(aie::sub(t2, (int8_t)6), aie::sub(t4, (int8_t)32)));
+}
+#endif
 
 __attribute__((noinline)) inline void gemv_mx4_tile(const uint8_t *__restrict tile,
                                                     const uint8_t *__restrict tab, unsigned K,
                                                     unsigned kt, bool first, bool last,
                                                     float *__restrict y) {
   aie::set_rounding(aie::rounding_mode::conv_even);
-  const uint8_t *__restrict ep = tile;
-  const uint8_t *__restrict nib0 = tile + kEBytes;
-  const uint8_t *__restrict nib1 = tile + kEBytes + kPlane;
+  const uint8_t *__restrict nib0 = tile;
+  const uint8_t *__restrict nib1 = tile + kPlane;
+  const uint8_t *__restrict ep = tile + 2 * kPlane;
   const int16_t *__restrict xi = (const int16_t *)tab + kt * kTileK;
   const int32_t *__restrict sh = (const int32_t *)(tab + 2 * K) + kt * kNB;
 
   aie::accum<accfloat, kRows> acc;
-  if (first)
-    acc = aie::zeros<accfloat, kRows>();
-  else
+  if (first) {
+    // the bias seeds the accumulator, in its [evens | odds] lane order
+    const aie::vector<bfloat16, kRows> b = aie::load_v<kRows>((const bfloat16 *)(tile + kBiasOff));
+    auto [be, bo] = aie::interleave_unzip(b, b, 1);
+    acc.from_vector(aie::concat(be.template extract<16>(0), bo.template extract<16>(0)));
+  } else {
     acc.from_vector(aie::load_v<kRows>(y));
+  }
 
 #pragma clang loop unroll(disable)
   for (unsigned kb = 0; kb < kNB; ++kb) {
@@ -62,9 +76,13 @@ __attribute__((noinline)) inline void gemv_mx4_tile(const uint8_t *__restrict ti
             aie::load_v<8>(xi + kb * 32 + oc * 8).template grow_replicate<32>();
         const aie::vector<uint8_t, 64> q = aie::load_v<64>(src + oc * 64);
         const aie::vector<uint8_t, 64> lo = aie::bit_and((uint8_t)0x0F, q);
+#ifdef MX4_NO_SHIFT
+        const aie::vector<uint8_t, 64> hi = aie::bit_and((uint8_t)0x0E, q);   // cost probe only: wrong values
+#else
         // the high nibbles move down through a 16-bit view: a uint8 shift does not legalize
         const aie::vector<uint8_t, 64> hi = aie::bit_and(
             (uint8_t)0x0F, aie::downshift(q.template cast_to<uint16_t>(), 4).template cast_to<uint8_t>());
+#endif
         if (oc == 0) {
           Ce.mul(A, e2m1x2(lo));
           Co.mul(A, e2m1x2(hi));
@@ -89,6 +107,12 @@ __attribute__((noinline)) inline void gemv_mx4_tile(const uint8_t *__restrict ti
     const aie::vector<bfloat16, kRows> sperm = aie::concat(se.template extract<16>(0), so.template extract<16>(0));
     acc = aie::mac(acc, hi, sperm);
     acc = aie::mac(acc, lo, sperm);
+#if MX4_DECODE != 1
+    const bfloat16 *__restrict xsh = (const bfloat16 *)(tab + 2 * K + 4 * (K / 32)) + kt * kNB;
+    const aie::vector<bfloat16, kRows> m12 = aie::mul(sperm, (bfloat16)(-12.0f)).template to_vector<bfloat16>();
+    acc = aie::mac(acc, m12, xsh[kb]);
+    acc = aie::mac(acc, m12, xsh[kb + K / 32]);
+#endif
   }
 
   const aie::vector<float, kRows> yv = acc.template to_vector<float>();
@@ -104,6 +128,6 @@ __attribute__((noinline)) inline void gemv_mx4_tile(const uint8_t *__restrict ti
 extern "C" {
 void gemv_mx4_probe(const uint8_t *__restrict t, const uint8_t *__restrict tab, float *__restrict y,
                     int32_t kt) {
-  gemv_mx4_tile(t, tab, 32 * kNB * 9, (unsigned)kt, kt == 0, kt == 8, y);
+  gemv_mx4_tile(t, tab, kTileK * 10, (unsigned)kt, kt == 0, kt == 9, y);
 }
 }

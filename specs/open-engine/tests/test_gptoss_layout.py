@@ -1,10 +1,5 @@
 # Traces: OPEN-GPTOSS-EXPERT-LAYOUT (canonical spec: specs/open-engine/spec.md)
-"""The expert layout chosen for GPT-OSS (open_kernels/model/gptoss_layout.py), checked on the
-host: the tile format packs the GGUF's MXFP4 values and biases exactly, the 45 bands of every
-projection are dealt to the eight cores once each, the per-token stream balances on every fifo,
-one stride patches every routed slot, and the core scratch fits. The real-weight slice runs from
-the command line against the 12 GB GGUF (the spec's manual procedure); these need neither.
-"""
+"""GPT-OSS's expert layout (open_kernels/model/gptoss_layout.py) on synthetic weights; the real-GGUF slice is manual."""
 from __future__ import annotations
 
 import dataclasses
@@ -37,11 +32,10 @@ def _values(codes, exps):
 
 
 def test_2880_is_ten_tiles_and_a_tile_pair_is_the_q4_1_weight_element():
-    """No padding along K, and the w fifo element the attention projections already stream in
-    carries the experts too -- the reason the tile is 288 columns rather than 256 or 320."""
+    """288 columns: 256 would pad K, 320 would not fit the 5120-byte half of the shared w element."""
     assert 2880 == 10 * G.TILE_COLS
     assert G.CALL_BYTES == M.CALL_BYTES == 2 * M.CHUNK
-    assert 2880 % 256 and 2880 % 320 == 0          # 256 would pad K, 320 would not fit 5120 B
+    assert 2880 % 256 and 2880 % 320 == 0
     assert G.TILE_ROWS * 320 // 2 + G.TILE_ROWS * 10 > G.TILE_BYTES
     assert G.BIAS_OFF % 64 == 0 and G.NIB_PLANE % 64 == 0 and G.EXP_OFF % 32 == 0
 
@@ -55,8 +49,7 @@ def test_a_tile_round_trips_codes_exponents_and_bias():
 
 
 def test_the_nibbles_follow_the_q4_kernels_index_law():
-    """Byte (k * 16 + r % 16) // 2 of plane r // 16, low nibble for even rows: the B operand the
-    mmul reads straight out of the tile. One code at (19, 200) lands in exactly one place."""
+    """One code at (19, 200) lands at nibble k * 16 + r % 16 of plane r // 16, and nowhere else."""
     codes = np.zeros((32, G.TILE_COLS), np.uint8)
     codes[19, 200] = 0xB
     t = G.pack_tile(codes, np.zeros((32, 9), np.uint8))
@@ -107,9 +100,7 @@ def test_45_bands_go_six_six_six_six_six_five_five_five():
 
 
 def test_the_chosen_layout_survives_the_three_checks_qwen36moe_refuses_it_on():
-    """OPEN-MOE-WIDE-FF's refusals, asked of this layout: no zero divisor in the core
-    assignment (every row dealt once), a core scratch inside the budget, and h and xm in a
-    whole number of x elements the fifo can take."""
+    """Core assignment, core scratch and element counts pass here; qwen36moe still refuses the same model."""
     L = G.layout()
     r = G.check(L)
     assert sum(L.up_bands) * 64 == 2880 == sum(L.down_bands) * 64
@@ -142,7 +133,7 @@ def test_every_slot_reads_its_whole_expert_block_once_and_one_stride_patches_it(
 
 
 def test_the_checks_catch_a_broken_sequence(monkeypatch):
-    """Each check fails on the mistake it is there for, so the passing run above means something."""
+    """Each check fails on the mistake it exists for."""
     L = G.layout()
     good = G.host_sequence
 
@@ -177,8 +168,7 @@ def test_the_checks_catch_a_broken_sequence(monkeypatch):
 
 
 def test_the_layouts_arithmetic_matches_the_fp64_reference():
-    """Every core's bands over a table-quantized xm, h rounded to bf16, biases from the tiles:
-    within bf16 rounding of replica_gptoss -- and a band dealt twice or not at all is not."""
+    """Within bf16 rounding of replica_gptoss, and a band dealt to nobody is not."""
     from replica_gptoss import expert_ffn
     H = F = 576
     E, k = 4, 2
@@ -203,8 +193,7 @@ def test_the_layouts_arithmetic_matches_the_fp64_reference():
 
 
 def test_the_bytes_the_options_stream():
-    """The decision document's table: the tile pad costs 5120/4896 over the GGUF's own bytes,
-    and re-quantizing to q4_1 costs 5/4.25 per value plus the K pad to 3072."""
+    """The tile pad costs 5120/4896 over the GGUF's bytes; q4_1 costs 5/4.25 per value plus the K pad."""
     ideal = G.expert_stream_bytes("mxfp4_ideal")
     tiles = G.expert_stream_bytes("mxfp4")
     q41 = G.expert_stream_bytes("q4_1")

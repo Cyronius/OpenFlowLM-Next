@@ -1,12 +1,7 @@
-r"""What re-quantizing GPT-OSS's MXFP4 experts to q4_1 does to the weights (2026-10-16).
+r"""MXFP4 experts re-quantized to q4_1 by the engine's GGUF law: weight error, and a GGUF tensor diff (2026-10-16).
 
     python -I utilities/quant-compare/mxfp4_requant.py err  <gpt-oss MXFP4 .gguf> [--layers 0,11,23] [--experts 0,17,31]
     python -I utilities/quant-compare/mxfp4_requant.py diff <a.gguf> <b.gguf>
-
-`err` decodes sampled expert matrices, re-quantizes every 32-value block with the engine's GGUF law
-(src/open_qwen36/pools.cpp std_perm_gguf: min/max, fp16 d and m, then bf16 inside the kernel) and
-prints the relative weight error, the share of blocks that survive exactly, and the same for the
-lossless int8 form. `diff` says which tensors two GGUFs store byte for byte the same.
 """
 from __future__ import annotations
 
