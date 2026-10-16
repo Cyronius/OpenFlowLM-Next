@@ -132,12 +132,23 @@ def qkv_bias(spec: ModelSpec) -> bool:
     return spec.family in QKV_BIAS_FAMILIES
 
 
+def attn_elem(spec: ModelSpec) -> int:
+    """The attention core's fifo element: half a KV cache row (KVH * HD bf16). With ONE kv
+    head that is too narrow for an fp32 head, so the element is the whole row [K_t | V_t]
+    (attn.h's ATTN_KVH 1)."""
+    if spec.num_kv_heads == 1:
+        return spec.head_dim * 4
+    return spec.num_kv_heads * spec.head_dim * 2
+
+
 def _ptab_cs_off(spec: ModelSpec) -> int:
     """Where [cos | sin] start in the position record: 512, unless that would straddle two
     attention elements -- then the next element boundary (Gemma 4's sliding layers: 1024 B
-    elements and 1024 B of cos / sin). Only gemma4 moves it; everyone else is checked below."""
-    e_a = spec.num_kv_heads * spec.head_dim * 2
-    if spec.family == "gemma4" and 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a:
+    elements and 1024 B of cos / sin). Only gemma4 moves it, and never at one kv head, where
+    attn.h reads across the two elements; everyone else is checked below."""
+    e_a = attn_elem(spec)
+    if (spec.family == "gemma4" and spec.num_kv_heads != 1
+            and 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a):
         return roundup(512, e_a)
     return 512
 
@@ -146,7 +157,9 @@ def _ptab_row(spec: ModelSpec) -> int:
     """One position record: [pos i32 @0][nf i32 @4][cos f32[ROT/2] @512][sin @512 + 2*ROT].
     It is streamed to the attention core through the same fifo as q / k / v, so it is at
     least one element wide -- and, where the element is narrower, a whole number of them."""
-    e_a = spec.num_kv_heads * spec.head_dim * 2
+    if spec.num_kv_heads == 1:
+        return roundup(max(1024, 512 + 4 * spec.rotary_dim), attn_elem(spec))
+    e_a = attn_elem(spec)
     if spec.family == "gemma4":
         return max(1024, e_a, roundup(_ptab_cs_off(spec) + 4 * spec.rotary_dim, e_a))
     return max(1024, e_a)
@@ -157,7 +170,8 @@ def _ptab_check(spec: ModelSpec, e_a: int) -> None:
     read cos / sin at a fixed offset into the one element it acquired. At 2 kv heads and
     head dim 128 the element is 512 B and the record 1024, which would have desynchronised
     the whole stream by an element. attn.h's ATTN_PTAB_SPLIT covers the case; these are its
-    limits."""
+    limits. With one kv head cos / sin may run across the record's two elements, which
+    attn.h reads vector by vector."""
     row = _ptab_row(spec)
     if row % e_a:
         raise OpRangeError(f"dense: a {row}-byte position record is not a whole number of "
@@ -166,7 +180,7 @@ def _ptab_check(spec: ModelSpec, e_a: int) -> None:
         raise OpRangeError(f"dense: a {row}-byte position record spans {row // e_a} "
                            f"{e_a}-byte elements; attn.h handles one or two")
     cs = _ptab_cs_off(spec)
-    if cs // e_a != (cs + 4 * spec.rotary_dim - 1) // e_a:
+    if spec.num_kv_heads != 1 and cs // e_a != (cs + 4 * spec.rotary_dim - 1) // e_a:
         raise OpRangeError(f"dense: cos / sin straddle two {e_a}-byte attention elements "
                            f"(record offsets {cs} to {cs + 4 * spec.rotary_dim})")
 
@@ -233,8 +247,8 @@ def _check(spec: ModelSpec) -> None:
             raise OpRangeError(f"qwen3: {what} {v} is not a multiple of {BAND_ROWS * n} (64-row bands over {n} cores)")
     if spec.hidden % 256 or spec.intermediate % 256:
         raise OpRangeError("qwen3: hidden and intermediate must be multiples of 256 (one q4 k-tile)")
-    if spec.num_kv_heads % 2:
-        raise OpRangeError("qwen3: an odd kv-head count does not split into ain elements")
+    if spec.num_kv_heads % 2 and spec.num_kv_heads != 1:
+        raise OpRangeError("qwen3: an odd kv-head count above one does not split into ain elements")
     require("ln", width=spec.hidden, groups=spec.norm_groups)
     if spec.family == "gemma4":
         require("attn_gemma4", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
@@ -282,7 +296,7 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     n = cores_for(spec)
     hid, ff, nh, kvh, hd = spec.hidden, spec.intermediate, spec.num_heads, spec.num_kv_heads, spec.head_dim
     qw, kvw = nh * hd, kvh * hd
-    e_a = kvw * 2
+    e_a = attn_elem(spec)
     _ptab_check(spec, e_a)
     hpe = e_a // (hd * 4)                     # q/k/v heads (f32) per ain element = KVH/2
     hpo = e_a // (hd * 2)                     # og heads (bf16) per aout element = KVH
@@ -298,7 +312,8 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
         QKVB=qkv_bias(spec),
-        PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=_ptab_cs_off(spec) // e_a,
+        # one kv head: cos / sin end in the record's second element, which dx.py hands attn_meta
+        PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=1 if kvh == 1 else _ptab_cs_off(spec) // e_a,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
         WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * ch,
         QW=qw, KVW=kvw,
@@ -321,7 +336,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     n = cores_for(spec)
     hid, ff = spec.hidden, spec.intermediate
     G = geometry(spec)
-    eln, e_a = hid * 2, G.KVW * 2
+    eln, e_a = hid * 2, attn_elem(spec)
     if 2 * G.HD * 2 > e_a or _ptab_cs_off(spec) + 4 * spec.rotary_dim > _ptab_row(spec):
         raise OpRangeError("dense: qn | kn or the RoPE record do not fit the attention element")
     _ptab_check(spec, e_a)
@@ -358,7 +373,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
         p[name] = off
         off += role_bytes(spec, role, rows, cols)
     pool_bytes = roundup(off, MB)
-    kv_row = 2 * e_a
+    kv_row = 4 * G.KVW                        # [K_t | V_t] bf16
     ptab_row = _ptab_row(spec)
     band = band_bytes(hid, pool_quant(spec))
     bands = lm_rows(spec) // BAND_ROWS
@@ -463,6 +478,8 @@ def gemm_route(spec: ModelSpec, max_ctx: int = 4096) -> dict | None:
     # a one-element position record, and refuses at build time otherwise -- so Qwen2 (both)
     # keeps the sequential route rather than failing its export on dx_attn.
     if G.QKVB or G.PTAB_ELEMS > 1:
+        return None
+    if spec.num_kv_heads == 1:                 # dx_attn.py walks two elements per cached row
         return None
     hid, ff, qw, kvw = spec.hidden, spec.intermediate, G.QW, G.KVW
     # ---- the NPU block-attention option (Path A, OPEN-PREFILL-ATTN) ----

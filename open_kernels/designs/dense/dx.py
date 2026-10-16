@@ -176,6 +176,7 @@ for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see 
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
 ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
+ROW = 1 if G.KVH == 1 else 2                           # ain elements per cached row (attn.h's ATTN_KVH 1)
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
@@ -245,11 +246,11 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_v = None if SHARED else ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
-    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
-    # a KV-shared layer's own row is already in the cache: it arrives as two fifo elements, not core scratch
-    nrow = [u8_a, u8_a] if SHARED else [brow, brow]
+    f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a] * ROW + [fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
+    # a KV-shared layer's own row is already in the cache: it arrives as fifo elements, not core scratch
+    nrow = [u8_a] * ROW if SHARED else [brow, brow]
     f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", nrow + [fq, foacc, fml] + h0_arg, ATTN_FLAGS)
-    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
+    f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (ROW * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
                   ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
 
@@ -464,23 +465,26 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         f_init(oacc, ml)
         if RB > 1:
             for _ in range_(pb[4]):                             # whole blocks of RB rows
-                e = ain.acquire(2 * RB)
-                args = [e[i] for i in range(2 * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
+                e = acq(ain, ROW * RB)
+                args = [e[i] for i in range(ROW * RB)] + [qs, oacc, ml, pb] + ([h0] if ACORES > 1 else [])
                 f_stepb(*args)
-                ain.release(2 * RB)
+                ain.release(ROW * RB)
             for _ in range_(pb[5]):                             # what did not fill a block
-                e = ain.acquire(2)
-                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
-                ain.release(2)
+                e = acq(ain, ROW)
+                row = [e[i] for i in range(ROW)]
+                f_step(*row, qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(*row, qs, oacc, ml, pb)
+                ain.release(ROW)
         else:
             for _ in range_(pb[1]):                             # nf cached rows (K_t, V_t)
-                e = ain.acquire(2)
-                f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
-                ain.release(2)
+                e = acq(ain, ROW)
+                row = [e[i] for i in range(ROW)]
+                f_step(*row, qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(*row, qs, oacc, ml, pb)
+                ain.release(ROW)
         if SHARED:                                              # this position's row, read back from the cache
-            e = ain.acquire(2)
-            f_stepn(e[0], e[1], qs, oacc, ml, h0) if ACORES > 1 else f_stepn(e[0], e[1], qs, oacc, ml)
-            ain.release(2)
+            e = acq(ain, ROW)
+            row = [e[i] for i in range(ROW)]
+            f_stepn(*row, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(*row, qs, oacc, ml)
+            ain.release(ROW)
         else:
             f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
         for hp in range_(N_OG):
