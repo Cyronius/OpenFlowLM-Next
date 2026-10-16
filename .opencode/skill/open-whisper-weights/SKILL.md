@@ -75,8 +75,9 @@ a GGUF installed as `whisper-gguf` finds it by the last rule. The load line name
 
 ## Results on this box (2026-10-16)
 
-- `--compare`: stock checkpoint and F16 GGUF vs the checkpoint's container, and Q8_0 GGUF vs
-  the converter's Q8_0 container: 481/481 tensors, 808,924,160 values identical.
+- `--compare`: stock checkpoint and F16 GGUF vs the checkpoint's container, Q8_0 GGUF vs
+  the converter's Q8_0 container, and Q4_K_M / Q5_K_M vs the converter run on the gguf
+  package's dequant of the same file: 481/481 tensors, 808,924,160 values identical each.
 - Hardware smoke: see specs/open-whisper/spec.md (OPEN-WHISPER-GGUF, -STOCK).
 
 ## Traps

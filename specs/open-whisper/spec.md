@@ -164,9 +164,10 @@ refused.
 **Verification (manual), 2026-10-16,** handy-computer/whisper-large-v3-turbo-gguf with
 `weight_source_test --compare`: the F16 GGUF against the container built from OpenAI's
 checkpoint, 481 of 481 tensors identical; the Q8_0 GGUF against the container the old
-converter built from the same Q8_0 file, 481 of 481 identical; the Q4_K_M file loads through
-all three of its quant types (319 tensors, the F32 ones, identical; the rest differ by the
-quantization). Q5_K_M and Q6_K were not run on real files.
+converter built from the same Q8_0 file, 481 of 481 identical; the Q4_K_M and Q5_K_M files
+(Q4_K or Q5_K, Q6_K and Q8_0 tensors) against the converter run on the gguf package's
+dequant of the same file, 481 of 481 identical each. The all-Q6_K file was not run; its
+type is covered by the token embedding in both K files.
 
 ### OPEN-WHISPER-INSTALL: oflm-add installs a GGUF or OpenAI's checkpoint
 **Applies to:** `utilities/oflm-add`
