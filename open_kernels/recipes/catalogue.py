@@ -130,7 +130,7 @@ class Template:
 CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
-                          10752, 11264, 12288, 14336, 15360),
+                          10752, 11264, 12288, 14336, 15360, 1280, 6912),
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -140,7 +140,9 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # 3840 / 15360: Gemma 3 12B;
                                                  # 11264: Qwen2.5-3B (OPEN-ATTN-QKV-BIAS, 2026-09-12);
                                                  # 5120: Qwen3.8-27B (OPEN-FAMILY-QWEN35, 2026-10-01; its
-                                                 # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split)
+                                                 # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split);
+                                                 # 1280 / 6912: Gemma 3 1B, hidden 1152 zero-padded
+                                                 # (OPEN-PACK-PAD, OPEN-FAMILY-GEMMA3, 2026-10-16)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
               "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)
@@ -182,6 +184,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (256, 24, 4, 64, True, True, False, False),     # Qwen3.8-27B: 24 heads over 4 kv, six cores x 4 (OPEN-FAMILY-QWEN35)
                  (128, 16, 2, 128, False, False, False, True),   # Qwen2.5-3B: a q/k/v bias, and the narrowest
                                                                  # attention element yet at 512 B (OPEN-ATTN-QKV-BIAS)
+                 (256, 4, 1, 256, True, False, False, False),    # Gemma 3 1B: ONE kv head, the element a whole
+                                                                 # cache row (OPEN-ATTN-ONE-KV-HEAD, 2026-10-16)
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim",
                        "qk_norm", "attn_gate", "qk_norm_post_rope", "qkv_bias"),
                  # the MoE and Qwen3.5 recipes predate the post-RoPE and bias knobs and never set them
@@ -214,12 +218,14 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  # the emulator). A grouped width has to be WIDE: the fused kernel has a
                  # single reduction (ln.py refuses N <= 2048 with groups).
                  (1024, 1), (2048, 1), (2560, 1), (2560, 2), (3072, 1), (3840, 1), (4096, 1), (5120, 1),
+                 (1280, 1),                       # Gemma 3 1B's padded 1152, with its ln_div point below
                  keys=("width", "groups"),
                  defaults={"groups": 1}),),),
     Template("ln_div", "designs/ln/ln.h",
              combos=(combination(
                  # (width, real): a zero-padded width whose RMS divides by the model's own (LN_DIV,
                  # OPEN-PACK-PAD); every unpadded norm is the `ln` point above
+                 (1280, 1152),                    # Gemma 3 1B (OPEN-PACK-PAD, 2026-10-16)
                  keys=("width", "real")),),
              note="the divisor is a compile-time macro; a new (width, real) pair needs a slice run"),
     Template("router", "designs/router/router.h",
@@ -234,7 +240,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "then 4096 (the 9B) and 1024 (the 0.8B) with the rest of that family, 5120 with "
                   "the 27B"),
     Template("lm_head_q4", "designs/lm_head_q4/lm_head_q4.py",
-             {"K": values(1024, 2048, 2560, 3072, 3840, 4096), "vocab": multiple_of(64)},
+             {"K": values(1024, 2048, 2560, 3072, 3840, 4096, 1280), "vocab": multiple_of(64)},   # 1280: Gemma 3 1B
              note="the q4 head is the gemv_q4 kernel with lm_head_q8's uneven band split; validated per K"),
 ]}
 

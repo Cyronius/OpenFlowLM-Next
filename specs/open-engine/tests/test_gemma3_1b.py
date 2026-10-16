@@ -35,11 +35,6 @@ HF_GEMMA3_1B = {
 }
 
 
-@pytest.fixture
-def unvalidated(monkeypatch):
-    monkeypatch.setenv("OPEN_KERNELS_UNVALIDATED", "1")
-
-
 def spec_1b():
     return load_spec(SPECS / "gemma3-1b.json")
 
@@ -113,7 +108,8 @@ def test_the_norms_divide_by_the_models_width():
     assert b["lm_head_q4_f32"]["env"]["LMHEAD_K"] == "1280" and b["lm_head_q4_f32"]["env"]["LMHEAD_CORES"] == "4"
 
 
-def test_the_manifest(unvalidated):
+def test_the_manifest():
+    """No OPEN_KERNELS_UNVALIDATED: every point the 1B asks for is in the catalogue."""
     m = manifest(spec_1b())
     g = m["gguf"]
     assert m["layout"]["hidden"] == g["layout"]["hidden"] == 1280
