@@ -54,7 +54,8 @@ public:
 /// \brief Build the engine for a Whisper model directory.
 ///
 /// OFLM_WHISPER_ENGINE=open|closed forces one. UNSET, the model directory decides: the
-/// open engine when it holds `model.open.safetensors` AND a kernel set resolves, the
+/// open engine when it holds open-engine weights (`model.open.safetensors`,
+/// `model.safetensors` or `model.gguf`) AND a kernel set resolves, the
 /// closed engine when it holds `model.q4nx`, and an error naming both when neither is
 /// there. A request for an engine this build or this directory cannot provide is an error
 /// that names what is missing, never a quiet fallback -- both engines return a transcript,
