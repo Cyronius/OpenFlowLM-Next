@@ -2325,9 +2325,11 @@ about, and the pad from 2944 to the pool's 3072 falls out of the same op.
 
 ### OPEN-PACK-PAD: a dense model whose widths are not whole k-tiles runs zero-padded
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `designs/ln/ln.h`, `designs/lin_layer/ln_nr.cc`,
-`designs/ln/ln.py`, `designs/dense/dx.py`, `src/open_qwen36/pools.cpp`, `gguf_file.cpp`, `manifest.cpp`)
+`designs/ln/ln.py`, `designs/dense/dx.py`, `src/open_qwen36/pools.cpp`, `gguf_file.cpp`, `manifest.cpp`,
+`engine.cpp`, `core.cpp`)
 **Verification:** test -- `tests/test_gemma3_1b.py` for the layout the recipe derives;
-`src/open_qwen36/gguf_pack_test.cpp` (ctest `GGUF-PACK`) for the packer
+`src/open_qwen36/gguf_pack_test.cpp` (ctest `GGUF-PACK`) for the packer; `manifest_test.cpp`
+(ctest `OPEN-MANIFEST`) for which manifests read only a GGUF; manual (below) for the selection
 
 The q4 kernels read whole 256-column k-tiles and give each main core whole 64-row bands. A
 dense model whose hidden or intermediate width is not a whole number of k-tiles (Gemma 3 1B's
@@ -2353,6 +2355,12 @@ exactly nothing:
   silent error this prevents).
 - **What a config is checked against** stays the model's own width: `hf_config_check`'s
   `hidden_size` is 1152 while the manifest's `layout.hidden`, the buffer width, is 1280.
+- **Which models a padded set serves.** Only a GGUF can feed it, so the engine shall not
+  select a padded set for a model whose weight file is a `.q4nx` (a directory holding both
+  files reads the `.q4nx`): `Engine::find_kernels` declines it, says why, and the adapter
+  keeps the closed engine. The 1B's set lives under the official name `Gemma3-1B-NPU2`, so
+  without this FLM's own `Gemma3-1B-NPU2` container, which ran on the closed DLL before, would
+  pick the open set and fail to load.
 
 The block-prefill route is not built for a padded spec (its host chain normalises by the
 buffer width); prefill runs through `step()`.
@@ -2369,6 +2377,16 @@ buffer width); prefill runs through `step()`.
 - An F16 source whose blocks are exactly q4_1 at fp16 scales re-quantizes back exactly, padded
   columns zero (Gemma 3's tied F16 embedding is the head).
 - `embed_row` zero-extends to a wider buffer and refuses a narrower one; `pack_norm` likewise.
+- `Manifest::reads_gguf_only` is false for every shipped manifest fixture and true once a
+  `std_perm` op in a layer or in the head carries `src_dim` / `src_rows` (`manifest_test`,
+  ctest `OPEN-MANIFEST`).
+
+**Verification (manual), the selection:** serve FLM's `Gemma3-1B-NPU2` container (`model.q4nx`)
+with the 1B set installed under `xclbins/Gemma3-1B-NPU2/open_kernels`: the load logs `not using
+<set>: its widths are zero-padded` and the model answers on the closed `gemma_text_npu` engine.
+**Result 2026-10-16:** before the check, the official container picked the open set and failed
+to load (its `config.json` says `gemma3_text_only`, which the set does not serve); with it, the
+closed engine loads and answers. On hardware the padding itself is OPEN-FAMILY-GEMMA3's 1B result.
 
 ### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,

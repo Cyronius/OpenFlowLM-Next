@@ -786,6 +786,25 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- OPEN-PACK-PAD: a view that pads a std_perm op reads only a GGUF, so the engine
+    // declines it for a .q4nx model; no shipped kernel set is one
+    {
+        bool none = true;
+        for (int a = 1; a < argc; ++a) none = none && !Manifest::load(argv[a]).reads_gguf_only();
+        check(none, "no shipped fixture's q4nx view is GGUF-only");
+        if (argc >= 3) {
+            json j, h;
+            std::ifstream(argv[2]) >> j;
+            h = j;
+            json& op = j["layer_types"]["dense"]["pack"]["pool"][0];
+            check(op["op"] == "std_perm", "qwen3-4b: the first dense pool op is a std_perm");
+            op["src_dim"] = op["in_dim"].get<uint64_t>() - 256;
+            check(Manifest::parse(j, "padded layer").reads_gguf_only(), "a padded layer op makes the view GGUF-only");
+            h["pack"]["lm_head"]["ops"][0]["src_rows"] = 64;
+            check(Manifest::parse(h, "padded head").reads_gguf_only(), "a padded head op makes the view GGUF-only");
+        }
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

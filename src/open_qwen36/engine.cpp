@@ -31,13 +31,20 @@ namespace fs = std::filesystem;
 std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
     auto chose = [how](const char* where) { if (how) *how = where; };
     // A kernel set is a manifest.json plus every xclbin / insts.bin it names.
-    auto complete = [](const fs::path& dir, std::string* why) {
+    std::string declined;
+    auto complete = [&config, &declined](const fs::path& dir, std::string* why) {
         std::error_code ec;
         if (!fs::is_regular_file(dir / "manifest.json", ec)) { *why = "no manifest.json"; return false; }
         try {
             Manifest m = Manifest::load((dir / "manifest.json").string());
             for (const auto& f : m.files())
                 if (!fs::is_regular_file(dir / f, ec)) { *why = "manifest names missing " + f; return false; }
+            // Declining leaves a .q4nx model (the official Gemma3-1B-NPU2) on the closed engine.
+            if (m.reads_gguf_only() && !Core::reads_gguf(config.model_path)) {
+                *why = "its widths are zero-padded (OPEN-PACK-PAD), which only a model.gguf can feed";
+                declined = dir.string();
+                return false;
+            }
         } catch (const std::exception& e) {
             *why = e.what();
             return false;
@@ -66,6 +73,9 @@ std::string Engine::find_kernels(const LM_Config& config, std::string* how) {
         fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (complete(cand, &why)) { chose("an xclbins root"); return cand.string(); }
     }
+    if (!declined.empty())
+        std::fprintf(stderr, "open_qwen36: not using %s: its widths are zero-padded (OPEN-PACK-PAD) and %s "
+                     "has no model.gguf (or also a model.q4nx)\n", declined.c_str(), config.model_path.c_str());
     return {};
 }
 

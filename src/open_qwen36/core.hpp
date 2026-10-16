@@ -131,6 +131,8 @@ public:
     /// Pack every layer's pools and consts straight into resident device
     /// buffers. Minutes on first touch of a 22 GB file, ~1 min warm.
     void load_weights(const std::function<void(int done, int total)>& progress = {});
+    /// The weight file a Core reads from `model_dir`: model.gguf only when no model.q4nx is there.
+    static bool reads_gguf(const std::string& model_dir);
 
     /// Start a new context: zero the linear states, position 0.
     void reset();

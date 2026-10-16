@@ -255,6 +255,8 @@ struct Manifest {
     bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
+    /// OPEN-PACK-PAD: this view pads a tensor in a std_perm op, which no .q4nx can feed.
+    bool reads_gguf_only() const;
 };
 
 }  // namespace open_qwen36

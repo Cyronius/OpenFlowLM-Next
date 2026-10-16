@@ -2,6 +2,7 @@
 /// \brief manifest.json parsing and the model check (see manifest.hpp).
 #include "open_qwen36/manifest.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
@@ -669,6 +670,17 @@ std::vector<std::string> Manifest::files() const {
         f.insert(f.end(), nested.begin(), nested.end());
     }
     return f;
+}
+
+bool Manifest::reads_gguf_only() const {
+    auto padded = [](const std::vector<PackOp>& ops) {
+        return std::any_of(ops.begin(), ops.end(),
+                           [](const PackOp& p) { return p.op == "std_perm" && (p.src_dim || p.src_rows); });
+    };
+    if (padded(lmhead_ops)) return true;
+    for (const auto& [name, t] : layer_types)
+        if (padded(t.pool) || padded(t.consts)) return true;
+    return false;
 }
 
 void Manifest::check_model(const json& config, const std::string& where) const {

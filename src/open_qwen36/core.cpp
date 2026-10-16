@@ -186,6 +186,11 @@ void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
 
+bool Core::reads_gguf(const std::string& model_dir) {
+    const fs::path md(model_dir);
+    return fs::exists(md / "model.gguf") && !fs::exists(md / "model.q4nx");
+}
+
 Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     omp_threads_ = static_cast<int>(omp_thread_budget());
     apply_thread_budget();
@@ -215,7 +220,7 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     const bool have_gguf = fs::exists(md / "model.gguf");
     if (!have_q4nx && !have_gguf)
         throw std::runtime_error("open_qwen36: neither model.q4nx nor model.gguf in " + cfg_.model_dir);
-    gguf_ = have_gguf && !have_q4nx;
+    gguf_ = reads_gguf(cfg_.model_dir);
     w_ = gguf_ ? man_.gguf.get() : &man_;
     if (gguf_ && !w_)
         throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
