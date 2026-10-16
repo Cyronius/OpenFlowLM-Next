@@ -265,8 +265,8 @@ std::string GgufFile::gguf_name(const std::string& name) {
         dot("self_attn.k_norm", ".attn_k_norm");
         dot("self_attn.post_attention_layernorm", ".post_attention_norm");   // gemma3
         dot("input_layernorm", ".attn_norm");
-        dot("post_attention_layernorm", ".ffn_norm");
-        dot("pre_feedforward_layernorm", ".post_attention_norm");            // gemma3
+        dot("post_attention_layernorm", ".ffn_norm");                        // see resolve() for gemma3
+        dot("pre_feedforward_layernorm", ".ffn_norm");                       // gemma3
         dot("post_feedforward_layernorm", ".post_ffw_norm");                 // gemma3
         dot("mlp.gate_proj", ".ffn_gate");
         dot("mlp.up_proj", ".ffn_up");
@@ -275,8 +275,21 @@ std::string GgufFile::gguf_name(const std::string& name) {
     return n;
 }
 
-const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
+std::string GgufFile::resolve(const std::string& name) const {
     std::string n = gguf_name(name);
+    // In a sandwich-norm GGUF (Gemma) ffn_norm is the pre-FFN norm; HF's post_attention_layernorm is post_attention_norm.
+    const std::string hf = ".post_attention_layernorm.", ffn = ".ffn_norm.";
+    const auto p = n.find(ffn);
+    if (name.find(hf) != std::string::npos && p != std::string::npos) {
+        std::string s = n;
+        s.replace(p, ffn.size(), ".post_attention_norm.");
+        if (tensors_.count(s)) return s;
+    }
+    return n;
+}
+
+const GgufFile::TensorInfo& GgufFile::tensor(const std::string& name) const {
+    std::string n = resolve(name);
     auto it = tensors_.find(n);
     if (it == tensors_.end() && n == "output.weight") {
         // tied embeddings: the GGUF has no output.weight; the (untied) rows

@@ -269,6 +269,43 @@ float bf16f(uint16_t b) {
 }
 uint16_t bf16_up(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? (b == 0x8000 ? 0x0001 : b - 1) : b + 1); }
 uint16_t bf16_down(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? b + 1 : (b == 0 ? 0x8001 : b - 1)); }
+struct Tensor {
+    std::string name;
+    std::vector<uint64_t> dims;                      // fastest first
+    uint32_t type;
+    std::vector<uint8_t> bytes;
+};
+
+/// A GGUF holding `ts` (architecture "gemma3"), every tensor 32-aligned in the data section.
+std::string write_gguf_tensors(const fs::path& dir, const std::string& fname, const std::vector<Tensor>& ts) {
+    std::vector<uint8_t> f;
+    f.insert(f.end(), {'G', 'G', 'U', 'F'});
+    put_u32(f, 3);
+    put_u64(f, ts.size());
+    put_u64(f, 1);
+    put_kv_str(f, "general.architecture", "gemma3");
+    const auto align32 = [](size_t n) { return (n + 31) / 32 * 32; };
+    size_t rel = 0;
+    std::vector<size_t> offs;
+    for (const Tensor& t : ts) {
+        put_str(f, t.name);
+        put_u32(f, static_cast<uint32_t>(t.dims.size()));
+        for (uint64_t d : t.dims) put_u64(f, d);
+        put_u32(f, t.type);
+        put_u64(f, rel);
+        offs.push_back(rel);
+        rel = align32(rel + t.bytes.size());
+    }
+    const size_t base = align32(f.size());
+    for (size_t i = 0; i < ts.size(); ++i) {
+        while (f.size() < base + offs[i]) f.push_back(0);
+        f.insert(f.end(), ts[i].bytes.begin(), ts[i].bytes.end());
+    }
+    const fs::path out = dir / fname;
+    std::ofstream of(out, std::ios::binary);
+    of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+    return out.string();
+}
 
 }  // namespace
 
@@ -293,7 +330,7 @@ int main() {
         GgufFile::gguf_name("model.layers.3.mlp.down_proj.weight") != "blk.3.ffn_down.weight" ||
         GgufFile::gguf_name("model.layers.1.input_layernorm.weight") != "blk.1.attn_norm.weight" ||
         GgufFile::gguf_name("model.layers.2.self_attn.q_norm.weight") != "blk.2.attn_q_norm.weight" ||
-        GgufFile::gguf_name("model.layers.2.pre_feedforward_layernorm.weight") != "blk.2.post_attention_norm.weight" ||
+        GgufFile::gguf_name("model.layers.2.pre_feedforward_layernorm.weight") != "blk.2.ffn_norm.weight" ||
         GgufFile::gguf_name("model.layers.2.post_feedforward_layernorm.weight") != "blk.2.post_ffw_norm.weight" ||
         GgufFile::gguf_name("model.norm.weight") != "output_norm.weight") {
         std::printf("FAIL name map\n");
@@ -477,6 +514,30 @@ int main() {
         }
         std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
         if (bad6) return 1;
+    }
+
+    // ---- the sandwich norms: a GGUF with post_attention_norm stores HF's post_attention_layernorm
+    // there and its pre_feedforward_layernorm as ffn_norm; a llama GGUF's ffn_norm is HF's
+    // post_attention_layernorm
+    {
+        auto norm_t = [](const std::string& name, float v) {
+            std::vector<uint8_t> b(8 * 4);
+            for (int i = 0; i < 8; ++i) std::memcpy(b.data() + 4 * i, &v, 4);
+            return Tensor{name, {8}, 0, b};
+        };
+        GgufFile gs(write_gguf_tensors(dir, "test-sandwich.gguf",
+                                       {norm_t("blk.0.attn_norm.weight", 1.f), norm_t("blk.0.post_attention_norm.weight", 2.f),
+                                        norm_t("blk.0.ffn_norm.weight", 3.f), norm_t("blk.0.post_ffw_norm.weight", 4.f)}));
+        GgufFile gl(write_gguf_tensors(dir, "test-llama-norms.gguf",
+                                       {norm_t("blk.0.attn_norm.weight", 1.f), norm_t("blk.0.ffn_norm.weight", 3.f)}));
+        const std::string pre = "model.layers.0.";
+        const bool ok = gs.bf16(pre + "input_layernorm.weight")[0] == 1.f &&
+                        gs.bf16(pre + "post_attention_layernorm.weight")[0] == 2.f &&
+                        gs.bf16(pre + "pre_feedforward_layernorm.weight")[0] == 3.f &&
+                        gs.bf16(pre + "post_feedforward_layernorm.weight")[0] == 4.f &&
+                        gl.bf16(pre + "post_attention_layernorm.weight")[0] == 3.f;
+        std::printf("%s sandwich-norm names resolve by what the GGUF holds\n", ok ? "ok   " : "FAIL");
+        if (!ok) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

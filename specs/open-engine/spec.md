@@ -1072,6 +1072,16 @@ engine -- the open one has no vision path.
 
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
 
+**GGUF norm names.** A Gemma 3 GGUF stores HF's `post_attention_layernorm` as `post_attention_norm` and
+HF's `pre_feedforward_layernorm` as `ffn_norm`, where a llama GGUF's `ffn_norm` is HF's
+`post_attention_layernorm`. `GgufFile::resolve` sends `post_attention_layernorm` to
+`post_attention_norm` when the file has that tensor and to `ffn_norm` otherwise. From #180 until this fix the
+map had Gemma's two swapped, so every Gemma 3 GGUF ran with its post-attention and pre-FFN norms exchanged.
+**Acceptance criteria (unit, `gguf_pack_test`):** a Gemma-shaped GGUF (all four norms present) maps
+`post_attention_layernorm` to `post_attention_norm.weight` and `pre_feedforward_layernorm` to
+`ffn_norm.weight`; a llama-shaped one (no `post_attention_norm`) still maps `post_attention_layernorm` to
+`ffn_norm.weight`; `has()` agrees with `tensor()` for both.
+
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B (text) on the dense recipe
