@@ -73,8 +73,7 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
 GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "gemma3-text", "granite", "hunyuan"}
-# A family whose text-only sizes the official list registers under a text engine of their
-# own: Gemma 3 1B has no vision tower and is `gemma3-text`, while a GGUF's name only says gemma3.
+# The official list files Gemma 3 1B (no vision tower) as gemma3-text; its GGUF says gemma3.
 TEXT_ONLY_FAMILY = {"gemma3": "gemma3-text"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and

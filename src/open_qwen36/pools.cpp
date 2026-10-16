@@ -536,10 +536,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const GgufFile::TensorInfo& t = g.tensor(name);
         // Q8_0 / K-quant tensors (typical GGUF lm_head / tied embeddings) are
         // dequantized per row and re-quantized here to the pool's q4 layout
-        // with fp16 scales -- the same conversion q4nx-build does offline. A
-        // 16- or 32-bit float tensor (Gemma 3's tied F16 embedding as the head)
-        // takes the same path. The matmul body of the repo stays untouched
-        // (Q4_1 etc. go through the byte-exact path below).
+        // with fp16 scales -- the same conversion q4nx-build does offline. The
+        // matmul body of the repo stays untouched (Q4_1 etc. go through the
+        // byte-exact path below).
         const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
                         t.type == GgufFile::Type::Q6_K || t.type == GgufFile::Type::F16 ||
                         t.type == GgufFile::Type::BF16 || t.type == GgufFile::Type::F32;
@@ -550,9 +549,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const size_t blk = has_min ? 20 : 18;
         ktiles_or_fail("std_perm_gguf", op.in_dim);
         const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
-        // OPEN-PACK-PAD: the pool may be wider (in_dim) and taller (out_dim) than the file's
-        // tensor (src_dim x src_rows); the extra columns and rows stay zero, so they add nothing.
-        // Without src_rows a head shorter than its 64-row bands (HunYuan's vocab) pads the same way.
+        // OPEN-PACK-PAD: past the file's tensor the pool stays zero (a short head, too, without src_rows)
         const uint64_t file_rows = t.dims.size() == 2 ? t.dims[1] : 0;
         const uint64_t src_dim = op.src_dim ? op.src_dim : op.in_dim;
         const uint64_t src_rows = op.src_rows ? op.src_rows : std::min<uint64_t>(out_dim, file_rows);

@@ -278,8 +278,7 @@ std::string GgufFile::gguf_name(const std::string& name) {
 
 std::string GgufFile::resolve(const std::string& name) const {
     std::string n = gguf_name(name);
-    // Gemma 2 / 3 (sandwich norms) keep ffn_norm for the pre-FFN norm and call the norm on the
-    // attention output post_attention_norm, which is what HF names post_attention_layernorm.
+    // In a sandwich-norm GGUF (Gemma) ffn_norm is the pre-FFN norm; HF's post_attention_layernorm is post_attention_norm.
     const std::string hf = ".post_attention_layernorm.", ffn = ".ffn_norm.";
     const auto p = n.find(ffn);
     if (name.find(hf) != std::string::npos && p != std::string::npos) {

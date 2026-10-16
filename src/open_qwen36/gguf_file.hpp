@@ -71,8 +71,7 @@ public:
     /// HF-style name -> GGUF name (the manifest speaks the q4nx/HF convention;
     /// a GGUF speaks llama.cpp's blk.N.attn_q one). Unknown names pass through.
     static std::string gguf_name(const std::string& name);
-    /// gguf_name, then the one name that depends on the file: a sandwich-norm GGUF (Gemma)
-    /// stores HF's post_attention_layernorm as post_attention_norm.
+    /// gguf_name, plus the one name that depends on the file (Gemma's post_attention_norm).
     std::string resolve(const std::string& name) const;
     /// GGUF metadata: string / u64 accessors (the config derivation's source).
     bool kv_has(const std::string& key) const { return meta_.count(key) != 0; }
