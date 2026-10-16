@@ -687,10 +687,12 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     g = None
     gc = target / "generation_config.json"
     repo_gen = None
-    # A local-directory install passes the directory path as `repo`; fetching
-    # generation_config.json from it as an HF id is meaningless (and raises),
-    # so only attempt it when `repo` is a remote id.
-    if not Path(repo).is_dir():
+    # A local-directory install passes the directory path as `repo`: its own
+    # generation_config.json is the candidate (the install does not copy it);
+    # fetching one is only for a remote id.
+    if Path(repo).is_dir():
+        repo_gen = Path(repo) / "generation_config.json"
+    else:
         try:
             repo_gen = fetch_from_repo(repo, "generation_config.json", gc, modelscope=modelscope)
         except Exception:

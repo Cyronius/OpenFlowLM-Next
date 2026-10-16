@@ -573,3 +573,15 @@ def test_a_gguf_install_is_registered_text_only():
     assert base["vlm"] is True and "vision" in base["label"]                  # the curated entry is untouched
     q = oflm_add.build_entry(base, "Gemma4-E4B-IT-NPU2", ["config.json", "model.q4nx"], 4_000_000_000)
     assert q["asr"] is True and "audio" in q["label"]                         # a q4nx install keeps what it had
+
+
+def test_a_local_install_takes_the_token_ids_from_its_own_generation_config(tmp_path):
+    """Google's tokenizer_config.json names <bos> but no ids; oflm exits at load without them."""
+    src, target = tmp_path / "src", tmp_path / "target"
+    src.mkdir()
+    target.mkdir()
+    (target / "tokenizer_config.json").write_text(json.dumps({"bos_token": "<bos>", "eos_token": "<eos>"}))
+    (src / "generation_config.json").write_text(json.dumps({"bos_token_id": 2, "eos_token_id": [1, 106, 50]}))
+    oflm_add.normalize_tokenizer_config(target, str(src), [])
+    cfg = json.loads((target / "tokenizer_config.json").read_text(encoding="utf-8"))
+    assert (cfg["bos_token_id"], cfg["eos_token_id"]) == (2, [1, 106, 50])
