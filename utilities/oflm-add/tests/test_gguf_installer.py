@@ -506,6 +506,13 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     q4k.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("n", 0, [8])]))
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_K")
     assert ok, note
+    # A Q4_K_M mix carries Q6_K tensors too (Traces: OPEN-FAMILY-HUNYUAN, tencent/Hy-MT2-1.8B-GGUF).
+    km = tmp_path / "km.gguf"
+    km.write_bytes(_gguf_bytes(_llama_kv(), [("w", 12, [8, 8]), ("v", 14, [8, 8]), ("n", 0, [8])]))
+    ok, note = oflm_add.verify_gguf_choice(str(km), "km.gguf", "Q4_K")
+    assert ok, note
+    ok, note = oflm_add.verify_gguf_choice(str(km), "km.gguf", "Q4_0")
+    assert not ok and "claims Q4_0" in note
     # Same bytes, wrong claim: refuse rather than pack the wrong layout.
     ok, note = oflm_add.verify_gguf_choice(str(q4k), "m.gguf", "Q4_0")
     assert not ok and "claims Q4_0" in note

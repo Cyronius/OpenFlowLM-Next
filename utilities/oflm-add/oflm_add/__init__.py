@@ -1682,7 +1682,8 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     # (Q8_0 over Q4_*); anything else must be the claimed family.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
+    # llama.cpp's Q4_K_M keeps half of attn_v / ffn_down at Q6_K (tencent/Hy-MT2-1.8B-GGUF)
+    others = quants - {claimed_family, "Q8_0"} - ({"Q6_K"} if claimed_family == "Q4_K" else set())
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
                        f"{claimed_family}; refusing rather than packing the wrong layout")
