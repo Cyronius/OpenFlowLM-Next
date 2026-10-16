@@ -36,6 +36,9 @@ struct PackOp {
     uint64_t src_dim = 0, rg = 0;            ///< std_fuse: the CONTAINER's own K (the pool's is
                                              ///< in_dim, and may be padded above it), and the
                                              ///< supertile height of the file raster
+                                             ///< std_perm_gguf: the file tensor's own K (0 = in_dim)
+    uint64_t src_rows = 0;                   ///< std_perm_gguf: the file tensor's own rows (0 = the
+                                             ///< pool's); a padded pool's extra rows and columns are zero
     uint64_t experts = 0, stripes = 0, stripe_bytes = 0, expert_bytes = 0;   ///< expert_stripes / expert_down
     uint64_t taps = 0, groups = 0, width = 0;                           ///< conv_transpose
     uint64_t chunk_bytes = 0;                                           ///< lmhead_q8 (the SOURCE chunk)

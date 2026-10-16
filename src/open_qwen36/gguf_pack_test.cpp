@@ -297,6 +297,41 @@ std::string write_gguf_tensors(const fs::path& dir, const std::string& fname, co
     return out.string();
 }
 
+/// One value of an f32-scale pool chunk (6144 B): row r, column k of its 32 x 256 tile.
+float pool_value(const uint8_t* d, size_t r, size_t k) {
+    const size_t kb = k / 32;
+    float df, mf;
+    std::memcpy(&df, d + 4 * (kb * 32 + r), 4);
+    std::memcpy(&mf, d + 1024 + 4 * (kb * 32 + r), 4);
+    const size_t p = (r / 16) * 4096 + k * 16 + (r % 16);
+    const uint8_t byte = d[2048 + (p >> 1)];
+    return ((p & 1) ? byte >> 4 : byte & 0xF) * df + mf;
+}
+
+/// OPEN-PACK-PAD: a source smaller than its pool reads back exactly where it exists and as
+/// exact zeros everywhere else -- the pad columns' scales, mins and codes are all zero.
+int check_padded(const PackOp& op, const std::vector<uint8_t>& pool, const std::vector<float>& want,
+                 size_t src_rows, size_t src_cols, const char* what) {
+    const size_t per_band = op.in_dim / 128;
+    size_t bad = 0, zeros = 0;
+    for (size_t c = 0; c < op.nch; ++c) {
+        const size_t rows0 = 64 * (c / per_band) + 32 * (c % 2), cols0 = 256 * ((c % per_band) / 2);
+        for (size_t r = 0; r < 32; ++r)
+            for (size_t k = 0; k < 256; ++k) {
+                const size_t R = rows0 + r, K = cols0 + k;
+                const float got = pool_value(pool.data() + c * 6144, r, k);
+                const bool real = R < src_rows && K < src_cols;
+                if (!real) ++zeros;
+                if (f32_bits(got) != f32_bits(real ? want[R * src_cols + K] : 0.f)) {
+                    if (bad < 5) std::printf("  %s: row %zu col %zu got %.9g\n", what, R, K, got);
+                    ++bad;
+                }
+            }
+    }
+    std::printf("%s %s (%zu values differ; %zu pad values all +0)\n", bad ? "FAIL" : "ok   ", what, bad, zeros);
+    return bad ? 1 : 0;
+}
+
 }  // namespace
 
 int main() {
@@ -441,6 +476,118 @@ int main() {
         }
         std::printf("%s embed_row Q6_K (both super-block halves bit-exact)\n", bad6 ? "FAIL" : "ok");
         if (bad6) return 1;
+    }
+
+    // ---- OPEN-PACK-PAD: a 96 x 288 Q4_0 source in a 128 x 512 pool, rows and columns padded
+    {
+        const Blocks src = make_blocks(96, 288, "Q4_0", rng);
+        GgufFile gp(write_gguf_tensors(dir, "test-pad-q4_0.gguf",
+                                       {{"blk.0.attn_output.weight", {288, 96}, 2, src.bytes}}));
+        PackOp p;
+        p.op = "std_perm_gguf";
+        p.tensor = "model.layers.0.self_attn.o_proj.weight";
+        p.in_dim = 512;
+        p.nch = 128ull * 512 / 8192;
+        p.src_dim = 288;
+        p.src_rows = 96;
+        std::vector<uint8_t> pool(static_cast<size_t>(p.nch) * 6144, 0xA5);   // the op owns every byte
+        pools::apply(p, gp, 0, pool.data(), pool.size(), 6144);
+        if (check_padded(p, pool, src.values, 96, 288, "std_perm_gguf padded Q4_0 96x288 -> 128x512")) return 1;
+        bool refused = false;
+        try {
+            PackOp q = p;
+            q.src_rows = 95;                         // the file holds 96: the plan must say so
+            pools::apply(q, gp, 0, pool.data(), pool.size(), 6144);
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        std::printf("%s std_perm_gguf refuses a source whose shape the plan does not name\n", refused ? "ok   " : "FAIL");
+        if (!refused) return 1;
+        bool q4nx_refused = false;
+        try {
+            PackOp q = p;
+            q.op = "std_perm";                        // a .q4nx container cannot be padded
+            std::vector<uint8_t> p5(static_cast<size_t>(q.nch) * 5120);
+            pools::apply(q, gp, 0, p5.data(), p5.size(), 5120);
+        } catch (const std::exception& e) {
+            q4nx_refused = std::string(e.what()).find("OPEN-PACK-PAD") != std::string::npos;
+        }
+        std::printf("%s std_perm refuses a padded op by name\n", q4nx_refused ? "ok   " : "FAIL");
+        if (!q4nx_refused) return 1;
+    }
+
+    // ---- an F16 source (Gemma 3's tied embedding as its head) re-quantizes into the pool; data
+    // that IS q4_1 at fp16 scales comes back exactly, padded columns as zeros
+    {
+        const unsigned rows = 64, cols = 288;
+        std::vector<float> vals(static_cast<size_t>(rows) * cols);
+        std::vector<uint8_t> bytes(vals.size() * 2);
+        for (unsigned r = 0; r < rows; ++r)
+            for (unsigned b = 0; b < cols / 32; ++b) {
+                const float d = 0.25f, m = -1.0f + 0.5f * static_cast<float>((r + b) % 3);
+                for (unsigned j = 0; j < 32; ++j) {
+                    const unsigned q = j == 0 ? 0u : j == 1 ? 15u : static_cast<unsigned>(rng() % 16);
+                    const size_t i = static_cast<size_t>(r) * cols + b * 32 + j;
+                    vals[i] = m + d * static_cast<float>(q);
+                    const uint16_t h = f32_to_fp16(vals[i]);   // exact: multiples of 0.25 in [-1, 4.75]
+                    std::memcpy(bytes.data() + 2 * i, &h, 2);
+                }
+            }
+        GgufFile gf(write_gguf_tensors(dir, "test-f16.gguf", {{"token_embd.weight", {cols, rows}, 1, bytes}}));
+        PackOp p;
+        p.op = "std_perm_gguf";
+        p.tensor = "lm_head.weight";                 // no output.weight: the tied embedding serves
+        p.in_dim = 512;
+        p.nch = 64ull * 512 / 8192;
+        p.src_dim = cols;
+        std::vector<uint8_t> pool(static_cast<size_t>(p.nch) * 6144, 0xA5);
+        pools::apply(p, gf, 0, pool.data(), pool.size(), 6144);
+        if (check_padded(p, pool, vals, rows, cols, "std_perm_gguf F16 head 64x288 -> 64x512 (exact re-quantization)"))
+            return 1;
+    }
+
+    // ---- OPEN-EMBED-STRIDE on a GGUF: a row read into a wider buffer is zero-extended
+    {
+        std::vector<float> row(320, -1.f);
+        g.embed_row("token_embd.weight", 7, 320, row.data());
+        bool ok = true;
+        for (size_t i = 0; i < 320; ++i)
+            ok = ok && f32_bits(row[i]) == f32_bits(i < 256 ? emb.values[7 * 256 + i] : 0.f);
+        bool refused = false;
+        try {
+            g.embed_row("token_embd.weight", 7, 128, row.data());
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        std::printf("%s embed_row zero-extends to a padded width and refuses a narrower one\n",
+                    ok && refused ? "ok   " : "FAIL");
+        if (!(ok && refused)) return 1;
+    }
+
+    // ---- pack_norm into a padded slot: the real values, then zeros
+    {
+        std::vector<uint8_t> nb(600 * 2, 0xA5);
+        pools::pack_norm(g, "blk.0.attn_norm.weight", nb.size(), nb.data());
+        bool ok = true;
+        for (size_t i = 0; i < 600; ++i) {
+            uint16_t got, want = 0;
+            std::memcpy(&got, nb.data() + 2 * i, 2);
+            if (i < norm.size()) {
+                const uint32_t u = f32_bits(norm[i]);
+                want = static_cast<uint16_t>((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
+            }
+            ok = ok && got == want;
+        }
+        bool refused = false;
+        try {
+            std::vector<uint8_t> small(500 * 2);
+            pools::pack_norm(g, "blk.0.attn_norm.weight", small.size(), small.data());
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        std::printf("%s pack_norm zero-extends into a padded slot and refuses a narrower one\n",
+                    ok && refused ? "ok   " : "FAIL");
+        if (!(ok && refused)) return 1;
     }
 
     // ---- the sandwich norms: a GGUF with post_attention_norm stores HF's post_attention_layernorm

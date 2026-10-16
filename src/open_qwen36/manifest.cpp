@@ -45,6 +45,7 @@ PackOp parse_op(const json& j, const std::string& where) {
     p.in_dim = j.value("in_dim", 0ull);
     p.chunk0 = j.value("chunk0", 0ull);
     p.src_dim = j.value("src_dim", 0ull);
+    p.src_rows = j.value("src_rows", 0ull);
     p.rg = j.value("rg", 0ull);
     p.experts = j.value("experts", 0ull);
     p.stripes = j.value("stripes", 0ull);
@@ -64,6 +65,8 @@ PackOp parse_op(const json& j, const std::string& where) {
         fail(where, p.op + " " + p.tensor + ": via must be q4_1, on a bf16_gemm");
     if (!p.split.empty() && (p.op != "std_perm" || (p.split != "hi" && p.split != "lo")))
         fail(where, p.op + " " + p.tensor + ": split must be hi or lo, on a std_perm");
+    if (p.src_rows && p.op != "std_perm_gguf" && p.op != "std_perm")
+        fail(where, p.op + " " + p.tensor + ": src_rows pads a std_perm / std_perm_gguf pool only");
     // The same fields pools::apply needs, checked here so a bad manifest is named
     // at load rather than surfacing as a "pools:" error part-way through packing.
     auto need_all = [&](std::initializer_list<std::pair<const char*, uint64_t>> fs) {

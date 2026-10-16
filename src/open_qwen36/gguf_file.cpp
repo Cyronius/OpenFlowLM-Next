@@ -2,6 +2,7 @@
 /// \brief GGUF parsing and the per-token embedding dequant (see gguf_file.hpp).
 #include "open_qwen36/gguf_file.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -357,10 +358,13 @@ double GgufFile::kv_f64(const std::string& key) const {
     }
 }
 
-void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
+void GgufFile::embed_row(const std::string& name, size_t row, size_t want, float* out) const {
     const TensorInfo& t = tensor(name);
     const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
-    if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
+    // OPEN-EMBED-STRIDE: read at the tensor's own width, zero-extend to a padded buffer's
+    if (cols > want) fail(name + " has " + std::to_string(cols) + " cols, the row wants only " + std::to_string(want));
+    const size_t dim = static_cast<size_t>(cols);
+    std::fill(out + dim, out + want, 0.f);
     const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
     if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
     const uint8_t* base = map_ + data_base_ + t.offset;

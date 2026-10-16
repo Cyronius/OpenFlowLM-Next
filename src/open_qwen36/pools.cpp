@@ -255,6 +255,7 @@ void split_q4_1_chunks(const uint8_t* src, size_t nch, bool hi, uint8_t* dst) {
 void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8_t* dst) {
     // A small weight (a layernorm) as bf16: the q4nx container stores it bf16;
     // a GGUF may store it f32 / f16 / bf16 -- convert exactly as the container does.
+    // A GGUF weight narrower than its slot is a padded width (OPEN-PACK-PAD): the tail is zero.
     size_t n = 0;
     const uint8_t* src = raw(f, name, 0, &n);
     auto* g = dynamic_cast<const GgufFile*>(&f);
@@ -263,15 +264,19 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
         std::memcpy(dst, src, n);
         return;
     }
-    switch (g->tensor(name).type) {
+    const auto type = g->tensor(name).type;
+    const size_t esize = type == GgufFile::Type::F32 ? 4 : 2;
+    if (n % esize || n / esize > bytes / 2)
+        fail(name + " is " + std::to_string(n / esize) + " values, the slot holds " + std::to_string(bytes / 2));
+    const size_t vals = n / esize;
+    std::memset(dst + 2 * vals, 0, bytes - 2 * vals);
+    switch (type) {
         case GgufFile::Type::BF16: {
-            if (n != bytes) fail(name + " is " + std::to_string(n) + " B, the slot holds " + std::to_string(bytes));
             std::memcpy(dst, src, n);
             break;
         }
         case GgufFile::Type::F16: {
-            if (n != bytes) fail(name + " is " + std::to_string(n) + " B of fp16, the slot holds " + std::to_string(bytes) + " B of bf16");
-            for (size_t i = 0; i < bytes / 2; ++i) {
+            for (size_t i = 0; i < vals; ++i) {
                 uint16_t u;
                 std::memcpy(&u, src + 2 * i, 2);
                 const float v = fp16_to_f32(u);
@@ -281,8 +286,7 @@ void pack_norm(const WeightFile& f, const std::string& name, size_t bytes, uint8
             break;
         }
         case GgufFile::Type::F32: {
-            if (n != 2 * bytes) fail(name + " is " + std::to_string(n) + " B of f32, the slot holds " + std::to_string(bytes) + " B of bf16");
-            for (size_t i = 0; i < bytes / 2; ++i) {
+            for (size_t i = 0; i < vals; ++i) {
                 float v;
                 std::memcpy(&v, src + 4 * i, 4);
                 const uint16_t b = f32_to_bf16(v);
@@ -449,6 +453,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
     if (op.op == "std_perm") {
         const std::string name = with_layer(op.tensor, layer);
         if (op.nch == 0 || op.in_dim == 0) fail("std_perm " + name + " without nch / in_dim");
+        if (op.src_dim || op.src_rows)
+            fail("std_perm " + name + ": this kernel set pads the tensor (OPEN-PACK-PAD), which only a GGUF "
+                 "source does; install the model's GGUF (oflm-add) rather than a .q4nx container");
         bounds(op, op.nch * ch, dst_bytes);
         std::vector<uint8_t> tmp;
         const uint8_t* src = nullptr;
@@ -529,37 +536,55 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const GgufFile::TensorInfo& t = g.tensor(name);
         // Q8_0 / K-quant tensors (typical GGUF lm_head / tied embeddings) are
         // dequantized per row and re-quantized here to the pool's q4 layout
-        // with fp16 scales -- the same conversion q4nx-build does offline. The
-        // matmul body of the repo stays untouched (Q4_1 etc. go through the
-        // byte-exact path below).
+        // with fp16 scales -- the same conversion q4nx-build does offline. A
+        // 16- or 32-bit float tensor (Gemma 3's tied F16 embedding as the head)
+        // takes the same path. The matmul body of the repo stays untouched
+        // (Q4_1 etc. go through the byte-exact path below).
         const bool kq = t.type == GgufFile::Type::Q8_0 || t.type == GgufFile::Type::Q4_K ||
-                        t.type == GgufFile::Type::Q6_K;
+                        t.type == GgufFile::Type::Q6_K || t.type == GgufFile::Type::F16 ||
+                        t.type == GgufFile::Type::BF16 || t.type == GgufFile::Type::F32;
         if (!kq && t.type != GgufFile::Type::Q4_0 && t.type != GgufFile::Type::Q4_1)
             fail(name + " is " + GgufFile::type_name(t.type) + "; std_perm_gguf packs Q4_0/Q4_1 and "
-                 "requantizes Q8_0/Q4_K/Q6_K (convert K-quants with q4nx-build otherwise)");
+                 "requantizes Q8_0/Q4_K/Q6_K/F16/BF16/F32 (convert K-quants with q4nx-build otherwise)");
         const bool has_min = t.type == GgufFile::Type::Q4_1 || kq;
         const size_t blk = has_min ? 20 : 18;
-        const size_t nb = op.in_dim / 32;                        // k blocks per row
+        ktiles_or_fail("std_perm_gguf", op.in_dim);
+        const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
+        // OPEN-PACK-PAD: the pool may be wider (in_dim) and taller (out_dim) than the file's
+        // tensor (src_dim x src_rows); the extra columns and rows stay zero, so they add nothing.
+        // Without src_rows a head shorter than its 64-row bands (HunYuan's vocab) pads the same way.
+        const uint64_t file_rows = t.dims.size() == 2 ? t.dims[1] : 0;
+        const uint64_t src_dim = op.src_dim ? op.src_dim : op.in_dim;
+        const uint64_t src_rows = op.src_rows ? op.src_rows : std::min<uint64_t>(out_dim, file_rows);
+        if (src_dim > op.in_dim || src_rows > out_dim || src_dim % 32)
+            fail("std_perm_gguf " + name + ": a " + std::to_string(src_rows) + " x " + std::to_string(src_dim) +
+                 " source does not pad into a " + std::to_string(out_dim) + " x " + std::to_string(op.in_dim) +
+                 " pool (the source must be no larger, in whole 32-value blocks)");
+        if (t.dims.size() != 2 || t.dims[0] != src_dim || (op.src_rows && file_rows != src_rows))
+            fail("std_perm_gguf " + name + ": the file holds [" +
+                 (t.dims.size() == 2 ? std::to_string(file_rows) + ", " + std::to_string(t.dims[0]) : std::string("?")) +
+                 "], the plan expects [" + std::to_string(src_rows) + ", " + std::to_string(src_dim) + "]");
+        const size_t nb = src_dim / 32;                          // the source's k blocks per row
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
-        const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
-        if (!kq && n < static_cast<size_t>(out_dim) * nb * blk)
+        if (!kq && n < static_cast<size_t>(src_rows) * nb * blk)
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
-                 std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
+                 std::to_string(static_cast<uint64_t>(src_rows) * nb * blk));
         bounds(op, op.nch * ch, dst_bytes);
+        std::memset(dst + op.dst, 0, op.nch * ch);               // the codes below are OR-ed in
         auto perm = std_perm(op.nch, op.in_dim);
         const size_t ncol = op.in_dim / 256;
-        std::vector<float> rd(kq ? op.in_dim : 0);
+        std::vector<float> rd(kq ? src_dim : 0);
         for (size_t c = 0; c < op.nch; ++c) {
             uint8_t* d = dst + op.dst + c * ch;
             const size_t row0 = 32 * (perm[c] / ncol);           // rows
             const size_t blk0 = (perm[c] % ncol) * 8;            // k blocks (32 values each)
             for (size_t r = 0; r < 32; ++r) {
                 const uint64_t row = row0 + r;
-                if (row >= out_dim) break;                       // padded rows: zeroed scales/codes
+                if (row >= src_rows) break;                      // padded rows: zeroed scales/codes
                 const uint8_t* srow = src + row * nb * blk;
                 const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
-                if (kq) g.embed_row(name, row, op.in_dim, rd.data());   // exact f32 row, once
+                if (kq) g.embed_row(name, row, src_dim, rd.data());   // exact f32 row, once
                 for (size_t kb = 0; kb < 8; ++kb) {
                     if (blk0 + kb >= nb) break;                  // padded columns stay zero
                     const uint8_t* b = srow + (blk0 + kb) * blk;
