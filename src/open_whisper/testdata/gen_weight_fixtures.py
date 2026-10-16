@@ -1,11 +1,4 @@
-"""Fixtures for weight_source_test: a tiny Whisper as OpenAI's checkpoint and as GGUFs, and the converter's container for each (2026-10-16).
-
-    python src/open_whisper/testdata/gen_weight_fixtures.py [OUT_DIR]
-
-The expected tensors come from q4nx-build's whisper_tensors(), the code that built every
-model.open.safetensors the engine has run, so the C++ readers are checked against it rather
-than against a second copy of themselves. Needs numpy and gguf.
-"""
+"""weight_source_test fixtures: a tiny Whisper as checkpoint and GGUFs, hashed through q4nx-build's converter (2026-10-16)."""
 
 from __future__ import annotations
 
@@ -53,8 +46,7 @@ def gguf_name(hf: str) -> str:
 
 
 def checkpoint(rng) -> dict:
-    """transformers' names and shapes, fp16 values from a normal draw (so bf16 rounding,
-    ties included, is exercised)."""
+    """Normal draws, so the bf16 rounding (ties included) is exercised."""
     t = {}
     f16 = lambda *s: (rng.standard_normal(s) * 0.05).astype(np.float16)  # noqa: E731
     e, d = "model.encoder.", "model.decoder."
@@ -89,8 +81,7 @@ def is_matmul(hf: str, a: np.ndarray) -> bool:
 
 
 def write_gguf(path: Path, ckpt: dict, quant: str) -> None:
-    """The handy-computer layout: matmuls F16 or Q8_0, conv kernels F16 (F32 beside Q8_0),
-    everything else F32."""
+    """handy-computer's type layout: conv kernels are F32 beside Q8_0, F16 beside F16."""
     w = GGUFWriter(str(path), "whisper")
     for key, v in (("encoder.n_layers", N_ENC), ("decoder.n_layers", N_DEC), ("encoder.d_model", D),
                    ("decoder.d_model", D), ("encoder.n_heads", HEADS), ("decoder.n_heads", HEADS),
@@ -115,7 +106,6 @@ def write_gguf(path: Path, ckpt: dict, quant: str) -> None:
 
 
 class Source:
-    """whisper_tensors()'s reader interface over transformers-named f32 arrays."""
 
     def __init__(self, tensors: dict):
         self.tensors = tensors
@@ -126,7 +116,6 @@ class Source:
 
 
 def gguf_source(path: Path, ckpt: dict) -> Source:
-    """The GGUF dequantized by the gguf package, under transformers' names."""
     by_name = {t.name: t for t in GGUFReader(str(path)).tensors}
     out = {}
     for hf, a in ckpt.items():
@@ -151,7 +140,6 @@ def expected(src: Source) -> dict:
 
 
 def kquant_blocks(out: Path, rng) -> None:
-    """Two random 256-value rows per K-quant type and the gguf package's dequant of them."""
     w = GGUFWriter(str(out / "kquants.gguf"), "whisper")
     values = []
     for name, qt in (("q4_k", Q.Q4_K), ("q5_k", Q.Q5_K), ("q6_k", Q.Q6_K)):

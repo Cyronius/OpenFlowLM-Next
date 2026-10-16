@@ -1833,12 +1833,7 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
 
 
 # ---------------------------------------------------------------- Whisper (ASR)
-#
-# The open Whisper engine reads OpenAI's model.safetensors or a GGUF of it as they
-# ship (src/open_whisper/weight_source.cpp); nothing is converted. A GGUF carries
-# no config/tokenizer files, so they come from the checkpoint it was made from
-# (the GGUF's general.repo_url, else its README base_model) and are checked
-# against the GGUF's own metadata before anything is registered.
+# The open Whisper engine reads these files as they ship (OPEN-WHISPER-INSTALL); nothing is converted.
 
 WHISPER_FAMILY = "whisper-v3"
 WHISPER_SIDECARS = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"]
@@ -1871,8 +1866,7 @@ def whisper_gguf_quant(name):
 
 
 def choose_whisper_gguf(names, want=None):
-    """(chosen, refused) among a repo's GGUFs: `want` names a quant ('Q8_0'), else the
-    first of WHISPER_GGUF_PREFERENCE the repo ships."""
+    """(chosen, refused): the `want` quant, else the first of WHISPER_GGUF_PREFERENCE."""
     by_quant, refused = {}, {}
     for n in names:
         if not n.endswith(".gguf"):
@@ -1897,7 +1891,6 @@ def choose_whisper_gguf(names, want=None):
 
 
 def check_whisper_gguf(kv, tensors):
-    """Reasons the engine cannot read this GGUF (empty when it can)."""
     problems = []
     if kv.get("general.architecture") != "whisper":
         return [f"general.architecture is {kv.get('general.architecture')!r}, not 'whisper'"]
@@ -1921,8 +1914,7 @@ def hf_repo_from_url(url):
 
 
 def check_whisper_sidecars(kv, target):
-    """Reasons the config/tokenizer files in `target` do not describe the GGUF's model:
-    a vocabulary off by one id still decodes to plausible text, so every id is compared."""
+    """Every id is compared: a vocabulary off by one still decodes to plausible text."""
     problems = []
     cfg = load_json(target / "config.json")
     gen = load_json(target / "generation_config.json")
@@ -1959,8 +1951,7 @@ def check_whisper_sidecars(kv, target):
 
 
 def whisper_tokenizer_config(target):
-    """The host reads bos_token_id and eos_token_id (a list) from tokenizer_config.json;
-    OpenAI's file has neither. Added from config.json, as q4nx-build's container did."""
+    """The host reads both ids from tokenizer_config.json and OpenAI's file has neither."""
     path = target / "tokenizer_config.json"
     tc = load_json(path)
     cfg = load_json(target / "config.json")
@@ -1973,7 +1964,7 @@ def whisper_tokenizer_config(target):
 
 
 def whisper_xclbin_roots(args_xclbin_dir, user_list):
-    """Where the engine looks for kernel sets (utils::xclbin_roots), as xclbins directories."""
+    """utils::xclbin_roots, as xclbins directories."""
     roots = []
     env = os.environ.get("OFLM_XCLBIN_PATH")
     if env:
@@ -1988,8 +1979,7 @@ def whisper_xclbin_roots(args_xclbin_dir, user_list):
 
 
 def find_whisper_kernels(roots, cfg):
-    """The first complete Whisper kernel set built for `cfg`'s geometry, by the engine's
-    own rule (whisper_engine_select.cpp find_open_kernels): kernels belong to a shape."""
+    """The engine's own rule (find_open_kernels): kernels belong to a shape, not a name."""
     for root in roots:
         for d in sorted(Path(root).iterdir()):
             marker = d / "open_kernels" / "whisper_kernels.json"
@@ -2005,7 +1995,6 @@ def find_whisper_kernels(roots, cfg):
 
 
 def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, system_registry):
-    """Install a Whisper checkpoint or GGUF for the open engine, as it ships."""
     names = ([e.name for e in local_dir.iterdir() if e.is_file()] if local_dir
              else root_file_names(tree))
     stock = "model.safetensors" in names and "config.json" in names

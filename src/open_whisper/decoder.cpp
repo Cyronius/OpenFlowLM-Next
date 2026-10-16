@@ -67,13 +67,11 @@ std::vector<float> load_f32(const WeightSource &f, const std::string &name,
 // Raw bf16 bits, [out, in], NOT un-tiled: the decoder's tensors are stored at
 // their natural shape (utilities/q4nx-build/q4nx/open_whisper.py's
 // whisper_tensors(), "Decoder: transformers' names..." branch), unlike the
-// encoder's GEMM operands, which weights.cpp tiles for the NPU at load. The
-// source checks the dtype, not just the byte count (the container through
-// require_bf16 -- see kernels.hpp).
+// encoder's GEMM operands, which weights.cpp tiles for the NPU at load.
 std::vector<uint16_t> load_bf16_raw(const WeightSource &f, const std::string &name,
                                     int64_t out, int64_t in) {
   require_shape(f, name, {static_cast<size_t>(out), static_cast<size_t>(in)});
-  return f.bf16(name);
+  return f.bf16(name);   // the dtype, not just the byte count -- require_bf16 for the container
 }
 
 Linear load_linear(const WeightSource &f, const std::string &wname, const std::string &bname,

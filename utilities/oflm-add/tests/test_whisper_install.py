@@ -1,7 +1,4 @@
-"""oflm-add installs a Whisper GGUF or checkpoint for the open engine as it ships.
-
-Traces: OPEN-WHISPER-INSTALL (canonical spec: specs/open-whisper/spec.md)
-"""
+# Traces: OPEN-WHISPER-INSTALL (canonical spec: specs/open-whisper/spec.md)
 import json
 import struct
 import sys
@@ -33,7 +30,6 @@ def turbo_kv(**override):
 
 
 def write_gguf(path, kv):
-    """A GGUF header with metadata and no tensors (all the installer reads)."""
     def s(x):
         b = x.encode("utf-8")
         return struct.pack("<Q", len(b)) + b

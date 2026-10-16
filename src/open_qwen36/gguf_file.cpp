@@ -312,10 +312,7 @@ namespace {
 uint64_t row_count(const GgufFile::TensorInfo& t) {
     return t.dims.empty() || t.dims[0] == 0 ? 0 : t.nvalues() / t.dims[0];
 }
-}  // namespace
 
-namespace {
-// One row of `dim` values at row index `row` of a tensor whose data starts at `base`.
 void dequant_row(const std::string& name, GgufFile::Type type, const uint8_t* base, size_t row,
                  size_t dim, float* out) {
     using Type = GgufFile::Type;
@@ -409,8 +406,7 @@ void dequant_row(const std::string& name, GgufFile::Type type, const uint8_t* ba
             break;
         }
         case Type::Q5_K: {
-            // super-block of 256: fp16 d, fp16 dmin, 12 bytes of 6-bit scales,
-            // 32 bytes of 5th bits, then 128 bytes of nibbles (llama.cpp's loop)
+            // llama.cpp's loop: d, dmin, 12 B of 6-bit scales, 32 B of fifth bits, 128 B of nibbles
             const uint8_t* p = base + row * (dim / 256) * 176;
             for (size_t sb = 0; sb < dim / 256; ++sb, p += 176) {
                 uint16_t ud, um;

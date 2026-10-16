@@ -1,9 +1,7 @@
 //===- weights.hpp -------------------------------------------*- C++ -*-===//
 //
-// open_whisper -- load the encoder's weights and pre-tile every GEMM operand
-// for the NPU kernel set (phase 2b, issue #72). The weights come from
-// model.open.safetensors, OpenAI's model.safetensors or a GGUF, all presented
-// as the container's tensors by weight_source.hpp.
+// open_whisper -- load the encoder's weights (weight_source.hpp) and pre-tile
+// every GEMM operand for the NPU kernel set (phase 2b, issue #72).
 // SPDX-License-Identifier: MIT
 //
 // The container's B tensors are row-major [K, N] bf16 (utilities/q4nx-build/

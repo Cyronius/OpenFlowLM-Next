@@ -56,10 +56,7 @@ constexpr const char* kOpenKernelsFormat = "oflm-open-whisper-kernels-v1";
 ///        as given and left for the engine's own construction to refuse).
 /// \note *how names the rule that chose it, because every rule yields a working engine and a
 ///       set chosen against intent looks right.
-/// \note Kernels belong to the model's shape, not its name: when no set sits under this
-///       model's own name, any complete set whose hf_config_check matches this model's
-///       config.json is used, so a GGUF or checkpoint install in a directory of its own
-///       finds the family's set.
+/// \note Last, any set built for this config.json: kernels belong to a shape, not a model name.
 std::string find_open_kernels(const std::string& model_dir, const Whisper_Config& config, std::string* how) {
     namespace fs = std::filesystem;
     auto marker = [](const fs::path& d, nlohmann::json* out) {
@@ -127,7 +124,6 @@ std::string find_open_kernels(const std::string& model_dir, const Whisper_Config
     return {};
 }
 
-/// \brief The open engine's weight files in model_dir, the one it reads first.
 std::string open_weights_note(const std::vector<ow::WeightKind>& present) {
     std::string note = ow::weight_file_name(present.front());
     for (size_t i = 1; i < present.size(); ++i)

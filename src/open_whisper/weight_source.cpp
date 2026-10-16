@@ -1,5 +1,4 @@
-//===- weight_source.cpp --------------------------------------*- C++ -*-===//
-// open_whisper -- see weight_source.hpp. SPDX-License-Identifier: MIT
+// open_whisper: see weight_source.hpp. SPDX-License-Identifier: MIT
 #include "weight_source.hpp"
 
 #include <algorithm>
@@ -48,8 +47,7 @@ uint16_t round_bf16(float x) {
   return static_cast<uint16_t>((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
 }
 
-// Every container tensor with its dtype and shape: whisper_tensors() in
-// utilities/q4nx-build/q4nx/open_whisper.py, the layout OPEN-WHISPER-CONTAINER states.
+// Mirrors whisper_tensors() in utilities/q4nx-build/q4nx/open_whisper.py (OPEN-WHISPER-CONTAINER).
 std::map<std::string, TensorDesc> container_layout(const ModelShape &s) {
   const int64_t D = s.d_model, F = s.ffn, X = 2 * s.n_dec * s.d_model;
   std::map<std::string, TensorDesc> m;
@@ -101,7 +99,6 @@ std::map<std::string, TensorDesc> container_layout(const ModelShape &s) {
   return m;
 }
 
-// The transformers tensors the container is made from, with their shapes.
 std::map<std::string, Shape> source_layout(const ModelShape &s) {
   const int64_t D = s.d_model, F = s.ffn;
   std::map<std::string, Shape> m;
@@ -142,8 +139,7 @@ std::map<std::string, Shape> source_layout(const ModelShape &s) {
   return m;
 }
 
-// out[c * ld + col0 + r] = in[r * cols + c]: `in` [rows, cols] lands transposed in
-// columns [col0, col0 + rows) of the row-major [cols, ld] matrix `out`.
+// Writes in^T into columns [col0, col0 + rows) of out, so fused operands need no second copy.
 void transpose_into(const float *in, size_t rows, size_t cols, float *out, size_t ld, size_t col0) {
   constexpr size_t B = 64;
   for (size_t r0 = 0; r0 < rows; r0 += B)
@@ -154,7 +150,7 @@ void transpose_into(const float *in, size_t rows, size_t cols, float *out, size_
     }
 }
 
-// Conv1d weight [C_out, C_in, 3] -> im2col operand [3 * C_in, C_out], K = tap * C_in + c.
+// Tap-major K (tap * C_in + c) is the order the conv streams' im2col rows use.
 std::vector<float> conv_operand(const std::vector<float> &w, size_t c_out, size_t c_in) {
   std::vector<float> out(3 * c_in * c_out);
   for (size_t o = 0; o < c_out; ++o)
@@ -163,7 +159,6 @@ std::vector<float> conv_operand(const std::vector<float> &w, size_t c_out, size_
   return out;
 }
 
-// Transformers-named tensors as f32, from one file.
 class SourceTensors {
 public:
   virtual ~SourceTensors() = default;
@@ -260,7 +255,6 @@ private:
   open_qwen36::GgufFile g_;
 };
 
-// A stock checkpoint or a GGUF, presented as the container.
 class DerivedSource final : public WeightSource {
 public:
   DerivedSource(WeightKind kind, const std::string &path, const ModelShape &s)
@@ -317,7 +311,6 @@ public:
 private:
   std::vector<float> read(const std::string &hf) const { return src_->read(hf); }
 
-  // `name`'s values in f32, before the container's bf16 rounding.
   std::vector<float> values(const std::string &name) const {
     const size_t D = static_cast<size_t>(s_.d_model), F = static_cast<size_t>(s_.ffn);
     const size_t MEL = static_cast<size_t>(s_.n_mel), NDEC = static_cast<size_t>(s_.n_dec);
@@ -399,7 +392,6 @@ private:
   std::string types_;
 };
 
-// model.open.safetensors as q4nx-build wrote it: read, never rearranged.
 class ContainerSource final : public WeightSource {
 public:
   explicit ContainerSource(const std::string &path) : f_(path) {}

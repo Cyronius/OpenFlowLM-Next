@@ -1,8 +1,4 @@
-//===- weight_source_test.cpp -----------------------------------*- C++ -*-===//
-// Traces: OPEN-WHISPER-GGUF, OPEN-WHISPER-STOCK (specs/open-whisper/spec.md). SPDX-License-Identifier: MIT
-//
-//   weight_source_test TESTDATA_DIR
-//   weight_source_test --compare CONTAINER.safetensors WEIGHTS_FILE   (turbo, real files)
+// Traces: OPEN-WHISPER-GGUF, OPEN-WHISPER-STOCK (canonical spec: specs/open-whisper/spec.md). SPDX-License-Identifier: MIT
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -63,7 +59,6 @@ ow::ModelShape shape_from(const nlohmann::json &j) {
           j.at("n_mel"), j.at("max_src"), j.at("max_tgt"), j.at("vocab")};
 }
 
-// Every container tensor the source makes against the converter's dtype, shape and bytes.
 void against_oracle(const ow::WeightSource &src, const ow::ModelShape &shape, const nlohmann::json &want,
                     const std::string &label) {
   const std::vector<std::string> names = ow::container_tensor_names(shape);
@@ -123,7 +118,6 @@ int unit(const fs::path &testdata) {
     expect_throw([&] { src->desc("enc.99.qkv.B"); }, "missing tensor", "an unknown tensor name is refused");
   }
 
-  // K-quant rows against the gguf package's dequant of the same bytes, bit for bit.
   {
     open_qwen36::GgufFile g((tiny / "kquants.gguf").string());
     std::ifstream f(tiny / "kquants_expected.bin", std::ios::binary);
@@ -137,8 +131,7 @@ int unit(const fs::path &testdata) {
     }
   }
 
-  // The name map against the real turbo GGUF's tensor list: every source tensor has a GGUF
-  // name with the right shape, and every GGUF tensor but the frontend is used.
+  // Checked against the real file's list, not the map itself: a round trip is blind to a wrong entry.
   {
     const nlohmann::json real = read_json(testdata / "whisper_turbo_gguf_tensors.json");
     const ow::ModelShape t = ow::turbo_shape();
@@ -197,7 +190,6 @@ int unit(const fs::path &testdata) {
           "names with no GGUF counterpart map to nothing");
   }
 
-  // Which file a directory is read from.
   {
     const fs::path dir = fs::temp_directory_path() / "ow_weight_source_test";
     fs::remove_all(dir);
@@ -219,7 +211,6 @@ int unit(const fs::path &testdata) {
   return failures ? 1 : 0;
 }
 
-// Real files: every turbo container tensor from WEIGHTS_FILE against CONTAINER, bit for bit.
 int compare(const std::string &container, const std::string &weights) {
   const std::string ext = fs::path(weights).extension().string();
   const WeightKind kind = ext == ".gguf" ? WeightKind::Gguf : WeightKind::Stock;
