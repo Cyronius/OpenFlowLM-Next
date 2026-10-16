@@ -301,6 +301,16 @@ Order: 1 and 2 on the host while 3 runs on the NPU; then 4 and 5; then 6; then 7
 9. About five weeks of focused work to a model that decodes through `oflm serve` (four if eight cores
 turn out to keep pace after all), not counting 10.
 
+**Spec impact of the build**, for its own plan (names are proposals):
+- New: `OPEN-GPTOSS-GGUF` (the spec and tensor names from the GGUF), `OPEN-PACK-EXPERT-MX4` (the pack
+  op, NumPy and C++ byte-identical), `OPEN-GEMV-MX4` (the tile against a reference, and the rate
+  gate), `OPEN-GPTOSS-ACT` (the clamped SwiGLU kernel), `OPEN-GPTOSS-ROUTER` (the router with its
+  bias), `OPEN-ATTN-O-BIAS`.
+- Modified: `OPEN-FAMILY-GPTOSS` (a recipe exists, the `NotImplementedError` goes),
+  `OPEN-ATTN-SINK` (steps 2-5), `OPEN-GPTOSS-EXPERT-LAYOUT` (from host arithmetic to the design,
+  and the 24-core deal if it is taken), the `oflm-add` requirements (an MXFP4 install).
+- Removed: none.
+
 **Risks, beyond the kernel rate:**
 - **Program memory on the main core** (step 7). Two GEMV bodies plus both halves' loops; my estimate
   from the measured `ax1` core is 14-15 KB of 16. If it does not fit: `-Oz` on selected units (about
