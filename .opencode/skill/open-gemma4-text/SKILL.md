@@ -29,10 +29,10 @@ held to transformers by `gemma4_transformers_check.py`.
 ## The kernel side
 
 - Four `dx` builds, `G4_PART` = local | global | local_shared | global_shared, one hardware context each.
-- attn.h knobs, all default-off (every other family preprocesses to the same tokens --
-  `utilities/mlir_equiv.py ppcheck`): `ATTN_SCALE_ONE`, `ATTN_VNORM`, `ATTN_ROPE_PAIR` (partner distance),
+- attn.h knobs, all default-off (every other family preprocesses to the same tokens -- see the
+  equivalence section): `ATTN_SCALE_ONE`, `ATTN_VNORM`, `ATTN_ROPE_PAIR` (partner distance),
   `ATTN_PTAB_CS_OFF` (the sliding kinds' 1024-byte element cannot hold 512 + 1024 bytes of record, so
-  cos / sin move to the second element).
+  cos / sin move to the second element), `ATTN_KV_SHARED` (E2B's shared kinds).
 - `dx.py` KV-shared variant: no k / v GEMV, no k / v attention work, no cache-row drain; the window and then
   this position's row (the `attnpos` kind-1 patch, now a fill) are read from the source layer's cache.
 - Pools are GGUF-direct at 5120-byte chunks (bf16 scales narrowed at pack time); no `*_f32` twin.
@@ -43,9 +43,14 @@ held to transformers by `gemma4_transformers_check.py`.
 source ~/ironenv142/bin/activate; export PATH=~/xrt-tools/bin:$PATH LD_LIBRARY_PATH=~/xrt-tools/lib:$LD_LIBRARY_PATH
 cd open_kernels
 OPEN_KERNELS_UNVALIDATED=1 python export_qwen36_kernels.py --spec recipes/specs/gemma4-e4b.json \
-   --out <dir> --only dx_global,dx_local,dx_global_shared,dx_local_shared,ln,lm_head_q4 --force
+   --out <dir> --only dx_global,dx_local,dx_global_shared,dx_local_shared,ln,lm_head_q4 --force -j 2
 python ../utilities/core_sizes.py designs/dense/build_gemma4_h2560_global      # program memory per core
 ```
+
+E2B: `--spec recipes/specs/gemma4-e2b.json`, build dirs `build_gemma4_h1536_*`. About 8 minutes at `-j 2`
+(the global kinds take ~200 s each); the exporter prints each set's fullest core. Export straight into
+the installed model's `open_kernels` dir and pass that dir to `oflm-add --open-kernels` ("already in
+place"). oflm-add copies the GGUF to `model.gguf`; on a tight disk, replace the copy with a hard link.
 
 ## Equivalence evidence for the shared design files
 

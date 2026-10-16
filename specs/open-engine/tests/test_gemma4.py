@@ -190,9 +190,7 @@ def test_e2b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, e2b):
     ("local", 256, 256, 6144, 4, 1024, 2, False), ("global", 512, 128, 6144, 8, 2048, 1, False),
     ("local_shared", 256, 256, 12288, 4, 1024, 2, True), ("global_shared", 512, 128, 12288, 8, 2048, 1, True)])
 def test_e2b_part_geometry(unvalidated, monkeypatch, e2b, part, hd, rot, ff, n, e_a, elems, shared):
-    """One kv head: the element is the whole cache row and cos / sin stay at 512 (attn.h reads them across
-    the sliding kinds' two record elements). The sliding kinds' 256-wide kv projection splits over 4
-    cores, the global kinds' 512-wide one over 8; each kind is its own xclbin and pool layout."""
+    """One kv head: the element is the whole cache row; the 256-row kv projection splits over 4 cores."""
     monkeypatch.setenv("G4_PART", part)
     R = G4.recipe(e2b)
     G, L = R.geo, R.layout

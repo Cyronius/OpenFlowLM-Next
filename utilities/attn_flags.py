@@ -3,8 +3,7 @@ attention cores compile attn.h with (2026-10-16). Feeds utilities/attn_pp_identi
 
 Dense and LFM2 specs import designs/dense/dx.py and read its ATTN_FLAGS; the MoE and
 Qwen3.5 specs rebuild designs/layer_x/xlayer.py's list from the recipe's attention geometry.
-A spec whose dx.py builds differ in attention (Gemma 4's four G4_PART kinds) prints one
-`<spec stem>@<build>|<flags>` line per distinct flag set.
+Gemma 4's kinds print one `<spec stem>@<build>|<flags>` line per distinct flag set.
 """
 from __future__ import annotations
 

@@ -1156,6 +1156,12 @@ the greedy answer is "The capital of France is Paris." then `<turn|>`. Against t
 6-layer corr is 0.997: that gap is the head's re-quantization (the weights rule's Q6_K -> q4_1), not the
 layers.
 
+**Result 2026-10-16 (after merging OPEN-ATTN-ONE-KV-HEAD and adding E2B's recipe):** every shipped spec's
+attention flags are unchanged; the MLIR of all 73 shipped kernel sets matches the base commit's and E4B's
+6 match the pre-merge tree's; every attention translation unit preprocesses identically at every spec's
+own flags, 176 against the base and 196 (with E4B's two kinds) against the pre-merge tree
+(`utilities/attn_flags.py`, `utilities/mlir_equiv.py`, `ALL_SPECS=1 utilities/attn_pp_identical.sh`).
+
 ### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
 **Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
 **Verification:** test (`src/open_qwen36/gguf_pack_test.cpp`, GGUF-PACK)

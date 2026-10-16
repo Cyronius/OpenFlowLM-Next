@@ -272,8 +272,7 @@ STACK = 0x1800
 def per_call(spec: ModelSpec) -> int:
     """Chunks per weight element: 2 (10 KB, as the MoE designs) unless the widest activation table
     leaves no room for two of them beside the x elements -- then 1 (Llama 3 8B: K = 14336 -> 32 KB).
-    A family whose layer kinds share one export's generated kernel TUs may cap it lower through
-    `extra["per_call"]` (Gemma 4 E2B, recipes/gemma4.py); no other spec carries that key."""
+    `extra["per_call"]` caps it (Gemma 4 E2B, whose kinds share one export's generated TUs)."""
     wide = max(spec.hidden, spec.attn_q_width, spec.intermediate)
     for pc in (2, 1):
         ch = chunk_bytes(pool_quant(spec))

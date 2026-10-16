@@ -69,9 +69,7 @@ def _kind_spec(spec: ModelSpec, kind: str) -> ModelSpec:
 
 
 def per_call_cap(spec: ModelSpec) -> int | None:
-    """E2B's KV-shared layers have a twice-wider FFN, whose activation table leaves room for one chunk
-    per weight element where the other kinds take two. The dense kernel TUs are generated once per
-    export, so every kind takes the smaller; None when the kinds agree (E4B), which changes nothing."""
+    """The smallest chunks-per-element of the kinds when they differ (E2B's 12288-wide shared FFN), else None."""
     pcs = {D.per_call(_kind_spec(spec, k)) for k in kinds(spec)}
     return min(pcs) if len(pcs) > 1 else None
 

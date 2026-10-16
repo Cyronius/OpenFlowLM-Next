@@ -687,9 +687,7 @@ def normalize_tokenizer_config(target, repo, bases, modelscope=False):
     g = None
     gc = target / "generation_config.json"
     repo_gen = None
-    # A local-directory install passes the directory path as `repo`: its own
-    # generation_config.json is the candidate (the install does not copy it);
-    # fetching one is only for a remote id.
+    # a local install's own generation_config.json is never copied into the target
     if Path(repo).is_dir():
         repo_gen = Path(repo) / "generation_config.json"
     else:

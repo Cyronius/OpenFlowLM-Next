@@ -196,6 +196,9 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
     # `attn` point above even where the head geometry matches, so it is validated on its own.
     Template("attn_gemma4", "designs/attn/attn.h",
              combos=(combination(
+                 # (head_dim, num_heads, num_kv_heads, rotary_dim, kv_shared). E4B's four kinds entered
+                 # 2026-10-16: the 6- and 30-layer slices and the whole model against the fp64 replica
+                 (256, 8, 2, 256, False), (512, 8, 2, 128, False), (256, 8, 2, 256, True), (512, 8, 2, 128, True),
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim", "kv_shared")),),
              note="OPEN-FAMILY-GEMMA4's procedure: the replica slice through these kinds"),
     Template("deltanet", "designs/layer_x/dnx.h",
