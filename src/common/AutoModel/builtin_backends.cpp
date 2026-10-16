@@ -14,10 +14,10 @@
 ///       family) instead of a missing-header build break. An open replacement
 ///       that loads the same GGUF directly is future work on the GGUF track.
 ///
-///       Also not registered here: "granite" (open-kernels-only, no closed
-///       engine to wrap -- see modeling_granite.cpp) and "qwen3.5-omni"
+///       Also not registered here: "granite" and "hunyuan" (open-kernels-only,
+///       no closed engine to wrap -- see modeling_granite.cpp) and "qwen3.5-omni"
 ///       (its qwen3_5_omni class is not a causal_lm, so the shared template
-///       does not apply). Both keep their existing frontend paths untouched.
+///       does not apply). All three keep their own frontend paths.
 #include "AutoModel/automodel.hpp"
 #include "AutoModel/oflm_npu_backend.hpp"
 #include "AutoModel/model_backend.hpp"

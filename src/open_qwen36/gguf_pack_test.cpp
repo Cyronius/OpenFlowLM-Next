@@ -9,6 +9,7 @@
 ///
 ///     cmake -S . -B build && cmake --build build && ctest --test-dir build
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -168,7 +169,8 @@ std::string write_gguf_q6k(const fs::path& dir, const BlocksQ6K& b) {
     return out.string();
 }
 
-std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb, const std::vector<float>& norm) {
+std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb, const std::vector<float>& norm,
+                       const std::string& tag = "") {
     std::vector<uint8_t> f;
     f.insert(f.end(), {'G', 'G', 'U', 'F'});
     put_u32(f, 3);                                   // v3: no alignment field, fixed 32
@@ -185,7 +187,7 @@ std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb,
         put_u64(f, 0);
     };
     put_tensor("blk.0.attn_q.weight", {512, 64}, mm.type);
-    put_tensor("token_embd.weight", {256, 32}, 8);           // Q8_0
+    put_tensor("token_embd.weight", {emb.cols, emb.rows}, 8);   // Q8_0
     put_tensor("blk.0.attn_norm.weight", {512}, 0);          // F32
     // data section: 32-aligned right after the header; the tensor offsets are
     // RELATIVE to it (GGUF semantics)
@@ -247,7 +249,8 @@ std::string write_gguf(const fs::path& dir, const Blocks& mm, const Blocks& emb,
         const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
         f.insert(f.end(), b, b + 4);
     }
-    const fs::path out = dir / ("test-" + std::to_string(mm.type) + ".gguf");
+    // a file another GgufFile still maps cannot be rewritten on Windows, so each fixture gets its own name
+    const fs::path out = dir / ("test-" + std::to_string(mm.type) + tag + ".gguf");
     std::ofstream of(out, std::ios::binary);
     of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
     return out.string();
@@ -352,6 +355,50 @@ int main() {
         }
         std::printf("%s std_perm_gguf Q4_0 (%zu values differ)\n", bad0 ? "FAIL" : "ok", bad0);
         if (bad0) return 1;
+    }
+
+    // ---- a tied head (no output.weight, so token_embd) whose 40 rows are not whole 64-row
+    // bands: the plan's padded rows come back zero, the real ones on the requantized grid
+    {
+        const Blocks emb40 = make_blocks(40, 256, "Q8_0", rng);
+        GgufFile gt(write_gguf(dir, mm, emb40, norm, "-tied"));
+        PackOp hop;
+        hop.op = "std_perm_gguf";
+        hop.tensor = "lm_head.weight";
+        hop.in_dim = 256;
+        hop.nch = 2;                                 // 64 rows x 256 cols, one band
+        std::vector<uint8_t> hp(static_cast<size_t>(hop.nch) * 6144, 0);
+        pools::apply(hop, gt, 0, hp.data(), hp.size(), 6144);
+        size_t far = 0, pad = 0;
+        for (size_t c = 0; c < 2; ++c) {
+            const uint8_t* d = hp.data() + c * 6144;
+            for (size_t r = 0; r < 32; ++r)
+                for (size_t k = 0; k < 256; ++k) {
+                    const size_t kb = k / 32, row = 32 * c + r;
+                    const float df = *reinterpret_cast<const float*>(d + 4 * (kb * 32 + r));
+                    const float mf = *reinterpret_cast<const float*>(d + 1024 + 4 * (kb * 32 + r));
+                    const size_t p = (r / 16) * 4096 + k * 16 + (r % 16);
+                    const uint8_t byte = d[2048 + (p >> 1)];
+                    const uint8_t nib = (p & 1) ? byte >> 4 : byte & 0xF;
+                    if (row >= 40) {
+                        if (df != 0.f || mf != 0.f || nib) ++pad;
+                        continue;
+                    }
+                    const float want = emb40.values[row * 256 + k];
+                    if (std::fabs(nib * df + mf - want) > 0.52f * df + 1e-6f) ++far;
+                }
+        }
+        bool refused = false;
+        hop.nch = 1;                                 // 32 rows: narrower than the file
+        try {
+            pools::apply(hop, gt, 0, hp.data(), hp.size(), 6144);
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        const bool ok = far == 0 && pad == 0 && refused;
+        std::printf("%s tied head padded to whole bands (%zu off-grid, %zu non-zero pad values, %s)\n",
+                    ok ? "ok   " : "FAIL", far, pad, refused ? "narrow plan refused" : "narrow plan ACCEPTED");
+        if (!ok) return 1;
     }
 
     // ---- pack_norm: f32 -> bf16 (RNE)

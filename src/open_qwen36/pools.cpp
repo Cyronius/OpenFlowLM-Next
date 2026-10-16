@@ -543,9 +543,16 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         size_t n = 0;
         const uint8_t* src = raw(m, name, 0, &n);
         const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
-        if (!kq && n < static_cast<size_t>(out_dim) * nb * blk)
+        if (t.dims.empty() || t.dims[0] != op.in_dim)
+            fail(name + " is " + std::to_string(t.dims.empty() ? 0 : t.dims[0]) + " wide, the plan packs " +
+                 std::to_string(op.in_dim));
+        // A tied head (token_embd) has the real vocabulary; the plan rounds it up to whole 64-row bands.
+        const uint64_t file_rows = t.dims.size() >= 2 ? t.dims[1] : 1;
+        if (file_rows > out_dim || out_dim - file_rows >= 64)
+            fail(name + " has " + std::to_string(file_rows) + " rows, the plan packs " + std::to_string(out_dim));
+        if (!kq && n < static_cast<size_t>(file_rows) * nb * blk)
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
-                 std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
+                 std::to_string(static_cast<uint64_t>(file_rows) * nb * blk));
         bounds(op, op.nch * ch, dst_bytes);
         auto perm = std_perm(op.nch, op.in_dim);
         const size_t ncol = op.in_dim / 256;
@@ -556,7 +563,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             const size_t blk0 = (perm[c] % ncol) * 8;            // k blocks (32 values each)
             for (size_t r = 0; r < 32; ++r) {
                 const uint64_t row = row0 + r;
-                if (row >= out_dim) break;                       // padded rows: zeroed scales/codes
+                if (row >= file_rows) break;                     // padded rows: zeroed scales/codes
                 const uint8_t* srow = src + row * nb * blk;
                 const uint8_t rb = static_cast<uint8_t>(r / 16), rl = static_cast<uint8_t>(r % 16);
                 if (kq) g.embed_row(name, row, op.in_dim, rd.data());   // exact f32 row, once

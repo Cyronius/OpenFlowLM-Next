@@ -16,6 +16,7 @@
 typedef enum {
     llama3,
     granite,
+    hunyuan,
     deepseek_r1,
     deepseek_r1_0528,
     qwen2,
@@ -47,6 +48,7 @@ inline const std::map<std::string, SupportedModelFamily>& model_family_map() {
     static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {
         {"llama3", SupportedModelFamily::llama3},
         {"granite", SupportedModelFamily::granite},
+        {"hunyuan", SupportedModelFamily::hunyuan},
         {"deepseek-r1", SupportedModelFamily::deepseek_r1},
         {"deepseek-r1-0528", SupportedModelFamily::deepseek_r1_0528},
         {"qwen2", SupportedModelFamily::qwen2},

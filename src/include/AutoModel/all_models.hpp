@@ -8,6 +8,7 @@
 
 #include "modeling_llama3.hpp"
 #include "modeling_granite.hpp"
+#include "modeling_hunyuan.hpp"
 #include "modeling_gemma3.hpp"
 #include "modeling_gemma3_text.hpp"
 #include "modeling_qwen3.hpp"
@@ -59,6 +60,9 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
             break;
         case SupportedModelFamily::granite:
             auto_chat_engine = std::make_unique<Granite>(npu_device_inst);
+            break;
+        case SupportedModelFamily::hunyuan:
+            auto_chat_engine = std::make_unique<HunYuan>(npu_device_inst);
             break;
         case SupportedModelFamily::deepseek_r1:
             auto_chat_engine = std::make_unique<DeepSeek_r1_8b>(npu_device_inst);
