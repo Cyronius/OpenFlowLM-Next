@@ -179,6 +179,13 @@ nlohmann::json derive_config(const GgufFile& g) {
     else c["head_dim"] = u("embedding_length") / u("attention.head_count");
     if (g.kv_has(arch + ".attention.sliding_window"))
         c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
+    if (arch == "gemma4") {
+        // key_length is the global layers' width; transformers' head_dim is the sliding one
+        c["head_dim"] = u("attention.key_length_swa");
+        c["global_head_dim"] = u("attention.key_length");
+        c["hidden_size_per_layer_input"] = u("embedding_length_per_layer_input");
+        c["final_logit_softcapping"] = g.kv_f64(arch + ".final_logit_softcapping");
+    }
     return c;
 }
 
@@ -231,6 +238,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        // a multimodal config.json (Gemma 4's) keeps the language model's keys under text_config
+        if (j.contains("text_config") && j["text_config"].is_object())
+            for (const auto& [key, value] : j["text_config"].items())
+                if (!j.contains(key)) j[key] = value;
         if (gguf_) {
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
@@ -510,8 +521,9 @@ void Core::load_kernel(const std::string& name, const KernelDesc& d) {
         k.moe2 = stream_patch::moe2_table(k.words, name, g);
         for (const auto& p : k.moe2) k.slots = std::max(k.slots, static_cast<size_t>((p.slot & 0xff) + 1));
     } else if (d.patch == "attnpos") {
-        k.attn = stream_patch::attn_table(k.words, name, w_->attn);
         k.geom = w_->attn;
+        if (d.kv_row) k.geom.kv_row = d.kv_row;        // this kind's own row (Gemma 4's global heads)
+        k.attn = stream_patch::attn_table(k.words, name, k.geom);
         k.geom.window = d.window;
         k.geom.rb = d.rb;
     }
@@ -700,7 +712,10 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         uint64_t kv_slack = 0;
         for (const auto& [kn, kd] : w_->kernels)
             if (kd.patch == "attnpos" && kd.rb > 2) kv_slack = std::max<uint64_t>(kv_slack, kd.rb - 2);
-        state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
+        if (lt.state_kind == "kv_shared")
+            state_.push_back(state_.at(static_cast<size_t>(w_->kv_source.at(static_cast<size_t>(l)))));   // the same BO
+        else
+            state_.push_back(alloc(lt.state_kind == "kv" ? (cfg_.max_ctx + kv_slack) * lt.state_row : lt.state_bytes));
         if (progress) progress(l + 1, nl_ + 1);
         if ((l + 1) % 10 == 0 || l + 1 == nl_)
             log(std::to_string(l + 1) + "/" + std::to_string(nl_) + " layers resident (" +
@@ -737,6 +752,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         pools::build_ptab(*w_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
     }
+    if (w_->ple.present()) ple_load();
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
@@ -1815,6 +1831,10 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         }
         log("embed t=" + std::to_string(token) + " nan=" + std::to_string(nnan) + " maxabs=" + std::to_string(mx));
     }
+    if (w_->ple.present()) {
+        if (x) throw std::runtime_error("open_qwen36: per-layer inputs need the token id, not an embedding");
+        ple_prepare(static_cast<size_t>(token), xres.map<float*>());
+    }
     xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
     if (mpos) {
         const double p3[3] = {static_cast<double>(mpos[0]), static_cast<double>(mpos[1]), static_cast<double>(mpos[2])};
@@ -1867,7 +1887,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack;
+    const bool pipe = submit_ahead_ > 0 && !deepstack && !w_->ple.present();   // both read xres between layers
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -1897,6 +1917,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
+            if (w_->ple.present()) ple_layer(l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
@@ -1995,6 +2016,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
         xrt::bo& lg = buffer("logits", 0);
         read_back(lg, w_->vocab * 4, 0);
         std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+        softcap_logits();
         timing_.lmhead_ms = ms_since(t1);
     }
     ++pos_;
@@ -2206,7 +2228,107 @@ void Core::tail_logits(const float* row) {
     xrt::bo& lg = buffer("logits", 0);
     read_back(lg, w_->vocab * 4, 0);
     std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+    softcap_logits();
     timing_.lmhead_ms = ms_since(t1);
+}
+
+void Core::softcap_logits() {
+    const double cap = w_->logit_softcap;
+    if (cap <= 0.0) return;
+    const long long n = static_cast<long long>(w_->vocab);
+    float* lg = logits_host_.data();
+#pragma omp parallel for
+    for (long long i = 0; i < n; ++i) lg[i] = static_cast<float>(cap * std::tanh(lg[i] / cap));
+}
+
+namespace {
+inline double gelu_tanh(double x) { return 0.5 * x * (1.0 + std::tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))); }
+std::string at_layer(const std::string& name, int l) {
+    std::string s = name;
+    const auto p = s.find("{l}");
+    if (p != std::string::npos) s.replace(p, 3, std::to_string(l));
+    return s;
+}
+}  // namespace
+
+void Core::ple_load() {
+    const PleSpec& p = w_->ple;
+    const size_t L = w_->layers.size(), D = p.dim, H = w_->hidden;
+    auto take = [&](const std::string& name, size_t n) {
+        std::vector<float> v = file_->f32(name);
+        if (v.size() != n)
+            throw std::runtime_error("open_qwen36: " + name + " has " + std::to_string(v.size()) + " values, the per-layer inputs want " +
+                                     std::to_string(n));
+        return v;
+    };
+    ple_w_.model_proj = take(p.model_proj, L * D * H);
+    ple_w_.model_norm = take(p.model_norm, D);
+    ple_w_.gate.resize(nl_);
+    ple_w_.proj.resize(nl_);
+    ple_w_.norm.resize(nl_);
+    ple_w_.scalar.assign(nl_, 1.f);
+    for (int l = 0; l < nl_; ++l) {
+        ple_w_.gate[l] = take(at_layer(p.gate, l), D * H);
+        ple_w_.proj[l] = take(at_layer(p.proj, l), H * D);
+        ple_w_.norm[l] = take(at_layer(p.norm, l), H);
+        if (!p.scalar.empty()) ple_w_.scalar[l] = take(at_layer(p.scalar, l), 1)[0];
+    }
+    ple_in_.assign(L * D, 0.f);
+    log("per-layer inputs: " + std::to_string(L) + " x " + std::to_string(D) + " on the host (" +
+        std::to_string((ple_w_.model_proj.size() + nl_ * 2 * D * H) * 4 >> 20) + " MB f32)");
+}
+
+void Core::ple_prepare(size_t token, const float* emb) {
+    const PleSpec& p = w_->ple;
+    const size_t L = w_->layers.size(), D = p.dim, H = w_->hidden;
+    std::vector<float> tok(L * D);
+    file_->embed_row(p.embed, token, L * D, tok.data());
+    std::vector<double> proj(L * D);
+    const float* W = ple_w_.model_proj.data();
+#pragma omp parallel for
+    for (long long i = 0; i < static_cast<long long>(L * D); ++i) {
+        const float* w = W + static_cast<size_t>(i) * H;
+        double s = 0.0;
+        for (size_t k = 0; k < H; ++k) s += static_cast<double>(w[k]) * emb[k];
+        proj[static_cast<size_t>(i)] = s * p.model_proj_scale;
+    }
+    for (size_t l = 0; l < L; ++l) {
+        double ss = 0.0;
+        for (size_t j = 0; j < D; ++j) ss += proj[l * D + j] * proj[l * D + j];
+        const double inv = 1.0 / std::sqrt(ss / static_cast<double>(D) + p.eps);
+        for (size_t j = 0; j < D; ++j)
+            ple_in_[l * D + j] = static_cast<float>((proj[l * D + j] * inv * ple_w_.model_norm[j] +
+                                                     static_cast<double>(tok[l * D + j]) * p.embed_scale) * p.input_scale);
+    }
+}
+
+void Core::ple_layer(int l) {
+    const PleSpec& p = w_->ple;
+    const size_t D = p.dim, H = w_->hidden;
+    xrt::bo& xres = buffer("xres", 0);
+    read_back(xres, H * 4, 0);
+    float* h = xres.map<float*>();
+    std::vector<double> g(D), y(H);
+    const float* G = ple_w_.gate[l].data();
+    const float* P = ple_w_.proj[l].data();
+    const float* in = ple_in_.data() + static_cast<size_t>(l) * D;
+    for (size_t j = 0; j < D; ++j) {
+        double s = 0.0;
+        for (size_t k = 0; k < H; ++k) s += static_cast<double>(G[j * H + k]) * h[k];
+        g[j] = gelu_tanh(s) * in[j];
+    }
+    double ss = 0.0;
+    for (size_t i = 0; i < H; ++i) {
+        double s = 0.0;
+        for (size_t j = 0; j < D; ++j) s += static_cast<double>(P[i * D + j]) * g[j];
+        y[i] = s;
+        ss += s * s;
+    }
+    const double inv = 1.0 / std::sqrt(ss / static_cast<double>(H) + p.eps);
+    const double sc = ple_w_.scalar[l];
+    for (size_t i = 0; i < H; ++i)
+        h[i] = static_cast<float>((static_cast<double>(h[i]) + y[i] * inv * ple_w_.norm[l][i]) * sc);
+    xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, H * 4, 0);
 }
 
 void Core::shuttle_buf(xrt::bo& wide, xrt::bo& scratch1, size_t token, size_t act_bytes, bool wide_to_scratch,

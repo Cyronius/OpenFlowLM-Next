@@ -197,6 +197,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         d.patch = v.value("patch", "");
         d.window = v.value("window", 0ull);
         d.rb = v.value("rb", 1ull);
+        d.kv_row = v.value("kv_row", 0ull);
         // attn_stepb*.cc build RB 2 and 4 only; any other count would pad the stream for
         // rows the kernel never takes, and the core waits on its fifo forever
         if (d.rb != 1 && d.rb != 2 && d.rb != 4)
@@ -220,7 +221,7 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         const json& st = need(b, "state", tw);
         t.state_kind = get<std::string>(st, "kind", tw);
         if (t.state_kind == "linear") t.state_bytes = get<uint64_t>(st, "bytes", tw);
-        else if (t.state_kind == "kv") t.state_row = get<uint64_t>(st, "row", tw);
+        else if (t.state_kind == "kv" || t.state_kind == "kv_shared") t.state_row = get<uint64_t>(st, "row", tw);
         else fail(tw, "unknown state kind " + t.state_kind);
         t.program = parse_program(need(v, "program", tw), tw);
         for (const auto& s : t.program) check_step(m, s, tw, "program");
@@ -578,14 +579,20 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
             rg.inv_freq = v.value("inv_freq", m.rope_inv_freq);
             rg.scale = v.value("scale", 1.0);
             rg.window = v.value("window", 0ull);
-            if (rg.inv_freq.size() != m.rotary_dim / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            rg.cs_off = v.value("cs_off", 512ull);
+            // a table may rotate its own width (Gemma 4's global layers: 128 of 512 against 256 of 256)
+            const uint64_t rot = v.value("rotary_dim", static_cast<uint64_t>(m.rotary_dim));
+            if (rg.inv_freq.size() != rot / 2) fail(where, "global " + k + ": inv_freq has " + std::to_string(rg.inv_freq.size()) + " values");
+            if (rg.inv_freq.empty() || rg.cs_off + 8 * rg.inv_freq.size() > rg.per_row)
+                fail(where, "global " + k + ": " + std::to_string(rg.inv_freq.size()) + " rotary pairs at offset " +
+                                std::to_string(rg.cs_off) + " do not fit a " + std::to_string(rg.per_row) + "-byte record");
             const bool has_long = v.contains("long_inv_freq"), has_switch = v.contains("switch_row");
             if (has_long != has_switch)
                 fail(where, "global " + k + ": long_inv_freq and switch_row must be given together");
             if (has_long) {
                 rg.long_inv_freq = v["long_inv_freq"].get<std::vector<double>>();
                 rg.switch_row = v["switch_row"].get<uint64_t>();
-                if (rg.long_inv_freq.size() != m.rotary_dim / 2)
+                if (rg.long_inv_freq.size() != rot / 2)
                     fail(where, "global " + k + ": long_inv_freq has " + std::to_string(rg.long_inv_freq.size()) + " values");
             }
             m.per_row_globals[k] = rg;
@@ -618,6 +625,44 @@ Manifest Manifest::parse(const json& j, const std::string& where) {
         if (!j["hf_config_defaults"].is_object()) fail(where, "hf_config_defaults is not an object");
         m.hf_config_defaults = j["hf_config_defaults"];
     }
+    // ---- Gemma 4's host stages (recipes/gemma4.py host_stages); absent on every other family
+    if (j.contains("kv_source")) {
+        m.kv_source = j["kv_source"].get<std::vector<int>>();
+        if (m.kv_source.size() != m.layers.size())
+            fail(where, "kv_source has " + std::to_string(m.kv_source.size()) + " entries for " +
+                            std::to_string(m.layers.size()) + " layers");
+    }
+    for (size_t l = 0; l < m.layers.size(); ++l) {
+        const LayerType& t = m.layer_types.at(m.layers[l]);
+        const int s = l < m.kv_source.size() ? m.kv_source[l] : -1;
+        if ((t.state_kind == "kv_shared") != (s >= 0))
+            fail(where, "layer " + std::to_string(l) + ": a kv_shared state and a kv_source entry go together");
+        if (s < 0) continue;
+        if (static_cast<size_t>(s) >= l) fail(where, "layer " + std::to_string(l) + " shares the cache of a later layer");
+        const LayerType& src = m.layer_types.at(m.layers[static_cast<size_t>(s)]);
+        if (src.state_kind != "kv" || src.state_row != t.state_row)
+            fail(where, "layer " + std::to_string(l) + " shares layer " + std::to_string(s) + "'s cache, which is not a kv state of its row");
+    }
+    if (j.contains("ple")) {
+        const json& p = j["ple"];
+        const std::string pw = where + " ple";
+        m.ple.dim = get<size_t>(p, "dim", pw);
+        m.ple.embed = get<std::string>(p, "embed", pw);
+        m.ple.model_proj = get<std::string>(p, "model_proj", pw);
+        m.ple.model_norm = get<std::string>(p, "model_norm", pw);
+        m.ple.gate = get<std::string>(p, "gate", pw);
+        m.ple.proj = get<std::string>(p, "proj", pw);
+        m.ple.norm = get<std::string>(p, "norm", pw);
+        m.ple.act = get<std::string>(p, "act", pw);
+        m.ple.embed_scale = get<double>(p, "embed_scale", pw);
+        m.ple.model_proj_scale = get<double>(p, "model_proj_scale", pw);
+        m.ple.input_scale = get<double>(p, "input_scale", pw);
+        m.ple.eps = get<double>(p, "eps", pw);
+        if (m.ple.act != "gelu_tanh") fail(pw, "act " + m.ple.act + " (gelu_tanh only)");
+    }
+    m.ple.scalar = j.value("layer_scalar", "");
+    m.logit_softcap = j.value("logit_softcap", 0.0);
+    if (m.logit_softcap < 0.0 || !std::isfinite(m.logit_softcap)) fail(where, "logit_softcap must be finite and >= 0");
     if (j.contains("gguf")) m.gguf = std::make_unique<Manifest>(parse(j["gguf"], where + " gguf"));
     return m;
 }

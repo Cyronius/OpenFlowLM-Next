@@ -438,6 +438,22 @@ private:
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
+    // Gemma 4's per-layer inputs (manifest `ple`, OPEN-FAMILY-GEMMA4), all host-resident f32: the
+    // whole-model projection [L * dim, hidden] and its norm, then per layer the gate [dim, hidden],
+    // the projection [hidden, dim], the norm [hidden] and the output scalar.
+    struct PleWeights {
+        std::vector<float> model_proj, model_norm, scalar;
+        std::vector<std::vector<float>> gate, proj, norm;
+    };
+    PleWeights ple_w_;
+    std::vector<float> ple_in_;                ///< [L * dim]: this token's per-layer inputs
+    void ple_load();
+    /// This token's per-layer inputs from its id and its scaled embedding `emb` (hidden).
+    void ple_prepare(size_t token, const float* emb);
+    /// After layer l's dispatch: xres += rms(proj(gelu(gate(xres)) * ple_l)) * norm, then *= scalar.
+    void ple_layer(int l);
+    /// The manifest's logit_softcap on logits_host_ (cap * tanh(x / cap)); nothing when it is 0.
+    void softcap_logits();
     StepTiming timing_;
     /// Stage 2.5 Gate A: per-dxB-dispatch phase log (OFLM_OPEN_DXB_LOG=path.csv).
     /// Records layer,pos,patch/prep/submit/wait/read per token dispatch so the

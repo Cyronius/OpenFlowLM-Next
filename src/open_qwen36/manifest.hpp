@@ -171,6 +171,7 @@ struct LayerType {
     std::string name;
     uint64_t consts_bytes = 0, act_bytes = 0;
     std::string state_kind;                  ///< "linear" (a fixed-size state BO) | "kv" (max_ctx x state_row)
+                                             ///< | "kv_shared" (another layer's kv state: Manifest::kv_source)
     uint64_t state_bytes = 0, state_row = 0;
     std::vector<Step> program;
     GemmBlockProgram gemm_block;
@@ -187,6 +188,9 @@ struct KernelDesc {
     /// (attn.h ATTN_RB with ATTN_BLOCK_ONLY). The kernel derives its own block count from
     /// the position record, so the two must agree or the fifo deadlocks; 1 = unblocked.
     uint64_t rb = 1;
+    /// attnpos: this kernel's KV row when its layer kind's differs from layout.kv_row (Gemma 4's
+    /// 512-wide global heads); 0 = the layout's
+    uint64_t kv_row = 0;
 };
 
 /// A global sized max_ctx x row: the position record table(s).
@@ -202,6 +206,20 @@ struct RowGlobal {
     std::vector<double> long_inv_freq;
     static constexpr uint64_t kSwitchNever = ~uint64_t{0};
     uint64_t switch_row = kSwitchNever;
+    /// where [cos | sin] start in the record (attn.h ATTN_PTAB_CS_OFF); a table's own rotary
+    /// width is its inv_freq's, which may differ from layout.rotary_dim (Gemma 4's two kinds)
+    uint64_t cs_off = 512;
+};
+
+/// Gemma 4's per-layer inputs, all on the host (recipes/gemma4.py host_stages): before the layers
+/// ple = (rms(model_proj(e) * model_proj_scale) * model_norm + embed[id] * embed_scale) * input_scale,
+/// one `dim`-wide slice per layer; after layer l, h += rms(proj(act(gate(h)) * ple_l)) * norm, then
+/// h *= the layer's scalar.
+struct PleSpec {
+    size_t dim = 0;                            ///< 0 = no per-layer inputs
+    std::string embed, model_proj, model_norm, gate, proj, norm, scalar, act;
+    double embed_scale = 1.0, model_proj_scale = 1.0, input_scale = 1.0, eps = 1e-6;
+    bool present() const { return dim != 0; }
 };
 
 struct Manifest {
@@ -229,6 +247,11 @@ struct Manifest {
     double embed_scale = 1.0;                 ///< applied to token lookup only; never the tied lm_head
     std::vector<PackOp> lmhead_ops;          ///< pack.lm_head.ops into the lmpool global
     size_t norm_bytes = 0;
+    /// per layer: -1, or the earlier layer whose KV cache this one attends over (a `kv_shared`
+    /// state; Gemma 4's last layers). Empty = every layer owns its state.
+    std::vector<int> kv_source;
+    PleSpec ple;
+    double logit_softcap = 0.0;              ///< logits = cap * tanh(logits / cap); 0 = none
     nlohmann::json hf_config_check;
     /// What a key ABSENT from config.json means, for the keys of hf_config_check a config
     /// may omit (Phi-3's head_dim, partial_rotary_factor, rope_scaling, ...): check_model
@@ -237,7 +260,7 @@ struct Manifest {
     /// The same kernel set for GGUF-direct weight files (f32-scale pool chunks,
     /// open_kernels/gguf_pool.py): a complete manifest of its own, parsed with
     /// this same code; the engine swaps it in when the model ships a .gguf.
-    std::unique_ptr<Manifest> gguf;
+    std::shared_ptr<Manifest> gguf;          ///< shared, so a Manifest stays copyable (manifest_test copies one)
 
     static Manifest load(const std::string& path);
     static Manifest parse(const nlohmann::json& j, const std::string& where);

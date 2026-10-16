@@ -352,6 +352,32 @@ int main() {
         }
         std::printf("%s std_perm_gguf Q4_0 (%zu values differ)\n", bad0 ? "FAIL" : "ok", bad0);
         if (bad0) return 1;
+
+        // The bf16-scale pool (5120 B chunks, recipes/gemma4.py): the same codes byte for byte, and
+        // scales that are exactly the kernel's RNE narrowing of the f32 pool's -- so the GEMV reads the
+        // same numbers from either (open_kernels/gguf_scale_width.py). Q4_1 and Q4_0 both.
+        for (const auto* src : {&g, &g0}) {
+            std::vector<uint8_t> wide(static_cast<size_t>(op.nch) * 6144, 0), narrow(static_cast<size_t>(op.nch) * 5120, 0);
+            pools::apply(op, *src, 0, wide.data(), wide.size(), 6144);
+            pools::apply(op, *src, 0, narrow.data(), narrow.size(), 5120);
+            size_t badn = 0;
+            for (size_t c = 0; c < op.nch; ++c) {
+                const uint8_t* w = wide.data() + c * 6144;
+                const uint8_t* n = narrow.data() + c * 5120;
+                if (std::memcmp(w + 2048, n + 1024, 4096) != 0) ++badn;
+                for (size_t j = 0; j < 512; ++j) {                  // d[256] then m[256]
+                    uint32_t u;
+                    std::memcpy(&u, w + 4 * j, 4);
+                    const uint16_t want = static_cast<uint16_t>((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
+                    uint16_t got;
+                    std::memcpy(&got, n + 2 * j, 2);
+                    if (got != want) ++badn;
+                }
+            }
+            std::printf("%s std_perm_gguf bf16 pool (%s): %zu scale or code-plane mismatches against the f32 pool\n",
+                        badn ? "FAIL" : "ok", src == &g ? "Q4_1" : "Q4_0", badn);
+            if (badn) return 1;
+        }
     }
 
     // ---- pack_norm: f32 -> bf16 (RNE)

@@ -786,6 +786,44 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Gemma 4 E4B (OPEN-FAMILY-GEMMA4): KV-shared layers, two attention kinds of different widths,
+    // the per-layer inputs and the soft cap
+    if (argc >= 8) {
+        try {
+            Manifest g = Manifest::load(argv[7]);
+            check(g.family == "gemma4" && g.layers.size() == 42 && g.gguf && g.gguf->kv_source.size() == 42,
+                  "gemma4: 42 layers and a GGUF view");
+            const Manifest& v = *g.gguf;
+            check(v.kv_source[23] == -1 && v.kv_source[24] == 22 && v.kv_source[29] == 23 && v.kv_source[41] == 23,
+                  "gemma4: the shared layers read layer 22's (sliding) or 23's (global) cache");
+            check(v.layer_type(24).state_kind == "kv_shared" && v.layer_type(23).state_kind == "kv" &&
+                      v.layer_type(29).state_row == v.layer_type(23).state_row,
+                  "gemma4: a shared layer's state is its source's row");
+            check(v.kernels.at("dx").kv_row == 4096 && v.kernels.at("dx_local").kv_row == 2048 && v.kv_row == 2048,
+                  "gemma4: the global kind's kernels carry their own KV row");
+            const auto& pg = v.per_row_globals.at("ptab");
+            const auto& pl = v.per_row_globals.at("ptab_local");
+            check(pg.inv_freq.size() == 64 && pg.cs_off == 512 && pl.inv_freq.size() == 128 && pl.cs_off == 1024,
+                  "gemma4: each position table carries its own rotation width and cos / sin offset");
+            check(v.ple.present() && v.ple.dim == 256 && v.ple.gate == "blk.{l}.inp_gate.weight" &&
+                      v.ple.scalar == "blk.{l}.layer_output_scale.weight" && v.logit_softcap == 30.0,
+                  "gemma4: the per-layer inputs and the soft cap");
+            refused_manifest(argv[7], "kv_shared state and a kv_source", "gemma4: a shared layer without a source is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = -1; });
+            refused_manifest(argv[7], "later layer", "gemma4: a source after the layer is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = 30; });
+            refused_manifest(argv[7], "not a kv state of its row", "gemma4: a source of the other kind is refused",
+                             [](json& j) { j["gguf"]["kv_source"][24] = 23; });
+            json cfg = matching_config(v);
+            v.check_model(cfg, "gemma4");
+            check(true, "gemma4: a matching config is accepted");
+            json gh = cfg; gh["global_head_dim"] = 256;
+            refused(v, gh, "global_head_dim", "gemma4: a different global head width is refused by name");
+        } catch (const std::exception& e) {
+            check(false, std::string("gemma4 fixture: ") + e.what());
+        }
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

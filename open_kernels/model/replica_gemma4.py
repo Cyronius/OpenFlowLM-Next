@@ -224,11 +224,32 @@ def forward(g: Gguf, ids, n_layers=None, G: Geo | None = None, want_logits=True,
     return res, head(g, G, h[-1])
 
 
-def head(g: Gguf, G: Geo, h):
-    """The final norm, the tied head and the soft cap on one residual row."""
+def requant_q4_1(w):
+    """The engine's re-quantization of a non-4-bit head (pools.cpp std_perm_gguf into a 5120-byte pool):
+    per 32-value block, m = min rounded toward -inf in bf16, d = (max - m) / 15 rounded toward +inf,
+    code = int((v - m) / d + 0.5) clipped to [0, 15] -- all in f32 -- read back as m + code * d."""
+    v = np.asarray(w, np.float32).reshape(-1, 32)
+
+    def bf16(x, up):
+        u = x.astype(np.float32).view(np.uint32).astype(np.uint64)
+        neg = (u >> 31) == 1
+        trunc = (u >> 16) << 16
+        bump = ((u + 0xFFFF) >> 16) << 16
+        return np.where(neg != up, bump, trunc).astype(np.uint32).view(np.float32)
+    m = bf16(v.min(1), up=False)                      # toward -inf
+    d = bf16(((v.max(1) - m) / np.float32(15.0)).astype(np.float32), up=True)   # toward +inf
+    inv = np.where(d > 0, np.float32(1.0) / np.where(d > 0, d, 1), 0).astype(np.float32)
+    q = np.clip(((v - m[:, None]) * inv[:, None] + np.float32(0.5)).astype(np.int32), 0, 15)
+    return (m[:, None] + q.astype(np.float32) * d[:, None]).reshape(np.shape(w)).astype(np.float64)
+
+
+def head(g: Gguf, G: Geo, h, as_npu=False):
+    """The final norm, the tied head and the soft cap on one residual row. `as_npu` reads the head
+    through the engine's q4_1 re-quantization (a Q6_K head is not 4-bit), which is what the NPU streams."""
     hn = rms(h, g.get("output_norm.weight").reshape(-1), G.eps)
     vocab = g.t["token_embd.weight"].data.shape[0]
-    logits = np.concatenate([g.get("token_embd.weight", rows=range(a, min(a + 16384, vocab))) @ hn
+    rq = requant_q4_1 if as_npu else (lambda w: w)
+    logits = np.concatenate([rq(g.get("token_embd.weight", rows=range(a, min(a + 16384, vocab)))) @ hn
                              for a in range(0, vocab, 16384)])    # in slabs: the head is 5 GB as one fp64 matrix
     if G.softcap:
         logits = G.softcap * np.tanh(logits / G.softcap)
