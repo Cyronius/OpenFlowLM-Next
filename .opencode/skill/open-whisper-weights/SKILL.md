@@ -78,7 +78,10 @@ a GGUF installed as `whisper-gguf` finds it by the last rule. The load line name
 - `--compare`: stock checkpoint and F16 GGUF vs the checkpoint's container, Q8_0 GGUF vs
   the converter's Q8_0 container, and Q4_K_M / Q5_K_M vs the converter run on the gguf
   package's dequant of the same file: 481/481 tensors, 808,924,160 values identical each.
-- Hardware smoke: see specs/open-whisper/spec.md (OPEN-WHISPER-GGUF, -STOCK).
+- Hardware smoke (30 s clip, `oflm serve --asr 1` on port 52631): the Q8_0 GGUF and the stock
+  checkpoint transcribe exactly as the containers built from the same weights, served by the
+  same build; `oflm-test --audio --model whisper-v3:turbo-q8_0` 3/3. Details in
+  specs/open-whisper/spec.md (OPEN-WHISPER-GGUF, -STOCK).
 
 ## Traps
 
@@ -90,3 +93,6 @@ a GGUF installed as `whisper-gguf` finds it by the last rule. The load line name
   kernels). It now counts every dim past the first.
 - When rebuilding `weight_source_test` after a mutation check, rebuild before `--compare`:
   a stale binary reports real differences that are not there.
+- Compare a transcript against a container served by the same build, not against an old
+  transcript: builds since late September default to NPU FlashAttention (`OW_ATTN`), which
+  moves two marginal words on the 30 s audiobook clip for the container itself.

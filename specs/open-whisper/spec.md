@@ -134,6 +134,13 @@ Swapping q and v in the fused operand, or moving the cross-attention bias, fails
 <model.safetensors>` on openai/whisper-large-v3-turbo against the container built from it:
 481 of 481 tensors, 808,924,160 values, identical.
 
+**Verification (manual), hardware.** Procedure: install with `oflm-add` into a user registry,
+put the exported kernel set under any xclbins root, run `OFLM_WHISPER_ENGINE=open oflm serve
+--asr 1 --asrmodel <tag>`, post a 30 s clip to `/v1/audio/transcriptions`, then serve the
+container built from the same weights the same way. Pass: the two texts are identical.
+2026-10-16: `whisper-v3:turbo-safetensors` matched the checkpoint's container with NPU
+attention and with `OW_ATTN=host`. One clip.
+
 ### OPEN-WHISPER-GGUF: the engine reads a GGUF of the model
 **Applies to:** `src/open_whisper/weight_source.cpp`, `src/open_qwen36/gguf_file.cpp`
 **Verification:** test
@@ -168,6 +175,15 @@ converter built from the same Q8_0 file, 481 of 481 identical; the Q4_K_M and Q5
 (Q4_K or Q5_K, Q6_K and Q8_0 tensors) against the converter run on the gguf package's
 dequant of the same file, 481 of 481 identical each. The all-Q6_K file was not run; its
 type is covered by the token embedding in both K files.
+
+**Verification (manual), hardware,** the OPEN-WHISPER-STOCK procedure. 2026-10-16: the Q8_0
+GGUF installed as `whisper-v3:turbo-q8_0` (directory `whisper-gguf`, kernels found by
+geometry under `xclbins/Whisper-V3-Turbo-NPU2`) transcribed the clip exactly as the Q8_0
+container did with the same build. With `OW_ATTN=host` it also reproduced, word for word, the
+transcript a September build made from that container; with today's default NPU attention,
+the GGUF and the container alike differ from that older transcript in two words.
+`oflm-test --audio --model whisper-v3:turbo-q8_0`: transcription 3 of 3 PASS. One clip; F16,
+Q4_K_M and Q5_K_M were checked at the weight level only.
 
 ### OPEN-WHISPER-INSTALL: oflm-add installs a GGUF or OpenAI's checkpoint
 **Applies to:** `utilities/oflm-add`
