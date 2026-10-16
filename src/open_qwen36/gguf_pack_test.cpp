@@ -357,8 +357,7 @@ int main() {
         if (bad0) return 1;
     }
 
-    // ---- a tied head (no output.weight, so token_embd) whose 40 rows are not whole 64-row
-    // bands: the plan's padded rows come back zero, the real ones on the requantized grid
+    // ---- a tied head (token_embd, 40 rows) packed into a whole 64-row band
     {
         const Blocks emb40 = make_blocks(40, 256, "Q8_0", rng);
         GgufFile gt(write_gguf(dir, mm, emb40, norm, "-tied"));

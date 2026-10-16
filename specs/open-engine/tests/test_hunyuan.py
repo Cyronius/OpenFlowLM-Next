@@ -180,9 +180,7 @@ GGUF_HY_MT2_1_8B = {
 
 
 def test_1_8b_gguf_agrees_with_config_json_up_to_f32():
-    """Every shape field agrees. The GGUF stores the folded base and eps as f32, so those two
-    differ in the last bits and the spec hash with them: kernels link by the config.json
-    derivation, which is the one oflm-add computes at install."""
+    """The GGUF's f32 base and eps move the spec hash, so kernels link by the config.json derivation."""
     a = ModelSpec.from_hf_config(HF_HY_MT2_1_8B, real_vocab=120818).to_dict()
     b = ModelSpec.from_gguf_metadata(GGUF_HY_MT2_1_8B).to_dict()
     for d in (a, b):
@@ -195,8 +193,7 @@ def test_1_8b_gguf_agrees_with_config_json_up_to_f32():
 
 
 def test_1_8b_geometry_and_padded_head():
-    """16 heads over 4 kv: one 1024-byte attention element per kv row half, the record one
-    element wide, four attention cores of four heads; the tied head rounds 120818 up to 1888 bands."""
+    """16 heads over 4 kv in 1024-byte elements; the tied head rounds 120818 rows up to 1888 bands."""
     spec = ModelSpec.from_hf_config(HF_HY_MT2_1_8B, real_vocab=120818)
     R = DR.recipe(spec)
     L, G = R.layout, R.geo

@@ -3,6 +3,32 @@
 `cmp_logits.py` scores how far one run's per-position logits are from another's (worst / median
 correlation, argmax flips and how many were near-ties, top-5 agreement, KL divergence).
 
+`flores_chrf.py` scores a served translation model on FLORES-200 devtest with chrF, through any
+OpenAI-compatible endpoint (`oflm serve`, `llama-server`), greedy, with the Hy-MT2 model card's
+"Default Translation" prompt. `score` compares two runs on the sentences both finished, with a
+paired bootstrap interval on the chrF difference.
+
+## Result 2026-10-16: Hy-MT2-1.8B at q4_1 on the NPU
+
+`tencent/Hy-MT2-1.8B-GGUF`'s Q8_0 file, requantized to q4_1 at load by the open engine
+(`oflm serve`), against llama.cpp (build 10754, Vulkan, Radeon 890M) running the same Q8_0 file.
+The first 100 devtest sentences; the German run stopped at 67 when its 15-minute budget ran out.
+
+| pair | open engine, q4_1 | llama.cpp, Q8_0 | difference, 95% bootstrap | identical outputs |
+|---|---|---|---|---|
+| en -> zh (Chinese prompt) | 38.63 | 39.52 | -0.89 [-2.09, +0.37] | 17 / 100 |
+| en -> de | 58.47 | 59.35 | -0.88 [-2.34, +0.67] | 6 / 67 |
+
+The 4-bit engine scores about 0.9 chrF below the 8-bit reference on both pairs. At this sample
+size that is within noise (both intervals include zero), and the loss is under about 2.3 chrF.
+Not covered: other pairs, the reverse direction, the Q4_K_M and Q6_K files (oflm-add picks
+Q4_K_M from this repo by default), COMET or any human judgment.
+
+    python flores_chrf.py gen --url http://127.0.0.1:52633 --model hy-mt2-flash:1.8b \
+        --flores <flores200_dataset/devtest> --n 100 --out open.jsonl
+    python flores_chrf.py gen --url http://127.0.0.1:52634 --model q8 --flores <...> --n 100 --out ref.jsonl
+    python flores_chrf.py score --flores <...> --a open.jsonl --b ref.jsonl
+
 ## Result 2026-10-06: the 35B's q8 container re-quantized to q4_1
 
 `Atomic-Germ/Qwen3.6-35B-A3B-NPU2` (the same 23.24 GB file as `FastFlowLM/Qwen3.6-35B-A3B-NPU2`)

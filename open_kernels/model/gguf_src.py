@@ -1,16 +1,4 @@
-"""A GGUF weight file read the way the open engine reads it, for make_decode.py and the
-fp64 replica: the counterpart of q4nx.py for a model installed as `model.gguf`.
-
-The engine (src/open_qwen36/gguf_file.cpp + pools.cpp `std_perm_gguf`) packs each
-matmul tensor into 6144-byte f32-scale q4 chunks: Q4_0 / Q4_1 blocks exactly, Q8_0
-re-quantised per 32-value block to q4_1 (fp16 d and m from the block's min and max,
-codes rounded half away from zero). `std_perm_gguf` below reproduces those bytes, and
-`matmul_w` reads the same values back with the scales narrowed to bf16, which is what
-the kernel multiplies by -- so a slice comparison measures the kernels, not the packing.
-
-Names are the manifest's HF-style ones; the map is GgufFile::gguf_name's. A tied model
-has no `output.weight`, and its head is `token_embd.weight`, as in the engine.
-"""
+"""model.gguf read as the open engine reads it (pools.cpp std_perm_gguf), for make_decode.py and the replica (2026-10-16)."""
 from __future__ import annotations
 
 import sys

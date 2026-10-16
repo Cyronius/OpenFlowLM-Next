@@ -155,7 +155,7 @@ model. A call site that does not pass `qk_norm_post_rope` is read as `False`.
 - The 27B spec passes every check.
 - `head_dim=64` on the 27B → `attn: ('head_dim', ..., 'qk_norm_post_rope') = (64, 16, 2, 64, True, True, False) is outside the validated combinations {...}` — head dim 64 is validated at Llama 3.2 1B's and Granite 4.2 3B's geometries only, so it is the COMBINATION that is refused here, not the value; `hidden=5120` → `ln: width=5120 is outside the validated set {1024, 2048, 2560, 3072, 4096}`; `gemv_q4 K=5120` → names `{1024, 2048, 2560, 3072, 3584, 4096, 6144, 8192, 9216, 9728, 10240, 12288, 14336}`; `quant='q4_k'` → refused.
 - A combination of individually validated values that no procedure has run is refused: `(128, 16, 4, 128, True, False, False)` names itself, not one parameter, even though 128, 16 and 4 are each in a validated tuple.
-- Points enter only after a compare. 128 / 2560 / 9728 entered with OPEN-FAMILY-QWEN3 on 2026-09-05; the post-RoPE tuple `(128, 32, 8, 128, True, False, True)` with OPEN-FAMILY-HUNYUAN on 2026-09-06; and on 2026-09-06 OPEN-FAMILY-QWEN3 added `gemv_q4` K 1024 / 3072 / 6144 / 12288, `ln` width 1024, `lm_head_q4` K 1024 / 2048 and the tuple `(128, 16, 8, 128, True, False, False)`, while OPEN-FAMILY-LLAMA3 added `gemv_q4` K 8192, `ln` width 3072, `lm_head_q4` K 3072 and the tuples `(128, 24, 8, 128, False, False, False)` and `(64, 32, 8, 64, False, False, False)`. On 2026-09-06 OPEN-FAMILY-QWEN35's 4B pass added `gemv_q4` K 9216, `lm_head_q8` K 2560 and the tuple `(256, 16, 4, 64, True, True, False)`; `deltanet heads=16` (Qwen3.5 2B / 0.8B) and `lm_head_q8 K=4096` (the 9B) stayed out because those runs did not pass. On 2026-09-07 OPEN-QUANT-Q8's pass added `gemv_q8` K 2048 and 4096 (Ornith-1.0-35B-A3B and five sibling containers); the Qwen3.5 4B's q8 variant added nothing, its `lx` build having overflowed program memory. OPEN-FAMILY-GRANITE added the tuple `(64, 40, 8, 64, False, False, False)` and `gemv_q4` K 8192 on 2026-09-06 -- the first entry at 40 heads. On 2026-09-07 OPEN-FAMILY-QWEN35's remaining three sizes passed and added `deltanet heads=16`, the tuple `(256, 8, 2, 64, True, True, False)` (the 2B / 0.8B), `lm_head_q8` K 1024 and 4096, and `gemv_q4` K 3584 -- the two points that had been held out since 2026-09-06 among them.
+- Points enter only after a compare. 128 / 2560 / 9728 entered with OPEN-FAMILY-QWEN3 on 2026-09-05; the post-RoPE tuple `(128, 32, 8, 128, True, False, True)` with OPEN-FAMILY-HUNYUAN on 2026-09-06 (and its 16-over-4 sibling `(128, 16, 4, 128, True, False, True, False)` with the same requirement's 1.8B slice on 2026-10-16); and on 2026-09-06 OPEN-FAMILY-QWEN3 added `gemv_q4` K 1024 / 3072 / 6144 / 12288, `ln` width 1024, `lm_head_q4` K 1024 / 2048 and the tuple `(128, 16, 8, 128, True, False, False)`, while OPEN-FAMILY-LLAMA3 added `gemv_q4` K 8192, `ln` width 3072, `lm_head_q4` K 3072 and the tuples `(128, 24, 8, 128, False, False, False)` and `(64, 32, 8, 64, False, False, False)`. On 2026-09-06 OPEN-FAMILY-QWEN35's 4B pass added `gemv_q4` K 9216, `lm_head_q8` K 2560 and the tuple `(256, 16, 4, 64, True, True, False)`; `deltanet heads=16` (Qwen3.5 2B / 0.8B) and `lm_head_q8 K=4096` (the 9B) stayed out because those runs did not pass. On 2026-09-07 OPEN-QUANT-Q8's pass added `gemv_q8` K 2048 and 4096 (Ornith-1.0-35B-A3B and five sibling containers); the Qwen3.5 4B's q8 variant added nothing, its `lx` build having overflowed program memory. OPEN-FAMILY-GRANITE added the tuple `(64, 40, 8, 64, False, False, False)` and `gemv_q4` K 8192 on 2026-09-06 -- the first entry at 40 heads. On 2026-09-07 OPEN-FAMILY-QWEN35's remaining three sizes passed and added `deltanet heads=16`, the tuple `(256, 8, 2, 64, True, True, False)` (the 2B / 0.8B), `lm_head_q8` K 1024 and 4096, and `gemv_q4` K 3584 -- the two points that had been held out since 2026-09-06 among them.
 - Nine buffer arguments → `9 buffer arguments`.
 - The `gemv_q8` template's validated `K` set holds 2048 and 4096, entered by OPEN-QUANT-Q8's hardware pass on 2026-09-07 (Ornith-1.0-35B-A3B); `gemv_q8 K=3072` names that set. Before that pass the set was empty and every q8 export needed `OPEN_KERNELS_UNVALIDATED=1`. The Qwen3.5 family's native-q8 pass on 2026-09-07 added nothing to it: its q8 `linear_out` GEMV reduces over `lin_value_width` (4096 on the 9B / 4B, 2048 on the 2B / 0.8B), not over `hidden`, so all four sizes compose at q8 with no override.
 - `catalogue.MIXED_CORE_FITS` is the same idea one level up: not a template parameter but a PROGRAM MEMORY point, the `(family, hidden)` widths whose main core has been built carrying both weight formats' GEMV bodies. It holds `(qwen35, 4096)`, `(qwen35, 2048)` and `(qwen35, 1024)` from OPEN-QUANT-Q8's 2026-09-07 pass. Unlike a template point this one does not refuse: at an unlisted width `recipes.load` warns in one short line that q8 is NOT IMPLEMENTED YET there and narrows the container's q8 role away, because the alternative is an export that composes cleanly and then dies 60 s into `aiecc`. The line names the width, the reason (program memory) and the format it fell back to; what the fallback costs (0.999682) is recorded here rather than spent on a warning. The warning is worded as a gap in what has been built rather than a permanent limit -- the width wants a mixed core small enough to fit and nobody has built one yet (the maintainer's call on PR #26).
@@ -1075,8 +1075,8 @@ engine -- the open one has no vision path.
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)
-**Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B layout are unit-tested in `tests/test_hunyuan.py`
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`, `src/open_qwen36/pools.cpp`, `src/common/AutoModel/modeling_hunyuan.cpp`, `utilities/oflm-add`)
+**Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`, or the official `tencent/Hy-MT2-1.8B-GGUF`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B and 1.8B layouts are unit-tested in `tests/test_hunyuan.py`, the 1.8B's padded tied head in `src/open_qwen36/gguf_pack_test.cpp` (GGUF-PACK), and the installer's HunYuan names in `utilities/oflm-add/tests/test_gguf_installer.py`
 
 A HunYuan V1 dense model (Hy-MT2-7B and the Hunyuan-{1.8,4,7}B dense line:
 Llama 3.1 8B's GQA shape, eps 1e-5, silu FFN, a tied head) shall run on the
@@ -1096,10 +1096,22 @@ things are new, and neither is a ModelSpec field:
 The NTK-alpha RoPE scaling is folded into one static base by the spec builder
 (OPEN-SPEC-DERIVE), so the position tables need nothing new.
 
+**Hy-MT2-1.8B** (hidden 2048, ff 6144, 16 heads over 4 kv) runs straight from the
+official GGUF, installed as `model.gguf` (GGUF-direct; its Q8_0 file is requantized
+to q4_1 at load, nothing is converted offline). The GGUF ties the head: it has no
+`output.weight`, so the head is `token_embd.weight`, whose 120818 rows `std_perm_gguf`
+packs into the 120832-row (1888-band) pool with the remaining rows zero. A plan
+narrower than the file, or 64 or more rows wider, is refused. `oflm serve` routes
+`details.family: hunyuan` to the `HunYuan` adapter, which runs on the open kernels
+only (this tree has no closed HunYuan engine).
+
 **Acceptance criteria (unit):**
 - HF and GGUF derivations agree; `rope_theta` is `1e4 * 1000^(128/126)` from either source; the layout equals Llama 3.1 8B's (`PER_CALL 1`, `TAB_BYTES 32256`, 8 KB norm elements) with `LMHEAD_BANDS 2003`.
 - `QKNORM_POST` is True for `hunyuan` and False for `qwen3` / `llama3`; `qk_norm_post_rope=True` is refused by the catalogue until this requirement's procedure has run.
 - The manifest carries `vocab 128192` / `real_vocab 128166` while `hf_config_check.vocab_size` is 128167; a config.json carrying the padded count is refused by name (`manifest_test`, fixture 4). The tokenizer defines ids 0..128165 (127957 vocab entries plus 209 added tokens, no gaps), so 128166 is its id count; config.json's 128167 is the embedding table's row count, one row no token maps to, inherited from the base model.
+- 1.8B: the GGUF derivation agrees with `config.json`'s on every shape field; the file stores the folded RoPE base (11158840.0) and eps as f32, so those two differ in the last bits and the kernel set links by the `config.json` derivation, which is what oflm-add hashes. Geometry: `E_A 1024`, `PTAB_ROW 1024` (one element), four attention cores of four heads at `RB 4`, `LMHEAD_BANDS 1888`, and the nested `gguf` manifest packs the head with `std_perm_gguf`.
+- GGUF-PACK: a tied 40-row Q8_0 head packed into a 64-row plan comes back on the requantized q4_1 grid with rows 40..63 exactly zero, and a 32-row plan is refused.
+- oflm-add: `Hy-MT2-1.8B-GGUF` derives family `hunyuan` and tag `hy-mt2:1.8b`; GGUF arch `hunyuan-dense` and `model_type` `hunyuan_v1_dense` resolve to `hunyuan`; a `generation_config.json` `eos_token_id` that is a single int is written to `tokenizer_config.json` as a one-element list (the engine exits at load without the list).
 
 **Procedure (manual):**
 1. Convert: `q4nx-build -i tencent/Hy-MT2-7B-GGUF` (the Q8_0 file requantizes to q4_1 with the least loss), then copy the HF repo's `config.json` beside the resulting `model.q4nx` / `tokenizer.json`.
@@ -1115,6 +1127,25 @@ the head's padded rows 128167..128191 came back exactly zero. All 32 layers,
 a French translation instruction: a correct sentence ending in `<|eos|>` at
 token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
+
+**Procedure (manual), Hy-MT2-1.8B from its GGUF:**
+1. Export `recipes/specs/hy-mt2-1.8b.json` (the base repo's `config.json` derivation) with `export_qwen36_kernels.py`; `--only dx_f32,lm_head_q4_f32,ln` is the GGUF-direct part.
+2. Install: `oflm-add` on a directory holding `Hy-MT2-1.8B-Q8_0.gguf`, the GGUF repo's `README.md` (its `base_model` names `tencent/Hy-MT2-1.8B`) and the base repo's `config.json` / tokenizer files / `chat_template.jinja`, with `--open-kernels <set>` until an official registry entry ships the set; `--tag hy-mt2-flash:1.8b` maps FLM's tag onto the same install.
+3. Slice: `model/make_decode.py --model-dir <installed dir> --layers 8 --tokens 8 --token 120000` (it reads `model.gguf` through `model/gguf_src.py`, the engine's pack law), the harness on `run_decode.cfg`, then `compare_decode.py --tokens 8`.
+4. Serve: `oflm serve hy-mt2-flash:1.8b` and `oflm-test --llm --model hy-mt2-flash:1.8b --gen-lim 256`.
+5. Quality: `utilities/quant-compare/flores_chrf.py gen` against `oflm serve` and against `llama-server` on the same Q8_0 file, then `score` (chrF against the FLORES-200 devtest references, and how often the two engines agree).
+
+**Result 2026-10-16 (Hy-MT2-1.8B, `Hy-MT2-1.8B-Q8_0.gguf` requantized to q4_1 at load, Strix,
+Windows + XRT):** the 8-layer slice over 8 positions from id 120000 passed -- logits corr
+>= 0.99995, the same argmax and top-5 at every position, every layer's residual corr >= 0.99996
+(maxrel <= 1.3e-2), and the head's padded rows 120818..120831 exactly zero. The full export
+(every set, the catalogue point included) builds; `dx`, `dx_f32` and `dx_attn` each leave 16
+bytes of program memory. Through `oflm serve` all 32 layers load from the GGUF in 26 s, a German
+translation instruction comes back token for token the same as llama.cpp's on the same Q8_0 file,
+and `oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES-200 devtest, greedy, chrF against
+llama.cpp on the Q8_0 file: en->zh 38.63 vs 39.52 (100 sentences), en->de 58.47 vs 59.35 (67,
+the 15-minute budget): about 0.9 below on both, and both paired-bootstrap 95% intervals
+include zero (`utilities/quant-compare/README.md`). Speed was not measured.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)

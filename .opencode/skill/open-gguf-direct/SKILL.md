@@ -270,3 +270,7 @@ as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 - End-to-end `flm serve` with a real GGUF (needs a dense-family GGUF matching
   a shipped spec's vocab exactly; none in the HF cache qualifies today —
   Peach is llama-arch with vocab 64000 vs the llama31-8b spec's 128256).
+  Done since for `tencent/Hy-MT2-1.8B-GGUF` (2026-10-16, see
+  `open-hunyuan-kernels/SKILL.md`): its tied head is `token_embd` with an
+  unpadded vocabulary, and `std_perm_gguf` now leaves the plan's extra rows
+  zero instead of asking `embed_row` for rows the tensor does not have.
