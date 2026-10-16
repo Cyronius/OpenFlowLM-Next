@@ -1944,6 +1944,44 @@ because they share a dequantiser; and the apparent bf16 KV-cache sensitivity in 
 run was an artefact of the misread weights and is not real. `qwen2` reaches the fast
 attention path the way every family does, by measurement, and has not been measured yet.
 
+### OPEN-ATTN-ONE-KV-HEAD: attention with a single kv head
+**Applies to:** openflowlm-next (`open_kernels/designs/attn/attn.h`, `attn_step.cc`, `attn_stepb.cc`,
+`designs/dense/dx.py`, `recipes/dense.py`)
+**Verification:** test (`tests/test_attn_one_kv_head.py`) for the element accounting; manual (below)
+for the unchanged families and for the kernel itself
+
+The attention core's fifo element is half a KV cache row, `KVH * HD` bf16, and a q, k or v
+element carries `KVH / 2` fp32 heads. With one kv head (Gemma 3 1B, every Gemma 4 layer)
+that is half a head, which no kernel can normalise or rotate. So at `ATTN_KVH 1` the element
+shall be the whole cache row, `[K_t | V_t]` = `HD * 4` bytes: one head per q, k or v element,
+one element per cached row, and `[qn | kn]` exactly one element. The position record grows to
+two elements, and cos / sin run from the first into the second; `attn_meta` reads them 32
+floats at a time from whichever element holds them. An odd kv count above one is still
+refused, and so is the block-prefill route (`dx_attn.py` walks two elements per row).
+
+Every family with an even kv count shall compile exactly what it compiled before: the new
+code sits behind `#if ATTN_KVH == 1` and the design's row walk is the old one at two elements.
+
+**Acceptance criteria (unit):**
+- A one-kv-head spec at head dim 256 gives `E_A = KV_ROW = 1024`, `PTAB_ROW = 2048`,
+  `(PTAB_ELEMS, PTAB_CS_ELEM) == (2, 1)` and one head per q / k / v element; every fill is a
+  whole number of elements and matches what the core acquires.
+- cos / sin cross the record's element boundary only between 32-float vectors.
+- Every shipped dense family keeps `E_A = KVW * 2`, `KV_ROW = 2 * E_A`, `PTAB_ROW =
+  max(1024, E_A)` and its old `PTAB_CS_ELEM`.
+
+**Verification (manual), for the families that must not move:** generate the MLIR of every
+kernel set every `recipes/specs/*.json` builds from a `git archive` of the base commit and
+from the working tree (`utilities/mlir_equiv.py`) and diff them; preprocess every attention
+translation unit at every spec's own flags from both trees (`ALL_SPECS=1 OLD_DIR=<archive>
+utilities/attn_pp_identical.sh`). Identical MLIR plus identical preprocessed kernels is an
+identical xclbin.
+
+**Result 2026-10-16:** 73 kernel sets over the 15 shipped specs give identical MLIR, and every
+attention translation unit preprocesses identically at every shipped spec's flags (the logs
+are kept with the Gemma 3 1B bring-up). The one-kv-head kernels compile with Peano at Gemma 3
+1B's flags; on hardware they are OPEN-FAMILY-GEMMA3's 1B result.
+
 ### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
 **Test category:** unit (`tests/test_gptoss.py`)
