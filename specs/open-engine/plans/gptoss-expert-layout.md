@@ -185,7 +185,10 @@ is from the one OpenAI shipped, and that is the question the format rule asks.
 ±4, ±6 times the block scale) and q4_1's are, so no q4_1 block can hold an MXFP4 block exactly: 0.1%
 to 0.6% of blocks survive, and the weight error is 9 to 10.5% RMS on every expert matrix sampled
 (`weight_err.log`, 27 matrices). For comparison, quantizing Gaussian weights to q4_1 once costs
-about 8% (an estimate: a quarter of a step's width over the spread of 32 samples).
+about 8% (an estimate: a quarter of a step's width over the spread of 32 samples). A smarter
+re-quantization that searches each block's clip range instead of taking its min and max gets the
+error down to about 7.5% on three matrices (`best_q4_1.log`); its KL was not measured, and it would
+still be a second rounding of the shipped model.
 
 **What native costs instead** is the decode inside the kernel. q4_1's nibbles feed the matrix unit
 directly; MXFP4 codes have to become their integer values first (`2 x e2m1` fits int8, and
@@ -219,9 +222,12 @@ room to spare. Two ways back, which step 3 measures before anything else:
 - **More cores, which is the realistic route.** In the MoE half of the layer, rows 4 and 5 of the
   array are idle: 16 more cores. Splitting each column's weight stream three ways through its memory
   tile gives each core a third of the decode, and the first cut then fits even at 1 GHz (289 against
-  a budget of about 360). It is new design work with its own risk: 24 cores' results are more
-  streams than the 16 shim input channels, so they have to be joined in the memory tiles, and
-  nothing in this tree uses a memory-tile split or join yet.
+  a budget of about 360). The host accounting already holds there: `layout(n_cores=24)` deals the 45
+  bands 2 or 1 per core, a core's data memory falls to 43,984 bytes, and `check()` balances
+  (`layout_16_24_cores.log`). It is new design work with its own risk: 24 cores need more weight
+  streams and result streams than the shim has channels (16 each way, one of them the x broadcast),
+  so each column's stream has to be split three ways in its memory tile and the results joined
+  there, and nothing in this tree uses a memory-tile split or join yet.
 
 The closed engine's container is MXFP4 too, and at the decode rate FastFlowLM publishes for this
 model (`docs/docs/benchmarks/gpt-oss_results.md`) it reads about 28 GB/s of expert data, so a decode
@@ -314,6 +320,9 @@ turn out to keep pace after all), not counting 10.
 - **No NPU at all**, by brief. Nothing here says how fast anything runs on the NPU.
 - **No IRON design was built.** The stub trace and the arithmetic stand in for it. A dataflow
   timing simulation (the threaded mock in the `aie-dataflow-presim` skill) was not written.
+- **The kernel numbers are the compiler's schedule, not the NPU's.** Neither tile's loop was
+  software-pipelined, and the core clock was not established here, so the 289 against 59 is a ratio
+  to trust and the cycle budgets at 1, 1.5 and 1.8 GHz are bounds to check on the NPU.
 - **The KL measurement was trimmed** to 20 windows of 512 tokens per text, two texts, one reference
   route, about 6 minutes of iGPU time in all. It does not cover chat-formatted text or task accuracy,
   and the absolute perplexities mean little for this model (above).
@@ -334,4 +343,4 @@ turn out to keep pace after all), not counting 10.
 3. **The attention projections: Q8_0 re-quantized to q4_1 as the weights rule says, or native q8.**
    Unmeasured for this model; the 35B's number suggests it is not free.
 4. **Whether to start the build now or after Gemma 4.** The plan put gpt-oss last of the five, and
-   the work above is about four weeks.
+   the work above is about five weeks.
