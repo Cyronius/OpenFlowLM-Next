@@ -1,7 +1,9 @@
 //===- weights.hpp -------------------------------------------*- C++ -*-===//
 //
-// open_whisper -- load Whisper-V3-Turbo-OpenNPU2's model.open.safetensors and
-// pre-tile every GEMM operand for the NPU kernel set (phase 2b, issue #72).
+// open_whisper -- load the encoder's weights and pre-tile every GEMM operand
+// for the NPU kernel set (phase 2b, issue #72). The weights come from
+// model.open.safetensors, OpenAI's model.safetensors or a GGUF, all presented
+// as the container's tensors by weight_source.hpp.
 // SPDX-License-Identifier: MIT
 //
 // The container's B tensors are row-major [K, N] bf16 (utilities/q4nx-build/
@@ -58,9 +60,10 @@ struct Geometry {
 
 class Weights {
 public:
-  // Throws on: a weights_manifest.json whose "format" is not
-  // "oflm-open-whisper-v1", a config.json that does not match Geometry, or
-  // any tensor missing / of the wrong shape.
+  // Throws on: no weight file in model_dir, a container whose
+  // weights_manifest.json "format" is not "oflm-open-whisper-v1", a
+  // config.json that does not match Geometry, or any tensor missing / of the
+  // wrong shape.
   explicit Weights(const std::string &model_dir, int64_t tile_k, int64_t tile_n,
                    int64_t mac_s, int64_t mac_t);
 

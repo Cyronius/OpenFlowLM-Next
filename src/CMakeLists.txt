@@ -406,6 +406,7 @@ endif()
 if(NOT OFLM_USE_HRX)
     set(OPEN_WHISPER_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/weights.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/weight_source.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/kernels.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/guards.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/open_whisper/host_ops.cpp"

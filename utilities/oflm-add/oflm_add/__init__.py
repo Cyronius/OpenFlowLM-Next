@@ -248,6 +248,7 @@ GGUF_ARCH_FAMILIES = {
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
+    "whisper": "whisper-v3",
 }
 
 # HuggingFace config.json model_type -> runtime details.family, same role as
@@ -263,6 +264,7 @@ CONFIG_MODEL_FAMILIES = {
     "granite": "granite",
     "hunyuan": "hunyuan",
     "gpt_oss": "gpt-oss",
+    "whisper": "whisper-v3",
 }
 
 
@@ -927,10 +929,10 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     NPU-embedding path, which fetches a safetensors checkpoint, not model.q4nx)."""
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
-    if gguf_name:
-        want_list = GGUF_FILES + GGUF_OPTIONAL
+    if want is not None:
+        want_list = want
     else:
-        want_list = want if want is not None else ALL_FILES
+        want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else ALL_FILES
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
         for fname in want_list:
@@ -996,7 +998,10 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
 
 def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
     obtained = []
-    want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else (want if want is not None else ALL_FILES)
+    if want is not None:
+        want_list = want
+    else:
+        want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else ALL_FILES
     for fname in want_list:
         src = src_dir / (gguf_name if fname == "model.gguf" else fname)
         if src.is_file():
@@ -1827,6 +1832,288 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     return written
 
 
+# ---------------------------------------------------------------- Whisper (ASR)
+#
+# The open Whisper engine reads OpenAI's model.safetensors or a GGUF of it as they
+# ship (src/open_whisper/weight_source.cpp); nothing is converted. A GGUF carries
+# no config/tokenizer files, so they come from the checkpoint it was made from
+# (the GGUF's general.repo_url, else its README base_model) and are checked
+# against the GGUF's own metadata before anything is registered.
+
+WHISPER_FAMILY = "whisper-v3"
+WHISPER_SIDECARS = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"]
+# Every type the engine's GGUF reader widens to bf16 (gguf_file.cpp dequant_row).
+WHISPER_GGUF_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K"}
+# The engine holds bf16 whatever the file, so the quant only trades download size against rounding.
+WHISPER_GGUF_PREFERENCE = ["Q8_0", "F16", "Q6_K", "Q5_K_M", "Q4_K_M"]
+WHISPER_GGUF_RE = re.compile(r"[.\-_ ](BF16|F16|F32|I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
+WHISPER_KERNELS_FORMAT = "oflm-open-whisper-kernels-v1"
+# The one geometry the engine and its kernel set implement: config.json key -> GGUF keys.
+WHISPER_GEOMETRY = {
+    "encoder_layers": (32, ["stt.whisper.encoder.n_layers"]),
+    "decoder_layers": (4, ["stt.whisper.decoder.n_layers"]),
+    "d_model": (1280, ["stt.whisper.encoder.d_model", "stt.whisper.decoder.d_model"]),
+    "encoder_attention_heads": (20, ["stt.whisper.encoder.n_heads"]),
+    "decoder_attention_heads": (20, ["stt.whisper.decoder.n_heads"]),
+    "encoder_ffn_dim": (5120, ["stt.whisper.encoder.ffn_dim"]),
+    "decoder_ffn_dim": (5120, ["stt.whisper.decoder.ffn_dim"]),
+    "num_mel_bins": (128, ["stt.whisper.encoder.num_mel_bins"]),
+    "max_source_positions": (1500, ["stt.whisper.encoder.max_source_positions"]),
+    "max_target_positions": (448, ["stt.whisper.decoder.max_target_positions"]),
+    "vocab_size": (51866, ["stt.whisper.decoder.vocab_size"]),
+}
+
+
+def whisper_gguf_quant(name):
+    """'whisper-large-v3-turbo-Q4_K_M.gguf' -> 'Q4_K_M'; None when unmarked."""
+    m = WHISPER_GGUF_RE.search(name)
+    return m.group(1).upper() if m else None
+
+
+def choose_whisper_gguf(names, want=None):
+    """(chosen, refused) among a repo's GGUFs: `want` names a quant ('Q8_0'), else the
+    first of WHISPER_GGUF_PREFERENCE the repo ships."""
+    by_quant, refused = {}, {}
+    for n in names:
+        if not n.endswith(".gguf"):
+            continue
+        if re.search(r"-\d+-of-\d+\.gguf$", n):
+            refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
+            continue
+        q = whisper_gguf_quant(n)
+        if q is None:
+            refused[n] = "no quant marker in the file name"
+            continue
+        by_quant.setdefault(q, n)
+    if want:
+        chosen = by_quant.get(want.upper())
+        if chosen is None:
+            refused["--quant"] = f"no {want.upper()} file (have {', '.join(sorted(by_quant)) or 'none'})"
+        return chosen, refused
+    for q in WHISPER_GGUF_PREFERENCE:
+        if q in by_quant:
+            return by_quant[q], refused
+    return (by_quant[sorted(by_quant)[0]] if by_quant else None), refused
+
+
+def check_whisper_gguf(kv, tensors):
+    """Reasons the engine cannot read this GGUF (empty when it can)."""
+    problems = []
+    if kv.get("general.architecture") != "whisper":
+        return [f"general.architecture is {kv.get('general.architecture')!r}, not 'whisper'"]
+    for key, (want, gkeys) in WHISPER_GEOMETRY.items():
+        for g in gkeys:
+            if kv.get(g) != want:
+                problems.append(f"{g} is {kv.get(g)}, the open engine implements {want} ({key})")
+    types = sorted({GGML_TYPE_NAMES.get(t, f"type{t}") for _, t, _ in tensors})
+    bad = [t for t in types if t not in WHISPER_GGUF_TYPES]
+    if bad:
+        problems.append(f"tensors use {'/'.join(bad)}; the engine reads {'/'.join(sorted(WHISPER_GGUF_TYPES))}")
+    return problems
+
+
+def hf_repo_from_url(url):
+    """'https://huggingface.co/openai/whisper-large-v3-turbo' -> 'openai/whisper-large-v3-turbo'."""
+    if not isinstance(url, str) or "huggingface.co/" not in url:
+        return None
+    kind, repo = split_remote_repo(url)
+    return repo if kind == "huggingface" and repo.count("/") == 1 else None
+
+
+def check_whisper_sidecars(kv, target):
+    """Reasons the config/tokenizer files in `target` do not describe the GGUF's model:
+    a vocabulary off by one id still decodes to plausible text, so every id is compared."""
+    problems = []
+    cfg = load_json(target / "config.json")
+    gen = load_json(target / "generation_config.json")
+    tok = load_json(target / "tokenizer.json")
+    if cfg.get("model_type") != "whisper":
+        problems.append(f"config.json model_type is {cfg.get('model_type')!r}")
+    for key, (_, gkeys) in WHISPER_GEOMETRY.items():
+        for g in gkeys:
+            if kv.get(g) != cfg.get(key):
+                problems.append(f"{g} is {kv.get(g)}, config.json {key} is {cfg.get(key)}")
+    tasks = gen.get("task_to_id") or {}
+    for g, have in (("stt.whisper.decoder_start_token_id", gen.get("decoder_start_token_id")),
+                    ("stt.whisper.no_timestamps_token_id", gen.get("no_timestamps_token_id")),
+                    ("stt.whisper.prev_sot_token_id", gen.get("prev_sot_token_id")),
+                    ("stt.whisper.transcribe_token_id", tasks.get("transcribe")),
+                    ("stt.whisper.translate_token_id", tasks.get("translate")),
+                    ("tokenizer.ggml.eos_token_id", gen.get("eos_token_id")),
+                    ("stt.whisper.suppress_tokens", gen.get("suppress_tokens")),
+                    ("stt.whisper.begin_suppress_tokens", gen.get("begin_suppress_tokens"))):
+        if g in kv and kv[g] != have:
+            problems.append(f"{g} is {kv[g]}, generation_config.json has {have}")
+    tokens = kv.get("tokenizer.ggml.tokens") or []
+    model = tok.get("model") or {}
+    by_id = {i: t for t, i in (model.get("vocab") or {}).items()}
+    by_id.update({a["id"]: a["content"] for a in tok.get("added_tokens") or []})
+    bad = [i for i, t in enumerate(tokens) if by_id.get(i) != t]
+    if not tokens or len(tokens) != len(by_id) or bad:
+        problems.append(f"the vocabulary differs from tokenizer.json ({len(bad)} ids, first {bad[:3]}; "
+                        f"{len(tokens)} vs {len(by_id)} tokens)")
+    merges = [m if isinstance(m, str) else " ".join(m) for m in model.get("merges") or []]
+    if list(kv.get("tokenizer.ggml.merges") or []) != merges:
+        problems.append("the BPE merges differ from tokenizer.json")
+    return problems
+
+
+def whisper_tokenizer_config(target):
+    """The host reads bos_token_id and eos_token_id (a list) from tokenizer_config.json;
+    OpenAI's file has neither. Added from config.json, as q4nx-build's container did."""
+    path = target / "tokenizer_config.json"
+    tc = load_json(path)
+    cfg = load_json(target / "config.json")
+    if "bos_token_id" in tc and isinstance(tc.get("eos_token_id"), list):
+        return False
+    tc.setdefault("bos_token_id", cfg["bos_token_id"])
+    tc.setdefault("eos_token_id", [cfg["eos_token_id"]])
+    path.write_text(json.dumps(tc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return True
+
+
+def whisper_xclbin_roots(args_xclbin_dir, user_list):
+    """Where the engine looks for kernel sets (utils::xclbin_roots), as xclbins directories."""
+    roots = []
+    env = os.environ.get("OFLM_XCLBIN_PATH")
+    if env:
+        p = Path(env)
+        roots.append(p if p.name == "xclbins" else p / "xclbins")
+    roots.append(Path(user_list).parent / "xclbins")
+    roots.append(user_xclbin_dir(args_xclbin_dir))
+    system = find_system_xclbin_root()
+    if system:
+        roots.append(system)
+    return [r for i, r in enumerate(roots) if r.is_dir() and r not in roots[:i]]
+
+
+def find_whisper_kernels(roots, cfg):
+    """The first complete Whisper kernel set built for `cfg`'s geometry, by the engine's
+    own rule (whisper_engine_select.cpp find_open_kernels): kernels belong to a shape."""
+    for root in roots:
+        for d in sorted(Path(root).iterdir()):
+            marker = d / "open_kernels" / "whisper_kernels.json"
+            try:
+                m = load_json(marker)
+            except (OSError, ValueError):
+                continue
+            check = m.get("hf_config_check") or {}
+            if (m.get("format") == WHISPER_KERNELS_FORMAT and m.get("complete") and check
+                    and all(cfg.get(k) == v for k, v in check.items())):
+                return d / "open_kernels"
+    return None
+
+
+def install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, system_registry):
+    """Install a Whisper checkpoint or GGUF for the open engine, as it ships."""
+    names = ([e.name for e in local_dir.iterdir() if e.is_file()] if local_dir
+             else root_file_names(tree))
+    stock = "model.safetensors" in names and "config.json" in names
+    gguf_name, refused = (None, {}) if stock else choose_whisper_gguf(
+        [n for n in names if n.endswith(".gguf")], args.quant)
+    if not stock and gguf_name is None:
+        why = "; ".join(f"{k}: {v}" for k, v in sorted(refused.items())) or "no model.safetensors or .gguf"
+        raise SystemExit(f"No Whisper weights the open engine reads in {repo} ({why}).")
+
+    user_list = user_registry_path(args.config)
+    target = models_root_dir(args.models_root) / dir_name
+    kv = None
+    if gguf_name:
+        if local_dir:
+            source = str(local_dir / gguf_name)
+        elif cache and (cache / gguf_name).is_file():
+            source = str(cache / gguf_name)
+        elif modelscope:
+            source = f"https://{ms_file_tree(repo)[0]}/models/{repo}/resolve/master/{gguf_name}"
+        else:
+            source = f"https://huggingface.co/{repo}/resolve/main/{gguf_name}"
+        inv = read_gguf_inventory(source)
+        if inv is None:
+            raise SystemExit(f"Could not read the metadata of {gguf_name}.")
+        kv, tensors = inv
+        problems = check_whisper_gguf(kv, tensors)
+        if problems:
+            raise SystemExit(f"{gguf_name} cannot run on the open Whisper engine: " + "; ".join(problems))
+        quant = whisper_gguf_quant(gguf_name)
+        variant, weights = quant.lower(), "gguf"
+        bases = [b for b in [hf_repo_from_url(kv.get("general.repo_url"))] if b]
+        bases += [b for b in readme_base_chain(repo if not local_dir else str(local_dir), modelscope)
+                  if b not in bases]
+    else:
+        quant, variant, weights, bases = "F16", "safetensors", "safetensors", []
+    tag = args.tag or f"{WHISPER_FAMILY}:turbo-{variant}"
+
+    if args.dry_run:
+        print(f"repo directory : {dir_name}")
+        print(f"tag            : {tag}")
+        print(f"details.family : {WHISPER_FAMILY} (open Whisper engine)")
+        print(f"weights        : {gguf_name + ' -> model.gguf' if gguf_name else 'model.safetensors'}")
+        print(f"sidecars from  : {', '.join(bases) or 'the repo itself'}")
+        print(f"models dir     : {target}")
+        print(f"registry       : {user_list}")
+        return
+
+    target.mkdir(parents=True, exist_ok=True)
+    want = WHISPER_SIDECARS + (["model.gguf"] if gguf_name else ["model.safetensors"])
+    if local_dir:
+        copy_from_dir(local_dir, target, force=args.force, gguf_name=gguf_name, want=want)
+    else:
+        if cache:
+            copy_from_dir(cache, target, force=args.force, gguf_name=gguf_name, want=want)
+        fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=False,
+                     quiet=args.quiet, gguf_name=gguf_name, want=want)
+    for f in WHISPER_SIDECARS:
+        if (target / f).is_file():
+            continue
+        for b in bases:
+            try:
+                if fetch_from_repo(b, f, target / f, modelscope=modelscope):
+                    log(f"[INFO]   {f} <- {b}")
+                    break
+            except Exception as ex:
+                log(f"[WARN] fetching {f} from {b} failed: {ex}")
+    missing = [f for f in want if not (target / f).is_file()]
+    if missing:
+        raise SystemExit(f"Whisper install is missing {missing}"
+                         + (f" (looked in {', '.join(bases)})" if bases else ""))
+    if kv is not None:
+        inv = read_gguf_inventory(target / "model.gguf")
+        problems = check_whisper_sidecars(inv[0], target) if inv else ["model.gguf metadata unreadable"]
+        if problems:
+            raise SystemExit("The config/tokenizer files do not describe this GGUF's model: "
+                             + "; ".join(problems))
+        log(f"[INFO] config, tokenizer and generation_config agree with {gguf_name}'s metadata")
+    cfg = load_json(target / "config.json")
+    wrong = {k: (cfg.get(k), v) for k, (v, _) in WHISPER_GEOMETRY.items() if cfg.get(k) != v}
+    if cfg.get("model_type") != "whisper" or wrong:
+        raise SystemExit(f"Not whisper-large-v3-turbo's geometry, the only one the open engine runs "
+                         f"(have, want): {wrong}")
+    if not gguf_name:
+        quant = {"bfloat16": "BF16", "float32": "F32"}.get(cfg.get("torch_dtype"), "F16")
+    if whisper_tokenizer_config(target):
+        log("[INFO] tokenizer_config.json: bos_token_id and eos_token_id added from config.json")
+
+    official = (system_registry.get("models", {}).get(WHISPER_FAMILY) or {}).get("turbo")
+    entry = build_entry(official, dir_name, want, (official or {}).get("size"))
+    entry["asr"] = True
+    details = entry.setdefault("details", {})
+    details.update({"family": WHISPER_FAMILY, "weights": weights, "quantization_level": quant})
+    register(user_list, tag, entry, system_registry)
+    log(f"[INFO] Registered tag '{tag}' in {user_list}")
+
+    kernels = find_whisper_kernels(whisper_xclbin_roots(args.xclbin_dir, user_list), cfg)
+    if kernels:
+        log(f"[INFO] open Whisper kernels: {kernels} (built for this geometry; no link needed)")
+    else:
+        checkout = open_kernels_checkout()
+        script = (checkout / "export_whisper_kernels.py") if checkout else Path("open_kernels/export_whisper_kernels.py")
+        log("[WARN] No Whisper kernel set is installed yet; the open engine needs one. Build it with:")
+        log(f'           python "{script}"')
+    print()
+    print(f"Done: {dir_name} installed to {target}")
+    print(f"Run:  oflm serve --asr 1 --asrmodel {tag}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -1841,6 +2128,7 @@ def main():
     ap.add_argument("--system-list", help="official model_list.json used for defaults (default: auto-detect)")
     ap.add_argument("--modelscope", action="store_true", help="Treat REPO as a ModelScope repo id (implied by www.modelscope.ai/.cn URLs)")
     ap.add_argument("--open-kernels", help="open kernel set for this model (a directory holding manifest.json); default: the installed set whose manifest spec_hash matches")
+    ap.add_argument("--quant", help="Whisper GGUF repos: the quant to install, e.g. Q8_0, F16, Q4_K_M (default: Q8_0, else the most precise the repo ships)")
     ap.add_argument("--no-xclbin", action="store_true", help="Do not create the xclbins symlink (nor the open-kernels link, unless --open-kernels is given)")
     ap.add_argument("--no-verify", action="store_true", help="Skip sha256 verification of downloads")
     ap.add_argument("--force", action="store_true", help="Overwrite existing model files/links")
@@ -1887,6 +2175,12 @@ def main():
         cache = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         have_q4nx = repo_has_q4nx(tree, cache)
     gguf_mode = gguf_name is not None and not have_q4nx
+    named_whisper = (args.family or "").lower() == WHISPER_FAMILY or (
+        args.family is None and dir_name.lower().startswith("whisper"))
+    if named_whisper and not have_q4nx:
+        system_list = Path(args.system_list) if args.system_list else find_system_model_list()
+        install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, load_json(system_list))
+        return
     if gguf_mode:
         # The tensors must be what the name claims, in types the NPU packers
         # ingest. Remote metadata is best-effort (Range); a local file is on
@@ -1960,6 +2254,9 @@ def main():
                     log(f"[INFO] family '{family}' from config.json model_type")
         if family is None:
             raise
+    if family == WHISPER_FAMILY and not have_q4nx:
+        install_whisper(args, repo, local_dir, modelscope, dir_name, tree, cache, system_registry)
+        return
     npue_embed = family in NPU_EMBED_FAMILIES
     if npue_embed:
         # NPU-embedding (NpuEmbeddings) model: the authoritative registry entry

@@ -77,7 +77,7 @@ void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& ou
 /// unknown to this reader; the pack ops refuse those with a proper message).
 uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
     // block quants: 18 B / 32 q4_0 | 20 B / 32 q4_1 | 34 B / 32 q8_0 |
-    // 144 B / 256 q4_k | 210 B / 256 q6_k
+    // 144 B / 256 q4_k | 176 B / 256 q5_k | 210 B / 256 q6_k
     switch (t) {
         case 0: return values * 4;                        // f32
         case 1: case 30: return values * 2;               // f16 / bf16
@@ -85,6 +85,7 @@ uint64_t gguf_type_bytes(uint32_t t, uint64_t values) {
         case 3: return values / 32 * 20;                  // q4_1
         case 8: return values / 32 * 34;                  // q8_0
         case 12: return values / 256 * 144;               // q4_k
+        case 13: return values / 256 * 176;               // q5_k
         case 14: return values / 256 * 210;               // q6_k
         default: return 0;                                // unsupported
     }
@@ -307,50 +308,18 @@ const TensorMeta& GgufFile::meta(const std::string& name) const {
 }
 
 namespace {
-// A whole tensor decoded to f32, row by row (the GGUF's fastest dim is the row).
-std::vector<float> gguf_dequant_all(const GgufFile& g, const std::string& name) {
-    const GgufFile::TensorInfo& t = g.tensor(name);
-    const size_t cols = static_cast<size_t>(t.dims[0]);
-    const size_t nrows = t.dims.size() >= 2 ? static_cast<size_t>(t.dims[1]) : 1;
-    std::vector<float> out(cols * nrows);
-    for (size_t r = 0; r < nrows; ++r) g.embed_row(name, r, cols, out.data() + r * cols);
-    return out;
+// Rows are the fastest dim; every dim past it counts rows, so a 3-D tensor (a conv kernel) reads whole.
+uint64_t row_count(const GgufFile::TensorInfo& t) {
+    return t.dims.empty() || t.dims[0] == 0 ? 0 : t.nvalues() / t.dims[0];
 }
 }  // namespace
 
-std::vector<float> GgufFile::bf16(const std::string& name) const { return gguf_dequant_all(*this, name); }
-std::vector<float> GgufFile::f32(const std::string& name) const { return gguf_dequant_all(*this, name); }
-
-std::string GgufFile::kv_str(const std::string& key) const {
-    auto it = meta_.find(key);
-    if (it == meta_.end()) fail("no metadata key " + key + " in " + path_);
-    return it->second;
-}
-
-uint64_t GgufFile::kv_u64(const std::string& key) const {
-    try {
-        return std::stoull(kv_str(key));
-    } catch (const std::logic_error&) {
-        fail("metadata " + key + " is not a number (" + kv_str(key) + ")");
-    }
-}
-
-double GgufFile::kv_f64(const std::string& key) const {
-    try {
-        return std::stod(kv_str(key));
-    } catch (const std::logic_error&) {
-        fail("metadata " + key + " is not a number (" + kv_str(key) + ")");
-    }
-}
-
-void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
-    const TensorInfo& t = tensor(name);
-    const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
-    if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
-    const uint64_t nrows = t.dims.size() >= 2 ? t.dims[1] : 1u;  // 1-D tensors are a single row
-    if (row >= nrows) fail("row " + std::to_string(row) + " past " + name);
-    const uint8_t* base = map_ + data_base_ + t.offset;
-    switch (t.type) {
+namespace {
+// One row of `dim` values at row index `row` of a tensor whose data starts at `base`.
+void dequant_row(const std::string& name, GgufFile::Type type, const uint8_t* base, size_t row,
+                 size_t dim, float* out) {
+    using Type = GgufFile::Type;
+    switch (type) {
         case Type::F32: {
             std::memcpy(out, base + row * dim * 4, dim * 4);
             break;
@@ -439,6 +408,36 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             }
             break;
         }
+        case Type::Q5_K: {
+            // super-block of 256: fp16 d, fp16 dmin, 12 bytes of 6-bit scales,
+            // 32 bytes of 5th bits, then 128 bytes of nibbles (llama.cpp's loop)
+            const uint8_t* p = base + row * (dim / 256) * 176;
+            for (size_t sb = 0; sb < dim / 256; ++sb, p += 176) {
+                uint16_t ud, um;
+                std::memcpy(&ud, p, 2);
+                std::memcpy(&um, p + 2, 2);
+                const float d = fp16_to_f32(ud), min = fp16_to_f32(um);
+                const uint8_t* scales = p + 4;
+                const uint8_t* qh = p + 16;
+                const uint8_t* ql = p + 48;
+                int is = 0;
+                uint8_t sc, m, u1 = 1, u2 = 2;
+                float* y = out + sb * 256;
+                for (int j = 0; j < 256; j += 64) {
+                    get_scale_min_k4(is + 0, scales, &sc, &m);
+                    const float d1 = d * sc, m1 = min * m;
+                    get_scale_min_k4(is + 1, scales, &sc, &m);
+                    const float d2 = d * sc, m2 = min * m;
+                    for (int l = 0; l < 32; ++l) y[j + l] = d1 * ((ql[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1;
+                    for (int l = 0; l < 32; ++l) y[j + 32 + l] = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
+                    ql += 32;
+                    is += 2;
+                    u1 = static_cast<uint8_t>(u1 << 2);
+                    u2 = static_cast<uint8_t>(u2 << 2);
+                }
+            }
+            break;
+        }
         case Type::Q6_K: {
             // super-block of 256: 128 B lower nibbles, 64 B upper 2 bits,
             // 16 int8 scales (per 16 values), fp16 super-block scale
@@ -471,10 +470,52 @@ void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float*
             break;
         }
         default:
-            fail(std::string("the embedding is ") + type_name(t.type) +
-                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K rows "
-                 "(convert the model with q4nx-build, or quantize the embedding to a supported type)");
+            fail(name + " is " + GgufFile::type_name(type) +
+                 "; this reader dequantizes F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K rows");
     }
+}
+}  // namespace
+
+std::vector<float> GgufFile::bf16(const std::string& name) const { return f32(name); }
+
+std::vector<float> GgufFile::f32(const std::string& name) const {
+    const TensorInfo& t = tensor(name);
+    const size_t cols = t.dims.empty() ? 0 : static_cast<size_t>(t.dims[0]);
+    const size_t nrows = static_cast<size_t>(row_count(t));
+    std::vector<float> out(cols * nrows);
+    const uint8_t* base = map_ + data_base_ + t.offset;
+    for (size_t r = 0; r < nrows; ++r) dequant_row(name, t.type, base, r, cols, out.data() + r * cols);
+    return out;
+}
+
+std::string GgufFile::kv_str(const std::string& key) const {
+    auto it = meta_.find(key);
+    if (it == meta_.end()) fail("no metadata key " + key + " in " + path_);
+    return it->second;
+}
+
+uint64_t GgufFile::kv_u64(const std::string& key) const {
+    try {
+        return std::stoull(kv_str(key));
+    } catch (const std::logic_error&) {
+        fail("metadata " + key + " is not a number (" + kv_str(key) + ")");
+    }
+}
+
+double GgufFile::kv_f64(const std::string& key) const {
+    try {
+        return std::stod(kv_str(key));
+    } catch (const std::logic_error&) {
+        fail("metadata " + key + " is not a number (" + kv_str(key) + ")");
+    }
+}
+
+void GgufFile::embed_row(const std::string& name, size_t row, size_t dim, float* out) const {
+    const TensorInfo& t = tensor(name);
+    const uint64_t cols = t.dims[0];               // fastest dim: the hidden size
+    if (cols != dim) fail(name + " has " + std::to_string(cols) + " cols, the row wants " + std::to_string(dim));
+    if (row >= row_count(t)) fail("row " + std::to_string(row) + " past " + name);
+    dequant_row(name, t.type, map_ + data_base_ + t.offset, row, dim, out);
 }
 
 }  // namespace open_qwen36

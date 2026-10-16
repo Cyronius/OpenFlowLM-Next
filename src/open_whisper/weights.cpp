@@ -2,13 +2,16 @@
 // open_whisper -- see weights.hpp. SPDX-License-Identifier: MIT
 #include "weights.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
 #include "nlohmann/json.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "weight_source.hpp"
 
 namespace ow {
 
@@ -49,30 +52,33 @@ std::vector<uint16_t> tile_b(const float *mat, int64_t K, int64_t N, int64_t tk,
 
 namespace {
 
-void require_shape(const open_qwen36::Q4nxFile &f, const std::string &name,
+void require_shape(const WeightSource &f, const std::string &name,
                    const std::vector<size_t> &want) {
+  const std::string file = weight_file_name(f.kind());
   if (!f.has(name))
-    throw std::runtime_error("model.open.safetensors: missing tensor '" + name + "'");
-  const auto &m = f.meta(name);
+    throw std::runtime_error(file + ": missing tensor '" + name + "'");
+  const TensorDesc m = f.desc(name);
   if (m.shape != want) {
     std::string got;
     for (size_t i = 0; i < m.shape.size(); ++i) got += (i ? "," : "") + std::to_string(m.shape[i]);
     std::string exp;
     for (size_t i = 0; i < want.size(); ++i) exp += (i ? "," : "") + std::to_string(want[i]);
-    throw std::runtime_error("model.open.safetensors: '" + name + "' has shape [" + got +
+    throw std::runtime_error(file + ": '" + name + "' has shape [" + got +
                              "], expected [" + exp + "]");
   }
 }
 
-std::vector<uint16_t> load_tiled(const open_qwen36::Q4nxFile &f, const std::string &name,
+std::vector<uint16_t> load_tiled(const WeightSource &f, const std::string &name,
                                  int64_t K, int64_t N, int64_t tk, int64_t tn,
                                  int64_t mac_s, int64_t mac_t) {
   require_shape(f, name, {static_cast<size_t>(K), static_cast<size_t>(N)});
-  std::vector<float> fp = f.bf16(name);
+  const std::vector<uint16_t> bits = f.bf16(name);
+  std::vector<float> fp(bits.size());
+  for (size_t i = 0; i < bits.size(); ++i) fp[i] = open_qwen36::bf16_to_f32(bits[i]);
   return tile_b(fp.data(), K, N, tk, tn, mac_s, mac_t);
 }
 
-std::vector<float> load_f32(const open_qwen36::Q4nxFile &f, const std::string &name,
+std::vector<float> load_f32(const WeightSource &f, const std::string &name,
                             const std::vector<size_t> &shape) {
   require_shape(f, name, shape);
   return f.f32(name);
@@ -91,15 +97,23 @@ std::string read_file(const std::string &path) {
 Weights::Weights(const std::string &model_dir, int64_t tile_k, int64_t tile_n,
                  int64_t mac_s_, int64_t mac_t_)
     : tile_k(tile_k), tile_n(tile_n), mac_s(mac_s_), mac_t(mac_t_) {
+  const std::vector<WeightKind> present = weights_present(model_dir);
+  if (present.empty())
+    throw std::runtime_error("no Whisper weights in " + model_dir +
+                             ": expected model.open.safetensors, model.safetensors or model.gguf");
+  const WeightKind kind = present.front();
+
   // 1. weights_manifest.json format, checked before opening the safetensors
   //    itself -- a container in a format this reader does not know is a
   //    refusal, not a best-effort parse.
-  const std::string manifest_path = model_dir + "/weights_manifest.json";
-  const nlohmann::json manifest = nlohmann::json::parse(read_file(manifest_path));
-  const std::string format = manifest.value("format", std::string());
-  if (format != "oflm-open-whisper-v1")
-    throw std::runtime_error("weights_manifest.json: format is '" + format +
-                             "', expected 'oflm-open-whisper-v1'");
+  if (kind == WeightKind::Container) {
+    const std::string manifest_path = model_dir + "/weights_manifest.json";
+    const nlohmann::json manifest = nlohmann::json::parse(read_file(manifest_path));
+    const std::string format = manifest.value("format", std::string());
+    if (format != "oflm-open-whisper-v1")
+      throw std::runtime_error("weights_manifest.json: format is '" + format +
+                               "', expected 'oflm-open-whisper-v1'");
+  }
 
   // 2. config.json geometry. Refuse anything but whisper-large-v3-turbo's
   //    shape -- the shipped kernel set has no other GEMM streams.
@@ -124,7 +138,10 @@ Weights::Weights(const std::string &model_dir, int64_t tile_k, int64_t tile_n,
   want_int("max_source_positions", Geometry::max_src_pos);
 
   // 3. The tensors themselves.
-  open_qwen36::Q4nxFile f(model_dir + "/model.open.safetensors");
+  const std::unique_ptr<WeightSource> src =
+      open_weight_file(model_dir + "/" + weight_file_name(kind), kind, turbo_shape());
+  const WeightSource &f = *src;
+  std::printf("  weights    %s\n", f.describe().c_str());
   const int64_t D = Geometry::d_model, FFN = Geometry::ffn;
   const int64_t NDEC = Geometry::n_dec;
 

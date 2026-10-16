@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
@@ -23,6 +24,7 @@
 #include "kernels.hpp"
 #include "nlohmann/json.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "weight_source.hpp"
 
 namespace ow {
 namespace {
@@ -41,21 +43,22 @@ std::string read_file(const std::string &path) {
   return ss.str();
 }
 
-void require_shape(const open_qwen36::Q4nxFile &f, const std::string &name,
+void require_shape(const WeightSource &f, const std::string &name,
                    const std::vector<size_t> &want) {
+  const std::string file = weight_file_name(f.kind());
   if (!f.has(name))
-    throw std::runtime_error("model.open.safetensors: missing tensor '" + name + "'");
-  const auto &m = f.meta(name);
+    throw std::runtime_error(file + ": missing tensor '" + name + "'");
+  const TensorDesc m = f.desc(name);
   if (m.shape != want) {
     std::string got, exp;
     for (size_t i = 0; i < m.shape.size(); ++i) got += (i ? "," : "") + std::to_string(m.shape[i]);
     for (size_t i = 0; i < want.size(); ++i) exp += (i ? "," : "") + std::to_string(want[i]);
-    throw std::runtime_error("model.open.safetensors: '" + name + "' has shape [" + got +
+    throw std::runtime_error(file + ": '" + name + "' has shape [" + got +
                              "], expected [" + exp + "]");
   }
 }
 
-std::vector<float> load_f32(const open_qwen36::Q4nxFile &f, const std::string &name,
+std::vector<float> load_f32(const WeightSource &f, const std::string &name,
                             const std::vector<size_t> &shape) {
   require_shape(f, name, shape);
   return f.f32(name);
@@ -64,23 +67,16 @@ std::vector<float> load_f32(const open_qwen36::Q4nxFile &f, const std::string &n
 // Raw bf16 bits, [out, in], NOT un-tiled: the decoder's tensors are stored at
 // their natural shape (utilities/q4nx-build/q4nx/open_whisper.py's
 // whisper_tensors(), "Decoder: transformers' names..." branch), unlike the
-// encoder's GEMM operands, which weights.cpp tiles for the NPU at load.
-std::vector<uint16_t> load_bf16_raw(const open_qwen36::Q4nxFile &f, const std::string &name,
+// encoder's GEMM operands, which weights.cpp tiles for the NPU at load. The
+// source checks the dtype, not just the byte count (the container through
+// require_bf16 -- see kernels.hpp).
+std::vector<uint16_t> load_bf16_raw(const WeightSource &f, const std::string &name,
                                     int64_t out, int64_t in) {
   require_shape(f, name, {static_cast<size_t>(out), static_cast<size_t>(in)});
-  require_bf16(f, name);   // the dtype, not just the byte count -- see kernels.hpp
-  size_t nbytes = 0;
-  const uint8_t *raw = f.raw(name, &nbytes);
-  const size_t want = static_cast<size_t>(out) * static_cast<size_t>(in);
-  if (nbytes != want * 2)
-    throw std::runtime_error("model.open.safetensors: '" + name + "' is " + std::to_string(nbytes) +
-                             " bytes, expected " + std::to_string(want * 2) + " (bf16)");
-  std::vector<uint16_t> v(want);
-  std::memcpy(v.data(), raw, want * 2);
-  return v;
+  return f.bf16(name);
 }
 
-Linear load_linear(const open_qwen36::Q4nxFile &f, const std::string &wname, const std::string &bname,
+Linear load_linear(const WeightSource &f, const std::string &wname, const std::string &bname,
                    int64_t out, int64_t in) {
   Linear L;
   L.out = out;
@@ -93,7 +89,7 @@ Linear load_linear(const open_qwen36::Q4nxFile &f, const std::string &wname, con
 // A Linear whose bias tensor does not exist in the container (self-attention
 // k_proj, and embed_tokens used as the tied output projection) -- an
 // explicit zero vector, so linear() below never needs a no-bias branch.
-Linear load_linear_nobias(const open_qwen36::Q4nxFile &f, const std::string &wname, int64_t out,
+Linear load_linear_nobias(const WeightSource &f, const std::string &wname, int64_t out,
                           int64_t in) {
   Linear L;
   L.out = out;
@@ -249,13 +245,22 @@ void attend_one(const float *q, const float *k_base, int64_t k_row_stride, int64
 }  // namespace
 
 Decoder::Decoder(const std::string &model_dir) {
+  const std::vector<WeightKind> present = weights_present(model_dir);
+  if (present.empty())
+    throw std::runtime_error("no Whisper weights in " + model_dir +
+                             ": expected model.open.safetensors, model.safetensors or model.gguf");
+  const WeightKind kind = present.front();
+
   // 1. weights_manifest.json format -- refused before opening the safetensors
   //    at all, same discipline as weights.cpp for the encoder.
-  const nlohmann::json manifest = nlohmann::json::parse(read_file(model_dir + "/weights_manifest.json"));
-  const std::string format = manifest.value("format", std::string());
-  if (format != "oflm-open-whisper-v1")
-    throw std::runtime_error("weights_manifest.json: format is '" + format +
-                             "', expected 'oflm-open-whisper-v1'");
+  if (kind == WeightKind::Container) {
+    const nlohmann::json manifest =
+        nlohmann::json::parse(read_file(model_dir + "/weights_manifest.json"));
+    const std::string format = manifest.value("format", std::string());
+    if (format != "oflm-open-whisper-v1")
+      throw std::runtime_error("weights_manifest.json: format is '" + format +
+                               "', expected 'oflm-open-whisper-v1'");
+  }
 
   // 2. config.json geometry -- the decoder-specific fields weights.cpp does
   //    not check (it only validates the encoder's).
@@ -290,7 +295,9 @@ Decoder::Decoder(const std::string &model_dir) {
         "embedding, matching whisper-large-v3-turbo's own false");
 
   // 3. The tensors themselves.
-  open_qwen36::Q4nxFile f(model_dir + "/model.open.safetensors");
+  const std::unique_ptr<WeightSource> src =
+      open_weight_file(model_dir + "/" + weight_file_name(kind), kind, turbo_shape());
+  const WeightSource &f = *src;
   const int64_t D = DG::d_model, FFN = DG::ffn, V = DG::vocab;
 
   embed_tokens_ = load_linear_nobias(f, "decoder.embed_tokens.weight", V, D);

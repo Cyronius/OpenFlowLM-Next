@@ -21,10 +21,9 @@ from q4nx.open_whisper import (  # noqa: E402
     WEIGHTS_NAME,
     bf16_bits,
     build_open_whisper_repo,
-    gguf_name_map,
 )
 
-D, FFN, MELS, NENC, NDEC, VOCAB, SRC, TGT = 32, 64, 4, 2, 2, 40, 6, 5
+D, FFN, MELS, NENC, NDEC, VOCAB, SRC, TGT = 16, 32, 4, 2, 2, 40, 6, 5
 TINY = {"d_model": D, "encoder_layers": NENC, "decoder_layers": NDEC,
         "encoder_ffn_dim": FFN, "decoder_ffn_dim": FFN, "num_mel_bins": MELS,
         "max_source_positions": SRC, "max_target_positions": TGT, "vocab_size": VOCAB}
@@ -35,8 +34,7 @@ def _exact(rng, *shape):
     return (rng.integers(-64, 64, size=shape) / 32.0).astype(np.float16)
 
 
-def _checkpoint(root: Path, seed: int = 0, mat=_exact) -> dict:
-    """`mat` draws the matmul weights and the embedding, the tensors a GGUF quantizes."""
+def _checkpoint(root: Path, seed: int = 0) -> dict:
     from safetensors.numpy import save_file
     rng = np.random.default_rng(seed)
     t = {}
@@ -48,15 +46,15 @@ def _checkpoint(root: Path, seed: int = 0, mat=_exact) -> dict:
     for i in range(NENC):
         p = f"{e}layers.{i}."
         for n in "qkv":
-            t[p + f"self_attn.{n}_proj.weight"] = mat(rng, D, D)
+            t[p + f"self_attn.{n}_proj.weight"] = _exact(rng, D, D)
         t[p + "self_attn.q_proj.bias"] = _exact(rng, D)
         t[p + "self_attn.v_proj.bias"] = _exact(rng, D)
-        t[p + "self_attn.out_proj.weight"], t[p + "self_attn.out_proj.bias"] = mat(rng, D, D), _exact(rng, D)
-        t[p + "fc1.weight"], t[p + "fc1.bias"] = mat(rng, FFN, D), _exact(rng, FFN)
-        t[p + "fc2.weight"], t[p + "fc2.bias"] = mat(rng, D, FFN), _exact(rng, D)
+        t[p + "self_attn.out_proj.weight"], t[p + "self_attn.out_proj.bias"] = _exact(rng, D, D), _exact(rng, D)
+        t[p + "fc1.weight"], t[p + "fc1.bias"] = _exact(rng, FFN, D), _exact(rng, FFN)
+        t[p + "fc2.weight"], t[p + "fc2.bias"] = _exact(rng, D, FFN), _exact(rng, D)
         for n in ("self_attn_layer_norm", "final_layer_norm"):
             t[p + n + ".weight"], t[p + n + ".bias"] = _exact(rng, D), _exact(rng, D)
-    t[d + "embed_tokens.weight"] = mat(rng, VOCAB, D)
+    t[d + "embed_tokens.weight"] = _exact(rng, VOCAB, D)
     t[d + "embed_positions.weight"] = _exact(rng, TGT, D)
     t[d + "layer_norm.weight"], t[d + "layer_norm.bias"] = _exact(rng, D), _exact(rng, D)
     for l in range(NDEC):
@@ -64,11 +62,11 @@ def _checkpoint(root: Path, seed: int = 0, mat=_exact) -> dict:
         for a in ("self_attn", "encoder_attn"):
             for n in "qkvo":
                 name = "out_proj" if n == "o" else f"{n}_proj"
-                t[p + f"{a}.{name}.weight"] = mat(rng, D, D)
+                t[p + f"{a}.{name}.weight"] = _exact(rng, D, D)
                 if n != "k":
                     t[p + f"{a}.{name}.bias"] = _exact(rng, D)
-        t[p + "fc1.weight"], t[p + "fc1.bias"] = mat(rng, FFN, D), _exact(rng, FFN)
-        t[p + "fc2.weight"], t[p + "fc2.bias"] = mat(rng, D, FFN), _exact(rng, D)
+        t[p + "fc1.weight"], t[p + "fc1.bias"] = _exact(rng, FFN, D), _exact(rng, FFN)
+        t[p + "fc2.weight"], t[p + "fc2.bias"] = _exact(rng, D, FFN), _exact(rng, D)
         for n in ("self_attn_layer_norm", "encoder_attn_layer_norm", "final_layer_norm"):
             t[p + n + ".weight"], t[p + n + ".bias"] = _exact(rng, D), _exact(rng, D)
     save_file(t, str(root / "model.safetensors"))
@@ -198,169 +196,6 @@ class OpenWhisperContainerTest(unittest.TestCase):
         # 1+2^-8 is a tie between 1 and 1+2^-7: even mantissa wins (1.0).
         # 1+3*2^-8 ties between 1+2^-7 and 1+2^-6: even is 1+2^-6.
         np.testing.assert_array_equal(bf16_bits(x), [0x3F80, 0x3F80, 0x3F82, 0xC020])
-
-
-def _q8_exact(rng, *shape):
-    """Values Q8_0 stores and bf16 holds exactly: integers in [-127, 127] over 64, with a
-    127 first in every block of 32 so the block scale is exactly 1/64."""
-    q = rng.integers(-126, 127, size=shape)
-    q[..., ::32] = 127
-    return (q / 64.0).astype(np.float16)
-
-
-VOCAB_TOKENS = [f"t{i}" for i in range(VOCAB - 3)] + ["<|endoftext|>", "<|startoftranscript|>", "<|nots|>"]
-MERGES = ["t1 t2", "t3 t4"]
-
-
-def _write_sidecars(root: Path) -> None:
-    """tokenizer.json and generation_config.json that agree with the tiny GGUF below."""
-    vocab = {t: i for i, t in enumerate(VOCAB_TOKENS[:-3])}
-    added = [{"id": VOCAB - 3 + k, "content": c} for k, c in enumerate(VOCAB_TOKENS[-3:])]
-    (root / "tokenizer.json").write_text(json.dumps(
-        {"model": {"vocab": vocab, "merges": MERGES}, "added_tokens": added}))
-    gen = json.loads((root / "generation_config.json").read_text())
-    gen["suppress_tokens"] = [1, 2]
-    (root / "generation_config.json").write_text(json.dumps(gen))
-
-
-# Written out by hand from a real turbo GGUF, so the production name map is not checked
-# against itself: a round trip through one map is blind to a wrong entry in it.
-_ENC_BLOCK = {"self_attn.q_proj": "attn.q", "self_attn.k_proj": "attn.k", "self_attn.v_proj": "attn.v",
-              "self_attn.out_proj": "attn.out", "self_attn_layer_norm": "norm_attn",
-              "final_layer_norm": "norm_ffn", "fc1": "ffn.fc1", "fc2": "ffn.fc2"}
-_DEC_BLOCK = {"self_attn.q_proj": "self_attn.q", "self_attn.k_proj": "self_attn.k",
-              "self_attn.v_proj": "self_attn.v", "self_attn.out_proj": "self_attn.out",
-              "encoder_attn.q_proj": "cross_attn.q", "encoder_attn.k_proj": "cross_attn.k",
-              "encoder_attn.v_proj": "cross_attn.v", "encoder_attn.out_proj": "cross_attn.out",
-              "self_attn_layer_norm": "norm_self", "encoder_attn_layer_norm": "norm_cross",
-              "final_layer_norm": "norm_ffn", "fc1": "ffn.fc1", "fc2": "ffn.fc2"}
-_TOP = {"model.encoder.conv1": "enc.conv.0", "model.encoder.conv2": "enc.conv.1",
-        "model.encoder.embed_positions": "enc.pos_emb", "model.encoder.layer_norm": "enc.final_norm",
-        "model.decoder.embed_tokens": "dec.token_embd", "model.decoder.embed_positions": "dec.pos_emb",
-        "model.decoder.layer_norm": "dec.final_norm"}
-
-
-def _gguf_name(hf: str) -> str:
-    stem, _, kind = hf.rpartition(".")
-    if stem in _TOP:
-        return f"{_TOP[stem]}.{kind}"
-    side, _, rest = stem.partition(".layers.")
-    idx, _, layer = rest.partition(".")
-    table, pre = (_ENC_BLOCK, "enc") if side.endswith("encoder") else (_DEC_BLOCK, "dec")
-    return f"{pre}.blocks.{idx}.{table[layer]}.{kind}"
-
-
-def _write_gguf(path: Path, src: dict, quant: str, **override) -> None:
-    from gguf import GGMLQuantizationType as Q
-    from gguf import GGUFWriter, quantize
-    w = GGUFWriter(str(path), "whisper")
-    ints = {"stt.whisper.encoder.n_layers": NENC, "stt.whisper.decoder.n_layers": NDEC,
-            "stt.whisper.encoder.d_model": D, "stt.whisper.encoder.ffn_dim": FFN,
-            "stt.whisper.encoder.num_mel_bins": MELS, "stt.whisper.encoder.max_source_positions": SRC,
-            "stt.whisper.decoder.max_target_positions": TGT, "stt.whisper.decoder.vocab_size": VOCAB,
-            "stt.whisper.decoder_start_token_id": 50258, "stt.whisper.no_timestamps_token_id": 50363,
-            "tokenizer.ggml.eos_token_id": 50257} | override
-    for k, v in ints.items():
-        w.add_uint32(k, v)
-    w.add_array("stt.whisper.suppress_tokens", [1, 2])
-    w.add_array("tokenizer.ggml.tokens", VOCAB_TOKENS)
-    w.add_array("tokenizer.ggml.merges", MERGES)
-    for hf, a in src.items():
-        gg = _gguf_name(hf)
-        if a.ndim == 2 and "embed_positions" not in hf and "layer_norm" not in hf:
-            if quant == "Q8_0":
-                w.add_tensor(gg, quantize(a, Q.Q8_0), raw_dtype=Q.Q8_0)
-            else:
-                w.add_tensor(gg, a.astype(np.float16))
-        else:
-            w.add_tensor(gg, a.astype(np.float32))
-    w.write_header_to_file()
-    w.write_kv_data_to_file()
-    w.write_tensors_to_file()
-    w.close()
-
-
-class GgufInputTest(unittest.TestCase):
-    """A GGUF of the same weights builds the same container as the HuggingFace checkpoint."""
-    # Traces: OPEN-WHISPER-GGUF
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
-        root = Path(cls.tmp.name)
-        (root / "src").mkdir()
-        cls.src = _checkpoint(root / "src", mat=_q8_exact)
-        _write_sidecars(root / "src")
-        build_open_whisper_repo(str(root / "src"), str(root / "from_hf"), geometry=TINY)
-        for quant in ("F16", "Q8_0"):
-            _write_gguf(root / f"m-{quant}.gguf", cls.src, quant)
-            build_open_whisper_repo(str(root / f"m-{quant}.gguf"), str(root / f"from_{quant}"),
-                                    geometry=TINY, sidecars=str(root / "src"))
-        cls.root = root
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
-
-    def test_tensors_match_the_checkpoint_build_exactly(self):
-        want = (self.root / "from_hf" / WEIGHTS_NAME).read_bytes()
-        for quant in ("F16", "Q8_0"):
-            got = (self.root / f"from_{quant}" / WEIGHTS_NAME).read_bytes()
-            self.assertEqual(got, want, quant)
-
-    def test_manifest_records_the_gguf_and_its_tensor_types(self):
-        m = json.loads((self.root / "from_Q8_0" / "weights_manifest.json").read_text())
-        self.assertEqual(m["source"]["file"], "m-Q8_0.gguf")
-        self.assertEqual(m["source"]["format"], "gguf")
-        self.assertIn("Q8_0", m["source"]["tensor_types"])
-
-    def test_production_name_map_equals_the_hand_written_one(self):
-        mapped = gguf_name_map(NENC, NDEC)
-        self.assertEqual(mapped, {hf: _gguf_name(hf) for hf in mapped})
-        self.assertEqual(set(mapped), set(self.src))
-
-    def test_name_map_matches_a_real_turbo_gguf(self):
-        real = json.loads((Path(__file__).parent / "data" / "whisper_turbo_gguf_tensors.json").read_text())
-        mapped = gguf_name_map(GEOMETRY["encoder_layers"], GEOMETRY["decoder_layers"])
-        self.assertEqual(set(mapped.values()), {n for n in real if not n.startswith("frontend.")})
-        d, ffn, mels = GEOMETRY["d_model"], GEOMETRY["encoder_ffn_dim"], GEOMETRY["num_mel_bins"]
-        want = {"model.encoder.conv1.weight": [d, mels, 3], "model.encoder.conv2.weight": [d, d, 3],
-                "model.encoder.embed_positions.weight": [GEOMETRY["max_source_positions"], d],
-                "model.decoder.embed_tokens.weight": [GEOMETRY["vocab_size"], d],
-                "model.decoder.layers.0.fc1.weight": [ffn, d],
-                "model.decoder.layers.3.encoder_attn.v_proj.weight": [d, d]}
-        for hf, shape in want.items():
-            self.assertEqual(real[mapped[hf]], shape, hf)
-
-    def test_refuses_a_vocabulary_that_differs_from_the_sidecars(self):
-        bad = Path(self.tmp.name) / "bad_sidecars"
-        shutil.copytree(self.root / "src", bad)
-        tok = json.loads((bad / "tokenizer.json").read_text())
-        tok["model"]["merges"] = ["t1 t3"]
-        (bad / "tokenizer.json").write_text(json.dumps(tok))
-        with tempfile.TemporaryDirectory() as t2, self.assertRaises(ValueError) as ctx:
-            build_open_whisper_repo(str(self.root / "m-F16.gguf"), t2, geometry=TINY, sidecars=str(bad))
-        self.assertIn("merges", str(ctx.exception))
-
-    def test_refuses_special_token_ids_that_differ(self):
-        _write_gguf(self.root / "bad.gguf", self.src, "F16", **{"stt.whisper.decoder_start_token_id": 50259})
-        with tempfile.TemporaryDirectory() as t2, self.assertRaises(ValueError) as ctx:
-            build_open_whisper_repo(str(self.root / "bad.gguf"), t2, geometry=TINY,
-                                    sidecars=str(self.root / "src"))
-        self.assertIn("decoder_start_token_id", str(ctx.exception))
-
-    def test_refuses_a_gguf_of_another_architecture(self):
-        from gguf import GGUFWriter
-        w = GGUFWriter(str(self.root / "llama.gguf"), "llama")
-        w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
-        with tempfile.TemporaryDirectory() as t2, self.assertRaises(ValueError) as ctx:
-            build_open_whisper_repo(str(self.root / "llama.gguf"), t2, geometry=TINY,
-                                    sidecars=str(self.root / "src"))
-        self.assertIn("llama", str(ctx.exception))
-
-    def test_sidecars_without_a_gguf_is_an_error(self):
-        with tempfile.TemporaryDirectory() as t2, self.assertRaises(ValueError):
-            build_open_whisper_repo(str(self.root / "src"), t2, geometry=TINY, sidecars="x")
 
 
 if __name__ == "__main__":

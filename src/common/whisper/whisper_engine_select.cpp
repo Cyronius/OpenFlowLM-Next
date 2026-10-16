@@ -9,6 +9,7 @@
 
 #ifdef OFLM_USE_OPEN_WHISPER
 #include "open_whisper/engine_adapter.hpp"
+#include "open_whisper/weight_source.hpp"
 #endif
 
 #include <algorithm>
@@ -55,19 +56,27 @@ constexpr const char* kOpenKernelsFormat = "oflm-open-whisper-kernels-v1";
 ///        as given and left for the engine's own construction to refuse).
 /// \note *how names the rule that chose it, because every rule yields a working engine and a
 ///       set chosen against intent looks right.
+/// \note Kernels belong to the model's shape, not its name: when no set sits under this
+///       model's own name, any complete set whose hf_config_check matches this model's
+///       config.json is used, so a GGUF or checkpoint install in a directory of its own
+///       finds the family's set.
 std::string find_open_kernels(const std::string& model_dir, const Whisper_Config& config, std::string* how) {
     namespace fs = std::filesystem;
-    auto ok = [&](const fs::path& d) {
+    auto marker = [](const fs::path& d, nlohmann::json* out) {
         std::ifstream f(d / "whisper_kernels.json", std::ios::binary);
         if (!f) return false;
         try {
             nlohmann::json j;
             f >> j;
-            return j.value("complete", false) && j.value("format", std::string()) == kOpenKernelsFormat;
+            if (!(j.value("complete", false) && j.value("format", std::string()) == kOpenKernelsFormat))
+                return false;
+            if (out) *out = std::move(j);
+            return true;
         } catch (const nlohmann::json::exception&) {
             return false;
         }
     };
+    auto ok = [&](const fs::path& d) { return marker(d, nullptr); };
     const std::string env = utils::getenv_oflm("OFLM_WHISPER_KERNELS_DIR");
     if (!env.empty()) {
         // An explicit location is used as given (the engine then validates it and refuses a
@@ -87,7 +96,44 @@ std::string find_open_kernels(const std::string& model_dir, const Whisper_Config
         const fs::path cand = fs::path(r) / "xclbins" / config.model_name / "open_kernels";
         if (ok(cand)) { *how = "an xclbins root"; return cand.string(); }
     }
+    nlohmann::json cfg;
+    try {
+        std::ifstream f(fs::path(model_dir) / "config.json", std::ios::binary);
+        if (!f) return {};
+        f >> cfg;
+    } catch (const nlohmann::json::exception&) {
+        return {};
+    }
+    for (const std::string& r : roots) {
+        std::error_code ec;
+        std::vector<fs::path> sets;
+        for (fs::directory_iterator it(fs::path(r) / "xclbins", ec), end; !ec && it != end; it.increment(ec))
+            sets.push_back(it->path());
+        std::sort(sets.begin(), sets.end());
+        for (const fs::path& s : sets) {
+            nlohmann::json j;
+            if (!marker(s / "open_kernels", &j)) continue;
+            const auto check = j.find("hf_config_check");
+            if (check == j.end() || !check->is_object() || check->empty()) continue;
+            bool same = true;
+            for (const auto& kv : check->items())
+                same = same && cfg.contains(kv.key()) && cfg[kv.key()].dump() == kv.value().dump();
+            if (same) {
+                *how = "xclbins/" + s.filename().string() + ", built for this config.json's geometry";
+                return (s / "open_kernels").string();
+            }
+        }
+    }
     return {};
+}
+
+/// \brief The open engine's weight files in model_dir, the one it reads first.
+std::string open_weights_note(const std::vector<ow::WeightKind>& present) {
+    std::string note = ow::weight_file_name(present.front());
+    for (size_t i = 1; i < present.size(); ++i)
+        note += std::string(i == 1 ? " (" : ", ") + ow::weight_file_name(present[i]) +
+                (i + 1 == present.size() ? " also present, not read)" : "");
+    return note;
 }
 
 std::unique_ptr<whisper_engine> make_open_engine(const std::string& model_path, const std::string& kernels_dir,
@@ -120,10 +166,11 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
     }
 
 #ifdef OFLM_USE_OPEN_WHISPER
+    const std::vector<ow::WeightKind> open_weights = ow::weights_present(model_path);
     if (want == "open") {
-        if (!has_file(model_path, "model.open.safetensors")) {
-            throw std::runtime_error("OFLM_WHISPER_ENGINE=open: " + model_path +
-                                     "/model.open.safetensors not found");
+        if (open_weights.empty()) {
+            throw std::runtime_error("OFLM_WHISPER_ENGINE=open: no open-engine weights in " + model_path +
+                                     " (model.open.safetensors, model.safetensors or model.gguf)");
         }
         std::string how;
         const std::string kdir = find_open_kernels(model_path, config, &how);
@@ -134,7 +181,8 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
                 "/open_kernels; or set OFLM_WHISPER_KERNELS_DIR; or place one at " + model_path +
                 "/open_kernels)");
         }
-        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open), kernels " << kdir << " (" << how << ")");
+        header_print("OFLM", "Whisper engine: open (OFLM_WHISPER_ENGINE=open), weights "
+                                 << open_weights_note(open_weights) << ", kernels " << kdir << " (" << how << ")");
         return make_open_engine(model_path, kdir, config);
     }
     if (!want.empty()) {
@@ -142,18 +190,18 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
                                  ": expected 'open' or 'closed' (this build has both)");
     }
 
-    // Unset: prefer open when ITS OWN container and a kernel set are both present; fall
+    // Unset: prefer open when ITS OWN weights and a kernel set are both present; fall
     // back to closed when its weights are there; otherwise refuse, naming both missing
     // paths, rather than silently choosing whichever engine happens to construct without
     // throwing (the "fails open" class this project keeps finding -- see CLAUDE.md rule 8).
     std::string how;
-    const std::string kdir = has_file(model_path, "model.open.safetensors")
-                                 ? find_open_kernels(model_path, config, &how) : std::string();
+    const std::string kdir = !open_weights.empty() ? find_open_kernels(model_path, config, &how) : std::string();
     const bool open_ready = !kdir.empty();
     const bool closed_ready = has_file(model_path, "model.q4nx");
     if (open_ready) {
-        header_print("OFLM", "Whisper engine: open (model.open.safetensors + a kernel set "
-                             "found, OFLM_WHISPER_ENGINE unset), kernels " << kdir << " (" << how << ")");
+        header_print("OFLM", "Whisper engine: open (" << open_weights_note(open_weights)
+                                 << " + a kernel set found, OFLM_WHISPER_ENGINE unset), kernels "
+                                 << kdir << " (" << how << ")");
         return make_open_engine(model_path, kdir, config);
     }
     if (closed_ready) {
@@ -162,9 +210,10 @@ std::unique_ptr<whisper_engine> make_whisper_engine(const std::string& model_pat
         return make_closed_whisper_engine(model_path, config, device, enable_preemption);
     }
     throw std::runtime_error(
-        "no usable Whisper weights in " + model_path + ": neither model.open.safetensors "
-        "(with a kernel set -- xclbins/<model>/open_kernels, <model>/open_kernels or "
-        "OFLM_WHISPER_KERNELS_DIR) nor "
+        "no usable Whisper weights in " + model_path + ": neither open-engine weights "
+        "(model.open.safetensors, model.safetensors or model.gguf, with a kernel set -- "
+        "xclbins/<model>/open_kernels, <model>/open_kernels, a set built for this config.json "
+        "under any xclbins root, or OFLM_WHISPER_KERNELS_DIR) nor "
         "model.q4nx was found");
 #else
     // HRX builds (and any build without open_whisper's sources) compile only this branch --

@@ -30,11 +30,22 @@ REM reaching this file's own code (see ..\open_qwen36\build.cmd).
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
    /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
-   weights.cpp kernels.cpp guards.cpp host_ops.cpp decoder_quant.cpp fa_attention.cpp encoder.cpp decoder.cpp cli.cpp ^
-   "..\open_npue\npu_device.cpp" "..\open_qwen36\q4nx_file.cpp" ^
+   weights.cpp weight_source.cpp kernels.cpp guards.cpp host_ops.cpp decoder_quant.cpp fa_attention.cpp encoder.cpp decoder.cpp cli.cpp ^
+   "..\open_npue\npu_device.cpp" "..\open_qwen36\q4nx_file.cpp" "..\open_qwen36\gguf_file.cpp" ^
    "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_whisper_cli.exe /Fo:out\
 if errorlevel 1 goto :clfail
+
+REM The GGUF and checkpoint readers against the converter's own output; no device needed.
+echo [open_whisper] weight_source_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS ^
+   /DDISABLE_ABI_CHECK=1 /bigobj ^
+   /I "%XRT_INCLUDE_DIR%" /I "." /I ".." /I "..\include" /I "..\open_npue" ^
+   weight_source_test.cpp weight_source.cpp guards.cpp "..\open_qwen36\q4nx_file.cpp" "..\open_qwen36\gguf_file.cpp" ^
+   /Fe:out\weight_source_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+out\weight_source_test.exe testdata
+if errorlevel 1 goto :weightsfail
 
 REM The guards: no device, no XRT, no 1.6 GB container -- guards.cpp and the
 REM safetensors reader are all it needs, which is why guards.cpp is its own
@@ -106,6 +117,10 @@ exit /b 0
 
 :guardsfail
 echo [open_whisper] guards_test FAILED
+exit /b 1
+
+:weightsfail
+echo [open_whisper] weight_source_test FAILED
 exit /b 1
 
 :quanttestfail

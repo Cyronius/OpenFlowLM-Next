@@ -100,3 +100,5 @@ bin/
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
 *.gguf
+# the open Whisper reader's test fixtures (testdata/gen_weight_fixtures.py), a few KB each
+!src/open_whisper/testdata/weights_tiny/*.gguf
