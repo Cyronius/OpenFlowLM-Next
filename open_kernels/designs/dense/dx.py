@@ -159,6 +159,19 @@ if QKVB:                                               # same: only a family tha
 NPTAB, CSE = G.PTAB_ELEMS, G.PTAB_CS_ELEM              # elements per position record; which holds cos / sin
 if NPTAB > 1:
     ATTN_FLAGS.append("-DATTN_PTAB_SPLIT=1")
+# Gemma 4's attention (recipes/gemma4.py); every other family's geometry leaves these at their defaults
+if G.PTAB_CS_OFF != 512:
+    ATTN_FLAGS.append(f"-DATTN_PTAB_CS_OFF={G.PTAB_CS_OFF}")
+if G.SCALE_ONE:
+    ATTN_FLAGS.append("-DATTN_SCALE_ONE=1")
+if G.VNORM:
+    # the v norm's extra 1/sqrt put the 512-wide core 288 B over program memory with compiler-rt's
+    # soft float; the bit-identical integer routines (scalar_fp.h) take ~2 KB of it back
+    ATTN_FLAGS += ["-DATTN_VNORM=1", "-DATTN_INTFP=1"]
+if G.ROPE_PAIR != G.ROT // 2:
+    ATTN_FLAGS.append(f"-DATTN_ROPE_PAIR={G.ROPE_PAIR}")
+SHARED = G.KV_SHARED                                   # no k / v: the window and this position's row come from another layer's cache
+assert not (SHARED and (QKVB or STOP != 99)), "dx.py: a KV-shared layer has no bias stream or debug stops"
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
@@ -228,12 +241,14 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + pz + [bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
     bz = [u8_ab] if QKVB else []                            # the bias element, when the family has one
     f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32], ATTN_FLAGS)
-    f_k = ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
-    f_v = ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
+    f_k = None if SHARED else ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
+    f_v = None if SHARED else ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
     h0_arg = [i32] if ACORES > 1 else []                       # only a split needs the head offset
     f_step = ef("attn_step", ATTN / "attn_step.cc", [u8_a, u8_a, fq, foacc, fml, pb_ty] + h0_arg, ATTN_FLAGS)
-    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", [brow, brow, fq, foacc, fml] + h0_arg, ATTN_FLAGS)
+    # a KV-shared layer's own row is already in the cache: it arrives as two fifo elements, not core scratch
+    nrow = [u8_a, u8_a] if SHARED else [brow, brow]
+    f_stepn = ef("attn_step_new", ATTN / "attn_step_new.cc", nrow + [fq, foacc, fml] + h0_arg, ATTN_FLAGS)
     f_stepb = (ef("attn_stepb", ATTN / "attn_stepb.cc", [u8_a] * (2 * RB) + [fq, foacc, fml, pb_ty] + h0_arg,
                   ATTN_FLAGS) if RB > 1 else None)
     f_fin = ef("attn_fin_ng", ATTN / "attn_fin_ng.cc", [foacc, fml, og_ty, i32], ATTN_FLAGS)
@@ -253,7 +268,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # which is what forced every og element to be KVW wide and so fixed the heads per
     # element at HPO -- and with it ACORES at NH/HPO. An og element is now the core's own
     # heads, and core 0 has a fifo like every other core.
-    of_aout = ObjectFifo(brow, name="aout", depth=2)
+    of_aout = None if SHARED else ObjectFifo(brow, name="aout", depth=2)
     of_og = [ObjectFifo(og_ty, name=f"og{c}", depth=2) for c in range(ACORES)]
     # The bias stream. Its own fifo rather than more elements on `ain`: the core needs bias
     # element i beside projection element i, and one fifo would mean either interleaving the
@@ -311,7 +326,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         xe = acq(xin, G.XN_ELEMS)
         for i in range(G.XN_ELEMS):
             f_prep(xe[i], tab, HID, i)
-        role_bands(win, yout, tab, K, "attn", G.Q_PC + 2 * G.KV_PC, HID, ms)
+        role_bands(win, yout, tab, K, "attn", G.Q_PC if SHARED else G.Q_PC + 2 * G.KV_PC, HID, ms)
         xin.release(G.XN_ELEMS)
         if stop == 1:
             return
@@ -395,6 +410,26 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             if stop >= 99:                     # group 3 only in the full layer
                 add_norm(True)                 # 3. xres = res + out2 (the xn is junk)
 
+    def _attn_kv(ain, kn, cs, tmp, kout, vout, f_k, f_v, bias_in):
+        for h in range_(G.K_AIN_ELEMS):
+            e = ain.acquire(1)
+            if bias_in is None:
+                f_k(e, kn, cs, tmp, kout, h)
+            else:
+                b = bias_in.acquire(1)
+                f_k(e, b, kn, cs, tmp, kout, h)
+                bias_in.release(1)
+            ain.release(1)
+        for h in range_(G.K_AIN_ELEMS):
+            e = ain.acquire(1)
+            if bias_in is None:
+                f_v(e, vout, h)
+            else:
+                b = bias_in.acquire(1)
+                f_v(e, b, vout, h)
+                bias_in.release(1)
+            ain.release(1)
+
     def _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
               f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, h0, bias_in=None):
         # [qn | kn] then the position record, which is NPTAB elements wide: every family
@@ -415,24 +450,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 f_q(e, b, qn, cs, qs, h)
                 bias_in.release(1)
             ain.release(1)
-        for h in range_(G.K_AIN_ELEMS):
-            e = ain.acquire(1)
-            if bias_in is None:
-                f_k(e, kn, cs, tmp, kout, h)
-            else:
-                b = bias_in.acquire(1)
-                f_k(e, b, kn, cs, tmp, kout, h)
-                bias_in.release(1)
-            ain.release(1)
-        for h in range_(G.K_AIN_ELEMS):
-            e = ain.acquire(1)
-            if bias_in is None:
-                f_v(e, vout, h)
-            else:
-                b = bias_in.acquire(1)
-                f_v(e, b, vout, h)
-                bias_in.release(1)
-            ain.release(1)
+        if not SHARED:
+            _attn_kv(ain, kn, cs, tmp, kout, vout, f_k, f_v, bias_in)
         if aout is not None:                                    # core 0 owns the cache row
             o = aout.acquire(1)
             for j in range_(KVW):
@@ -458,7 +477,12 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 e = ain.acquire(2)
                 f_step(e[0], e[1], qs, oacc, ml, pb, h0) if ACORES > 1 else f_step(e[0], e[1], qs, oacc, ml, pb)
                 ain.release(2)
-        f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
+        if SHARED:                                              # this position's row, read back from the cache
+            e = ain.acquire(2)
+            f_stepn(e[0], e[1], qs, oacc, ml, h0) if ACORES > 1 else f_stepn(e[0], e[1], qs, oacc, ml)
+            ain.release(2)
+        else:
+            f_stepn(kout, vout, qs, oacc, ml, h0) if ACORES > 1 else f_stepn(kout, vout, qs, oacc, ml)
         for hp in range_(N_OG):
             o = ogout.acquire(1)
             f_fin(oacc, ml, o, hp)
@@ -467,7 +491,22 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # One shape of worker body per combination of knobs, not one with defaulted arguments:
     # a family that does not block, or has no bias, must present IRON the exact function it
     # presented before. The bias fifo is the worker's SECOND argument, before the drains.
-    if QKVB and RB > 1:
+    if SHARED:
+        # no k / v work and no cache row to write: every core, core 0 included, takes the
+        # shape the extra cores always had, without the k / v scratch
+        def make_attn_body(c):
+            h0 = c * NHL
+            if RB > 1:
+                def body(ain, ogout, qn, kn, cs, qs, oacc, ml, pb, f_meta, f_q, f_init, f_step, f_stepn, f_fin, f_stepb):
+                    _attn(ain, None, ogout, qn, kn, cs, qs, None, None, None, oacc, ml, pb,
+                          f_meta, f_q, None, None, f_init, f_step, f_stepn, f_fin, f_stepb, h0)
+            else:
+                def body(ain, ogout, qn, kn, cs, qs, oacc, ml, pb, f_meta, f_q, f_init, f_step, f_stepn, f_fin):
+                    _attn(ain, None, ogout, qn, kn, cs, qs, None, None, None, oacc, ml, pb,
+                          f_meta, f_q, None, None, f_init, f_step, f_stepn, f_fin, None, h0)
+            return body
+        attn_body = make_attn_body(0)
+    elif QKVB and RB > 1:
         def attn_body(ain, bias_in, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb, f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb):
             _attn(ain, aout, ogout, qn, kn, cs, qs, tmp, kout, vout, oacc, ml, pb,
                   f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin, f_stepb, 0, bias_in)
@@ -525,14 +564,25 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
                 Buffer(brow, name=f"vout{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
                 Buffer(pb_ty, name=f"pb{s}")]
 
-    afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
-    bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
-    workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
-                          tile=Tile(2, 3), stack_size=0x1800))
-    # The rest of the attention cores: same broadcast stream in, their own og out.
-    for c in range(1, ACORES):
-        workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + bcons() + [of_og[c].prod()] + abufs(c) + afns,
-                              tile=Tile(2 + c, 3), stack_size=0x1800))
+    if SHARED:
+        def sbufs(c):
+            s = "" if c == 0 else str(c)
+            return [Buffer(bhd, name=f"qn{s}"), Buffer(bhd, name=f"kn{s}"), Buffer(fcs, name=f"cs{s}"),
+                    Buffer(fq, name=f"qs{s}"), Buffer(foacc, name=f"oacc{s}"), Buffer(fml, name=f"ml{s}"),
+                    Buffer(pb_ty, name=f"pb{s}")]
+        sfns = [f_meta, f_q, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+        for c in range(ACORES):
+            workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons(), of_og[c].prod()] + sbufs(c) + sfns,
+                                  tile=Tile(2 + c, 3), stack_size=0x1800))
+    else:
+        afns = [f_meta, f_q, f_k, f_v, f_init, f_step, f_stepn, f_fin] + ([f_stepb] if RB > 1 else [])
+        bcons = (lambda: [of_abias.cons()]) if QKVB else (lambda: [])
+        workers.append(Worker(attn_body, fn_args=[of_ain.cons()] + bcons() + [of_aout.prod(), of_og[0].prod()] + abufs(0) + afns,
+                              tile=Tile(2, 3), stack_size=0x1800))
+        # The rest of the attention cores: same broadcast stream in, their own og out.
+        for c in range(1, ACORES):
+            workers.append(Worker(make_attn_body(c), fn_args=[of_ain.cons()] + bcons() + [of_og[c].prod()] + abufs(c) + afns,
+                                  tile=Tile(2 + c, 3), stack_size=0x1800))
 
     BB_H, BB_Q, BB_F = (role_band_bytes("attn", HID), role_band_bytes("attn", QW),
                         role_band_bytes("ffn", FF))
@@ -549,11 +599,13 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         pw, py = Pipeline(3), Pipeline(3)
         for c in range(N_CORES):
             pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_Q + c * G.Q_PC * BB_H, G.Q_PC * BB_H))
-            pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_K + c * G.KV_PC * BB_H, G.KV_PC * BB_H))
-            pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_V + c * G.KV_PC * BB_H, G.KV_PC * BB_H))
+            if not SHARED:
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_K + c * G.KV_PC * BB_H, G.KV_PC * BB_H))
+                pw.fill(w_prods[c], a_pool, bt(L.POOL_BYTES, L.POOL_V + c * G.KV_PC * BB_H, G.KV_PC * BB_H))
             py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_Q + c * G.Q_PC * YB, G.Q_PC * YB))
-            py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_KVN + c * G.KV_PC * YB, G.KV_PC * YB))
-            py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4 + c * G.KV_PC * YB, G.KV_PC * YB))
+            if not SHARED:
+                py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_KVN + c * G.KV_PC * YB, G.KV_PC * YB))
+                py.drain(y_conss[c], a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4 + c * G.KV_PC * YB, G.KV_PC * YB))
         tg_ln.finish()                                            # xn is in DDR
         tg_x = TaskGroup()
         x_prod.fill(a_act, tap=bt(L.AD_BYTES, L.AD_XN, G.XN_ELEMS * ELEM), wait=True, group=tg_x)
@@ -563,7 +615,8 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         # return left every attention worker blocked mid-body).
         # 3. attention: meta + record now, q / k / v after the GEMVs, the window, the new row out
         pa_out, pa_in = Pipeline(3), Pipeline(3)
-        pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))          # [k' | v'] -> row pos (attnpos)
+        if not SHARED:
+            pa_out.drain(aout_c, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))      # [k' | v'] -> row pos (attnpos)
 
         for c in range(ACORES):                                             # heads NHL*c ..
             pa_out.drain(og_cs[c], a_act, bt(L.AD_BYTES, L.AD_OG + c * NHL * G.HD * 2, NHL * G.HD * 2))
@@ -571,13 +624,18 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         pa_in.fill(ain_p, a_ptab, bt(L.PTAB_BYTES, L.PTAB_ROW, L.PTAB_ROW))    # the position record (attnpos)
         py.finish(*y_conss)                                       # q, k, v are in DDR
         pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_Q, QW * 4))
-        pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN, KVW * 4))
-        pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4, KVW * 4))
+        if not SHARED:
+            pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN, KVW * 4))
+            pa_in.fill(ain_p, a_act, bt(L.AD_BYTES, L.AD_KVN + KVW * 4, KVW * 4))
         if abias_p is not None:                                   # one bias element per q / k / v element
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_QB, QW * 2))
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_KB, KVW * 2))
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_VB, KVW * 2))
         pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
+        if SHARED:
+            # row pos of the source layer's cache, which that layer wrote earlier this token;
+            # at offset KV_ROW it is the patch the plain design's row drain gets (attnpos)
+            pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))
         # 4. o projection against og
         if stop >= 2:
             # at stop=1 the main cores return after q/k/v: nobody would consume
@@ -666,7 +724,11 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         pa_in.finish()
         tg_x.finish()
 
-    if QKVB:
+    if SHARED:
+        def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, og_cs):
+            _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
+                      ain_p, None, og_cs, None)
+    elif QKVB:
         def sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss, ain_p, abias_p, aout_c, og_cs):
             _sequence(a_pool, c_xres, a_consts, a_kv, a_act, a_ptab, lni, lno, w_prods, x_prod, y_conss,
                       ain_p, aout_c, og_cs, abias_p)
@@ -678,12 +740,13 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # Tile(3, 0) is the one shim column with a free MM2S channel at every core count: it
     # carries at most w3, while 0, 1 and 2 already pair theirs with lni, x and ain.
     bprod = [of_abias.prod(tile=Tile(3, 0))] if QKVB else []
+    aprod = [] if SHARED else [of_aout.cons(tile=Tile(1, 0))]
     rt = Runtime(sequence, [pool_ty, xres_ty, consts_ty, kv_ty, act_ty, ptab_ty,
                             of_lni.prod(tile=Tile(0, 0)), of_lno.cons(tile=Tile(0, 0)),
                             [of_w[c].prod(tile=Tile(c, 0)) for c in range(N_CORES)],
                             of_x.prod(tile=Tile(1, 0)),
                             [of_y[c].cons(tile=Tile(c, 0)) for c in range(N_CORES)],
-                            of_ain.prod(tile=Tile(2, 0))] + bprod + [of_aout.cons(tile=Tile(1, 0)),
+                            of_ain.prod(tile=Tile(2, 0))] + bprod + aprod + [
                             [of_og[c].cons(tile=Tile(2 + c, 0)) for c in range(ACORES)]])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 

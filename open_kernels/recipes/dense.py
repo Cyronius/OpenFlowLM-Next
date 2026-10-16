@@ -44,7 +44,13 @@ from .catalogue import LIMITS, OpRangeError, check_buffer_args, require
 from .qwen36moe import ATTN_LMAX  # Path A: the widest attention GEMM stream (window chunk)
 from .qwen36moe import (BAND_ROWS, CHUNK, ELEM, GEMM_T, MB, _op_index, band_bytes, chunk_bytes, q4_bytes,
                         proj_op, q4_chunks, mixed_check, quant_check, require_gemv, role_bytes, roundup, tab_bytes)
-from .spec import DENSE, DENSE_LOCAL, ModelSpec
+from .spec import DENSE, DENSE_LOCAL, DENSE_LOCAL_SHARED, DENSE_SHARED, ModelSpec
+
+
+def _kv_shared(spec: ModelSpec) -> bool:
+    """A Gemma 4 layer kind (recipes/gemma4.py hands dense one kind at a time) that has no K / V of
+    its own and attends over an earlier layer's cache."""
+    return bool(spec.layer_types) and set(spec.layer_types) <= {DENSE_SHARED, DENSE_LOCAL_SHARED}
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,12 @@ class DenseGeometry:
     MS_U: int; MS_G: int; MS_FLOATS: int                            # the up / gate band scratch
     VEXP: int; MLS: int                                             # batched softmax exponentials; ml stride
     ACORES: int; NHL: int; RB: int                                  # attention cores; heads each owns; rows per call
+    # Gemma 4 only (recipes/gemma4.py); at these defaults dx.py adds no flag and builds what it built
+    SCALE_ONE: bool = False                                         # unscaled scores (attn.h ATTN_SCALE_ONE)
+    VNORM: bool = False                                             # weightless v RMSNorm (ATTN_VNORM)
+    ROPE_PAIR: int = 0                                              # rotary pair distance; 0 = ROT / 2
+    PTAB_CS_OFF: int = 512                                          # where cos / sin sit in the position record
+    KV_SHARED: bool = False                                         # no k / v: attend over another layer's cache
 
 
 @dataclass(frozen=True)
@@ -113,18 +125,31 @@ BLOCK_ATTN_QKNORM_ROPE = ("qwen3",)
 # that - attention_bias covers its o_proj, and all three expert projections carry one - so
 # adding it here is not enough on its own; it needs a fourth consts slot (gptoss-bringup.md).
 QKV_BIAS_FAMILIES = ("qwen2",)
-DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2")
+DENSE_FAMILIES = ("qwen3", "llama3", "gemma3", "hunyuan", "granite", "phi3", "qwen2", "k2", "gemma4")
 
 
 def qkv_bias(spec: ModelSpec) -> bool:
     return spec.family in QKV_BIAS_FAMILIES
 
 
+def _ptab_cs_off(spec: ModelSpec) -> int:
+    """Where [cos | sin] start in the position record: 512, unless that would straddle two
+    attention elements -- then the next element boundary (Gemma 4's sliding layers: 1024 B
+    elements and 1024 B of cos / sin). Only gemma4 moves it; everyone else is checked below."""
+    e_a = spec.num_kv_heads * spec.head_dim * 2
+    if spec.family == "gemma4" and 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a:
+        return roundup(512, e_a)
+    return 512
+
+
 def _ptab_row(spec: ModelSpec) -> int:
     """One position record: [pos i32 @0][nf i32 @4][cos f32[ROT/2] @512][sin @512 + 2*ROT].
     It is streamed to the attention core through the same fifo as q / k / v, so it is at
     least one element wide -- and, where the element is narrower, a whole number of them."""
-    return max(1024, spec.num_kv_heads * spec.head_dim * 2)
+    e_a = spec.num_kv_heads * spec.head_dim * 2
+    if spec.family == "gemma4":
+        return max(1024, e_a, roundup(_ptab_cs_off(spec) + 4 * spec.rotary_dim, e_a))
+    return max(1024, e_a)
 
 
 def _ptab_check(spec: ModelSpec, e_a: int) -> None:
@@ -140,9 +165,10 @@ def _ptab_check(spec: ModelSpec, e_a: int) -> None:
     if row // e_a > 2:
         raise OpRangeError(f"dense: a {row}-byte position record spans {row // e_a} "
                            f"{e_a}-byte elements; attn.h handles one or two")
-    if 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a:
+    cs = _ptab_cs_off(spec)
+    if cs // e_a != (cs + 4 * spec.rotary_dim - 1) // e_a:
         raise OpRangeError(f"dense: cos / sin straddle two {e_a}-byte attention elements "
-                           f"(record offsets 512 to {512 + 4 * spec.rotary_dim})")
+                           f"(record offsets {cs} to {cs + 4 * spec.rotary_dim})")
 
 
 def lm_rows(spec: ModelSpec) -> int:
@@ -210,9 +236,13 @@ def _check(spec: ModelSpec) -> None:
     if spec.num_kv_heads % 2:
         raise OpRangeError("qwen3: an odd kv-head count does not split into ain elements")
     require("ln", width=spec.hidden, groups=spec.norm_groups)
-    require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
-            rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
-            qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
+    if spec.family == "gemma4":
+        require("attn_gemma4", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
+                rotary_dim=spec.rotary_dim, kv_shared=_kv_shared(spec))
+    else:
+        require("attn", head_dim=spec.head_dim, num_heads=spec.num_heads, num_kv_heads=spec.num_kv_heads,
+                rotary_dim=spec.rotary_dim, rope_theta=spec.rope_theta, qk_norm=spec.qk_norm, attn_gate=spec.attn_gate,
+                qk_norm_post_rope=spec.qk_norm and spec.family in QKNORM_POST_ROPE, qkv_bias=qkv_bias(spec))
     pc = per_call(spec)
     require_gemv(spec, "attn", spec.hidden, spec.attn_q_width // n, pc)
     require_gemv(spec, "attn", spec.attn_q_width, spec.hidden // n, pc)
@@ -263,11 +293,12 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
     # it; every other family's artifacts stay byte-identical until it has been.
     A = attn_knobs(spec, nh, hpo)
     vexp, acores, nhl, mls, rb = A.VEXP, A.ACORES, A.NHL, A.MLS, A.RB
+    g4 = spec.family == "gemma4"
     return DenseGeometry(
         N_CORES=n, HID=hid, FF=ff, NH=nh, KVH=kvh, HD=hd, ROT=spec.rotary_dim, GATE=spec.attn_gate,
         QKNORM=spec.qk_norm, QKNORM_POST=spec.qk_norm and spec.family in QKNORM_POST_ROPE,
         QKVB=qkv_bias(spec),
-        PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=512 // e_a,
+        PTAB_ELEMS=_ptab_row(spec) // e_a, PTAB_CS_ELEM=_ptab_cs_off(spec) // e_a,
         EPS=spec.norm_eps, ACT=spec.activation, SANDWICH=spec.sandwich_norms,
         WINDOW=spec.sliding_window if spec.has_local else 0, PER_CALL=pc, CALL_BYTES=pc * ch,
         QW=qw, KVW=kvw,
@@ -281,6 +312,8 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         TAB_BYTES=tab_bytes(wide), KWIDE=wide,
         MS_U=0, MS_G=BAND_ROWS, MS_FLOATS=2 * BAND_ROWS,
         VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb,
+        SCALE_ONE=g4, VNORM=g4, ROPE_PAIR=hd // 2 if g4 else spec.rotary_dim // 2,
+        PTAB_CS_OFF=_ptab_cs_off(spec), KV_SHARED=_kv_shared(spec),
     )
 
 
@@ -289,7 +322,7 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     hid, ff = spec.hidden, spec.intermediate
     G = geometry(spec)
     eln, e_a = hid * 2, G.KVW * 2
-    if 2 * G.HD * 2 > e_a or 512 + 4 * spec.rotary_dim > _ptab_row(spec):
+    if 2 * G.HD * 2 > e_a or _ptab_cs_off(spec) + 4 * spec.rotary_dim > _ptab_row(spec):
         raise OpRangeError("dense: qn | kn or the RoPE record do not fit the attention element")
     _ptab_check(spec, e_a)
     # consts
@@ -317,8 +350,9 @@ def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
     # pool
     p: dict[str, int] = {}
     off = 0
-    for name, role, rows, cols in (("q", "attn", G.QW, hid), ("k", "attn", G.KVW, hid),
-                                   ("v", "attn", G.KVW, hid), ("o", "attn", hid, G.QW),
+    kvp = 0 if G.KV_SHARED else G.KVW        # a KV-shared layer has no k / v projection
+    for name, role, rows, cols in (("q", "attn", G.QW, hid), ("k", "attn", kvp, hid),
+                                   ("v", "attn", kvp, hid), ("o", "attn", hid, G.QW),
                                    ("up", "ffn", ff, hid), ("gate", "ffn", ff, hid),
                                    ("down", "ffn", hid, ff)):
         p[name] = off
@@ -350,11 +384,17 @@ def pack_plan(spec: ModelSpec) -> dict:
     L, G = layout(spec), geometry(spec)
     hid, ff = spec.hidden, spec.intermediate
     pre = "model.layers.{l}."
+    kv = [] if G.KV_SHARED else [         # a KV-shared layer has no k / v projection and no k norm
+        proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
+        proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
+    ]
+    kn = [] if G.KV_SHARED else [
+        {"op": "put", "tensor": pre + "self_attn.k_norm.weight", "dst": L.CD_META + G.HD * 2, "cap": G.HD * 2},
+    ]
     one = {
             "pool": [
                 proj_op(spec, "attn", pre + "self_attn.q_proj.weight", L.POOL_Q, G.QW, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.k_proj.weight", L.POOL_K, G.KVW, hid, hid),
-                proj_op(spec, "attn", pre + "self_attn.v_proj.weight", L.POOL_V, G.KVW, hid, hid),
+            ] + kv + [
                 proj_op(spec, "attn", pre + "self_attn.o_proj.weight", L.POOL_O, hid, G.QW, G.QW),
                 proj_op(spec, "ffn", pre + "mlp.up_proj.weight", L.POOL_UP, ff, hid, hid),
                 proj_op(spec, "ffn", pre + "mlp.gate_proj.weight", L.POOL_GATE, ff, hid, hid),
@@ -365,8 +405,7 @@ def pack_plan(spec: ModelSpec) -> dict:
                 {"op": "put", "tensor": pre + "post_attention_layernorm.weight", "dst": L.CD_POSTLN, "cap": L.ELN},
             ] + ([
                 {"op": "put", "tensor": pre + "self_attn.q_norm.weight", "dst": L.CD_META, "cap": G.HD * 2},
-                {"op": "put", "tensor": pre + "self_attn.k_norm.weight", "dst": L.CD_META + G.HD * 2, "cap": G.HD * 2},
-            ] if spec.qk_norm else []) + ([
+            ] + kn if spec.qk_norm else []) + ([
                 {"op": "put", "tensor": pre + "self_attn.q_proj.bias", "dst": L.CD_QB, "cap": G.QW * 2},
                 {"op": "put", "tensor": pre + "self_attn.k_proj.bias", "dst": L.CD_KB, "cap": G.KVW * 2},
                 {"op": "put", "tensor": pre + "self_attn.v_proj.bias", "dst": L.CD_VB, "cap": G.KVW * 2},

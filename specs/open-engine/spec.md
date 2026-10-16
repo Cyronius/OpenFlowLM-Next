@@ -1074,6 +1074,85 @@ engine -- the open one has no vision path.
 
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
+### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B (text) on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`)
+**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`) and manual (the hardware passes below)
+
+Google's Gemma 4 E-series GGUF (`gemma-4-E4B_q4_0-it.gguf`, QAT Q4_0) shall run as text on the open
+kernels through the dense recipe, the model loaded straight from the GGUF. Four layer kinds --
+sliding or global, each with its own KV cache or sharing one -- are four `dx` builds:
+
+- **Global heads are 512 wide** and rotate only pairs `(i, i + 256)` for `i < 64`, at
+  `theta^(-2i/512)` (transformers' `proportional` RoPE; llama.cpp writes it as `rope_freqs`, 64 ones
+  then 1e30). attn.h's `ATTN_ROPE_PAIR` puts a pair's partner HD/2 away; the position table carries
+  64 frequencies. Sliding heads are 256 wide and rotate fully at theta 1e4.
+- **Scores are unscaled** (`ATTN_SCALE_ONE`), and each v head is RMS-normalised with no weight
+  before it is cached (`ATTN_VNORM`). q and k keep their norms with weights, used as stored (the
+  GGUF holds `w`, not `1 + w`).
+- **KV sharing:** the last `shared_kv_layers` layers have no k / v projection. Each attends over
+  the cache of the last layer of its own kind before the first shared one (`kv_source`; E4B: 22
+  for sliding, 23 for global), the current position's row included, read back from that cache;
+  the engine aliases the source layer's KV buffer.
+- **Per-layer inputs, on the host:** before the layers, `ple = (rms(model_proj(e) / sqrt(hidden))
+  * model_norm + per_layer_token_embd[id] * 16) / sqrt(2)`; after each layer's dispatch,
+  `h += rms(proj(gelu_tanh(gate(h)) * ple_l)) * post_norm`, then `h *= layer_output_scale`.
+- **The logits are soft-capped** at 30 on the host after the tied head (token_embd, Q6_K
+  re-quantized to q4_1).
+- The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
+- Text only: the adapter refuses images and audio on the open engine and names
+  `OFLM_GEMMA4_ENGINE=closed`.
+
+**Acceptance criteria (unit):**
+- The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
+  layers, hidden 2560, 8 heads over 2 kv, head dims 256 / 512, global rotation 128, ff 10240,
+  per-layer input 256, softcap 30, layers 24-41 KV-shared, sources 22 / 23.
+- E2B derives ff 12288 in its 20 shared layers and one kv head (its kernels wait on the one-kv-head
+  attention point).
+- Every tensor the plan and the host stages name is in the real E4B file's table; the shared kinds
+  name no `attn_k` / `attn_v` / `attn_k_norm`, and the file has none for layers 24-41.
+- The four kinds' geometry: head dim, rotation, pair distance, cos / sin offset (1024 on the sliding
+  kinds, whose 1024-byte fifo element cannot hold 512 + 1024 bytes), record elements, no k / v pool
+  on a shared kind. Every other family keeps the attention defaults, so its build line does not
+  change.
+- `attention_k_eq_v` (the 12B), the MoE block and bidirectional attention are refused by name.
+
+**Verification (manual):**
+1. Replica against transformers: `python open_kernels/model/gemma4_transformers_check.py <model.gguf>`
+   builds a four-layer Gemma4ForCausalLM (real layers 0, 5, 24, 29: both kinds, own and shared caches)
+   with the GGUF's dequantized weights and compares every layer, the final norm and the soft-capped
+   logits with `replica_gemma4.py` in fp64. Pass: worst relative difference under 1e-4.
+2. Probe: `export_qwen36_kernels.py --spec recipes/specs/gemma4-e4b.json --only dx_local,dx_global`
+   (and the two `_shared` sets) under `OPEN_KERNELS_UNVALIDATED=1` links, and `utilities/core_sizes.py`
+   reports every core within its 16384 B of program memory.
+3. Slice: `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --layers 6 --ids <prompt>
+   --dump-logits` against `replica_gemma4.py --layers 6` on the same ids, then the full model.
+4. `oflm-add` install, `oflm serve`, `oflm-test --llm --model <tag>`, `oflm-test --tools --model <tag>`.
+
+**Result 2026-10-16 (replica):** the four-layer slice (layers 0, 5, 24, 29; 13 tokens) agrees with
+fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
+same argmax.
+
+**Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
+soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split
+record and the full rotation); with `ATTN_INTFP` (bit-identical integer routines) and one shared RMS helper
+for the q / k / v norms, the fullest attention core is 14,496 B (global) and 14,576 B (sliding) of 16,384.
+The shared kinds have no k / v work and sit near 13.2 KB. MLIR of every shipped dense spec's dx / dx_attn
+build is unchanged and every (kernel source, flags) pair preprocesses identically (`utilities/mlir_equiv.py`).
+
+### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
+**Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
+**Verification:** test (`src/open_qwen36/gguf_pack_test.cpp`, GGUF-PACK)
+
+`std_perm_gguf` into a 5120-byte pool chunk (the q4nx layout) shall write the GGUF block's fp16
+scale and min narrowed to bf16 by round-to-nearest-even -- the bits the f32-scale kernel's own
+narrowing produces -- and the codes byte for byte as the 6144-byte chunk holds them; a Q4_0 block's
+min is `-8 d`. A block re-quantized from Q8_0 / Q4_K / Q6_K takes `requant_q4_1_chunks`' law (min
+toward -inf, scale toward +inf). So a new GGUF family needs no `*_f32` kernel twin, and keeps f32
+out of device memory.
+
+**Acceptance criteria:** for a Q4_1 and a Q4_0 tensor, the 5120-byte pool's code planes equal the
+6144-byte pool's byte for byte and every bf16 scale and min is the RNE narrowing of the f32 one.
+
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)
 **Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B layout are unit-tested in `tests/test_hunyuan.py`

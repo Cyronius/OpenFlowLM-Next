@@ -80,7 +80,14 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
     for lt, d in plan.pop("layer_types").items():
         m["layer_types"][lt]["pack"] = d
     m["pack"] = plan          # pool_bytes, chunk_bytes, lm_head {pool_bytes, ops}, embed, norm
-    if gguf:
+    if hasattr(F, "host_stages"):
+        m.update(F.host_stages(spec))       # Gemma 4: kv_source, ple, layer_scalar, logit_softcap
+    if getattr(F, "GGUF_ONLY", False):
+        # a family with no other weight file: its one view, already GGUF-direct, is also the
+        # view the engine swaps in for model.gguf
+        import copy
+        m["gguf"] = copy.deepcopy(m)
+    elif gguf:
         # A COMPLETE manifest for the f32-scale twin (GGUF-direct weight files): the
         # engine parses it with the same code and swaps the whole view at load. The
         # quant guard keeps the nested manifest from carrying its own gguf section.

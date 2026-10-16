@@ -191,6 +191,13 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "(128, 16, 8) -- a GQA group of 2 at head dim 128 -- through silently, "
                   "because each value came from a different model. A new tuple needs a family "
                   "procedure run at exactly that configuration"),
+    # Gemma 4's attention is attn.h with ATTN_SCALE_ONE, ATTN_VNORM and ATTN_ROPE_PAIR = HD/2 (q/k norm, no
+    # gate, no bias), and a KV-shared kind is dx.py without its k / v work -- a different kernel from every
+    # `attn` point above even where the head geometry matches, so it is validated on its own.
+    Template("attn_gemma4", "designs/attn/attn.h",
+             combos=(combination(
+                 keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim", "kv_shared")),),
+             note="OPEN-FAMILY-GEMMA4's procedure: the replica slice through these kinds"),
     Template("deltanet", "designs/layer_x/dnx.h",
              {"heads": values(16, 32, 48), "dim": values(128), "key_heads": values(16), "conv_kernel": values(4)},
              note="Qwen3-Next / 3.5 / 3.6 families only; heads/key_heads is the value heads per "
