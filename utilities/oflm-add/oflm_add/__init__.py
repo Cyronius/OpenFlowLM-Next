@@ -72,7 +72,7 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan", "gemma4e"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -91,7 +91,8 @@ NPU_EMBED_FILES = [
 # The quant must run to the end of the stem: 'Q4_0_4_4' is a different
 # tensor layout (ik_llama matmul shuffles), not Q4_0, and matching only a
 # prefix once installed exactly that as Q4_0 pools (silent garbage).
-GGUF_QUANT_RE = re.compile(r"[.\-_ ](I?Q[0-9](?:_[A-Za-z0-9]+)*)\.gguf$", re.IGNORECASE)
+# Google names its files <model>_<quant>-it.gguf (gemma-4-E4B_q4_0-it.gguf), so an "-it" may follow.
+GGUF_QUANT_RE = re.compile(r"[.\-_ ](I?Q[0-9](?:_[A-Za-z0-9]+)*?)(?:-it)?\.gguf$", re.IGNORECASE)
 
 def gguf_quant_suffix(name):
     """The raw trailing quant-ish token of a GGUF file name, e.g.
@@ -245,6 +246,7 @@ GGUF_ARCH_FAMILIES = {
     "qwen2": "qwen2",
     "llama": "llama3",
     "gemma3": "gemma3",
+    "gemma4": "gemma4e",
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
@@ -259,6 +261,7 @@ CONFIG_MODEL_FAMILIES = {
     "qwen2": "qwen2",
     "llama": "llama3",
     "gemma3": "gemma3",
+    "gemma4": "gemma4e",
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
@@ -1144,6 +1147,12 @@ def build_entry(base_entry, dir_name, files, size):
     if size:
         entry["size"] = size
     entry["vlm"] = any(f.startswith("vision") for f in files)
+    if "model.gguf" in files and entry.get("details", {}).get("family") != "whisper-v3":
+        # a GGUF install carries the language model only (Gemma 4's towers stay closed): no
+        # image or audio input, and no label that says otherwise
+        entry["vlm"] = entry["asr"] = False
+        if isinstance(entry.get("label"), list):
+            entry["label"] = [x for x in entry["label"] if x not in ("vision", "audio", "chat-transcription")]
     return entry
 
 
@@ -1673,11 +1682,14 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
-    # The output projection is routinely a coarser quant than the body
-    # (Q8_0 over Q4_*); anything else must be the claimed family.
+    # The embeddings and the output projection are routinely a coarser quant than the body
+    # (Q8_0 or Q6_K over Q4_*: Google's Gemma 4 QAT files) and the host or the head's
+    # re-quantizer reads them; every other tensor must be the claimed family.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
+    coarse_ok = ("token_embd.weight", "output.weight", "per_layer_token_embd.weight")
+    others = {GGML_TYPE_NAMES[t] for n, t, _ in tensors
+              if n not in coarse_ok and GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")} - {claimed_family, "Q8_0"}
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
                        f"{claimed_family}; refusing rather than packing the wrong layout")
@@ -2200,6 +2212,7 @@ def main():
     entry.setdefault("details", {})["family"] = family
     if gguf_mode:
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
+        entry["details"]["quantization_level"] = gguf_quant_of(gguf_name)   # the file's, not the official entry's
         entry.setdefault("flm_min_version", "0.9.45")
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official

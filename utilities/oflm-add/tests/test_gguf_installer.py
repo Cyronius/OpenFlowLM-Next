@@ -535,3 +535,41 @@ def test_extract_tokenizer_refuses_mergeless_spm(tmp_path):
         assert "no merges" in str(ex)
     else:
         raise AssertionError("mergeless vocab must raise")
+
+
+# Traces: OPEN-FAMILY-GEMMA4 (canonical spec: specs/open-engine/spec.md)
+def test_google_names_its_gguf_with_an_it_suffix():
+    """Google ships gemma-4-E4B_q4_0-it.gguf beside the vision projector: the quant sits before "-it"."""
+    chosen, refused = oflm_add.choose_gguf_file(["gemma-4-E4B_q4_0-it.gguf", "gemma-4-E4B-it-mmproj.gguf"])
+    assert chosen == "gemma-4-E4B_q4_0-it.gguf"
+    assert oflm_add.gguf_quant_of(chosen) == "Q4_0"
+    assert "gemma-4-E4B-it-mmproj.gguf" in refused
+    assert oflm_add.gguf_quant_of("Model-Q4_0_4_4-it.gguf") is None     # the Q4_0_4_4 trap still refuses
+
+
+def test_verify_choice_lets_the_embeddings_be_coarser(tmp_path):
+    """Google's QAT file keeps its two embedding tables at Q6_K over Q4_0 layers; a layer tensor may not."""
+    ok_file = tmp_path / "ok.gguf"
+    ok_file.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 2, [32, 32]),
+                                                  ("token_embd.weight", 14, [256, 4]),
+                                                  ("per_layer_token_embd.weight", 14, [256, 4])]))
+    ok, note = oflm_add.verify_gguf_choice(str(ok_file), "ok.gguf", "Q4_0")
+    assert ok, note
+    bad_file = tmp_path / "bad.gguf"
+    bad_file.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 14, [256, 4])]))
+    ok, note = oflm_add.verify_gguf_choice(str(bad_file), "bad.gguf", "Q4_0")
+    assert not ok and "claims Q4_0" in note
+
+
+def test_a_gguf_install_is_registered_text_only():
+    """The official gemma4-it entry advertises images and audio; a GGUF install carries the text model only."""
+    base = {"name": "Gemma4-E4B-IT-NPU2", "vlm": True, "asr": True,
+            "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+            "details": {"family": "gemma4e"}}
+    e = oflm_add.build_entry(base, "Gemma4-E4B-it-GGUF",
+                             ["config.json", "model.gguf", "tokenizer.json", "tokenizer_config.json"], 4_000_000_000)
+    assert e["vlm"] is False and e["asr"] is False
+    assert e["label"] == ["reasoning", "tool-calling"]
+    assert base["vlm"] is True and "vision" in base["label"]                  # the curated entry is untouched
+    q = oflm_add.build_entry(base, "Gemma4-E4B-IT-NPU2", ["config.json", "model.q4nx"], 4_000_000_000)
+    assert q["asr"] is True and "audio" in q["label"]                         # a q4nx install keeps what it had

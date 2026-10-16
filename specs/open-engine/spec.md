@@ -1139,6 +1139,13 @@ for the q / k / v norms, the fullest attention core is 14,496 B (global) and 14,
 The shared kinds have no k / v work and sit near 13.2 KB. MLIR of every shipped dense spec's dx / dx_attn
 build is unchanged and every (kernel source, flags) pair preprocesses identically (`utilities/mlir_equiv.py`).
 
+**Result 2026-10-16 (NPU, E4B, `open_qwen36_cli`, one 21-token chat prompt):** against the replica with
+its head read through the engine's q4_1 re-quantization of the Q6_K `token_embd`: logits corr 0.999998
+after 6 layers, 0.999995 after 30 (both shared kinds), 0.999996 for all 42, same top 5 in order each time;
+the greedy answer is "The capital of France is Paris." then `<turn|>`. Against the exact Q6_K head the
+6-layer corr is 0.997: that gap is the head's re-quantization (the weights rule's Q6_K -> q4_1), not the
+layers.
+
 ### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
 **Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
 **Verification:** test (`src/open_qwen36/gguf_pack_test.cpp`, GGUF-PACK)
