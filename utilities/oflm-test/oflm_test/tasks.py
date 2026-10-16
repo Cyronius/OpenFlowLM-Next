@@ -2057,6 +2057,9 @@ class TranscriptionTask(BaseTestTask):
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
         super().__init__(base_url, backend_os, model_filter=model_filter)
         self.csv_filename = self.get_csv_filename("transcription")
+        # The handler ignores `model`; naming the tag under test keeps the record honest.
+        asr = [m for m in (model_filter or []) if m.startswith("whisper")]
+        self.model_tag = asr[0] if asr else self.MODEL_TAG
 
     def _post_multipart(self, fields: dict, files: dict, timeout: int = 600):
         """One raw multipart POST; returns (status, parsed_json_or_None, raw_text)."""
@@ -2086,7 +2089,7 @@ class TranscriptionTask(BaseTestTask):
 
     def _probe_transcribe(self):
         content = self.CLIP.read_bytes()
-        status, body, text = self._post_multipart({"model": self.MODEL_TAG},
+        status, body, text = self._post_multipart({"model": self.model_tag},
                                                   {"file": (self.CLIP.name, content)})
         if status != 200:
             return ("FAIL", f"HTTP {status}: {text[:200]}"), status, text[:200]
@@ -2099,7 +2102,7 @@ class TranscriptionTask(BaseTestTask):
         return ("PASS", f"{len(said)} characters"), status, said[:200]
 
     def _probe_no_file(self):
-        status, body, text = self._post_multipart({"model": self.MODEL_TAG}, {})
+        status, body, text = self._post_multipart({"model": self.model_tag}, {})
         if status < 400:
             return ("FAIL", f"answered HTTP {status} to a request with no file: {text[:160]}"), status, text[:160]
         code, _type, message = self._error_fields(body)
@@ -2116,7 +2119,7 @@ class TranscriptionTask(BaseTestTask):
 
     def _probe_names_model(self):
         content = self.CLIP.read_bytes()
-        status, body, text = self._post_multipart({"model": self.MODEL_TAG},
+        status, body, text = self._post_multipart({"model": self.model_tag},
                                                   {"file": (self.CLIP.name, content)})
         named = (body or {}).get("model")
         if status != 200:
@@ -2140,14 +2143,14 @@ class TranscriptionTask(BaseTestTask):
                     ("T3 Answers as itself", self.CLIP.name, self._probe_names_model)):
                 try:
                     verdict, status, note = fn()
-                    self.record(verdict, f"{self.MODEL_TAG} / {check}")
-                    writer.writerow([self.MODEL_TAG, check, probe_name, status, note,
+                    self.record(verdict, f"{self.model_tag} / {check}")
+                    writer.writerow([self.model_tag, check, probe_name, status, note,
                                      f"{verdict[0]}: {verdict[1]}"])
                     print(f"  {check} [{probe_name}]: {verdict[0]} ({verdict[1]})")
                 except Exception as e:
                     print(f"  {check} [{probe_name}]: ERROR ({e})")
-                    self.record(f"ERROR: {e}", f"{self.MODEL_TAG} / {check}")
-                    writer.writerow([self.MODEL_TAG, check, probe_name, "N/A", str(e), f"ERROR: {e}"])
+                    self.record(f"ERROR: {e}", f"{self.model_tag} / {check}")
+                    writer.writerow([self.model_tag, check, probe_name, "N/A", str(e), f"ERROR: {e}"])
                 time.sleep(1)
         print(f"Transcription tests complete. Saved to {self.csv_filename}")
         return self.result

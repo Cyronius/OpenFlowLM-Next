@@ -303,5 +303,27 @@ class TestReasoningKwargs(unittest.TestCase):
         self.assertEqual(BaseTestTask._reasoning_kwargs(None), {})
 
 
+class TestWhisperTagFilter(unittest.TestCase):
+    """--audio --model <whisper tag> runs the transcription checks under that tag."""
+    # Traces: OPEN-WHISPER-ENDPOINT (canonical spec: specs/open-whisper/spec.md)
+
+    def test_transcription_names_the_whisper_tag_from_the_filter(self):
+        from oflm_test.tasks import TranscriptionTask
+        self.assertEqual(_make_task(TranscriptionTask, ["whisper-v3:turbo-q8_0"]).model_tag,
+                         "whisper-v3:turbo-q8_0")
+        self.assertEqual(_make_task(TranscriptionTask).model_tag, TranscriptionTask.MODEL_TAG)
+
+    def test_a_whisper_only_filter_skips_the_chat_audio_suite(self):
+        import oflm_test
+        args = SimpleNamespace(backend_os="linux", temp=0.3, reasoning=None)
+        suites = {name: name == "audio" for name in ("llm", "embedding", "audio", "vision", "tools", "api")}
+        with patch.object(oflm_test, "AudioTask") as audio, patch.object(oflm_test, "TranscriptionTask") as tr:
+            oflm_test.run_suites(args, "http://x/v1", suites, ["whisper-v3:turbo-q8_0"], [])
+            audio.assert_not_called()
+            tr.assert_called_once()
+            oflm_test.run_suites(args, "http://x/v1", suites, ["gemma3:4b"], [])
+            audio.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

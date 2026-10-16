@@ -62,7 +62,7 @@ is marginal they land on opposite sides of it. A bf16 "ceiling" is therefore a p
 a datapath, not a single number two implementations must agree on.
 
 ### OPEN-WHISPER-SEAM: one engine interface, and no silent fallback between engines
-**Applies to:** `src/include/whisper/whisper_engine.hpp`, `src/common/whisper/whisper_engine_closed.cpp`
+**Applies to:** `src/include/whisper/whisper_engine.hpp`, `src/common/whisper/whisper_engine_closed.cpp`, `whisper_engine_select.cpp`
 **Test category:** integration (through `oflm serve --asr 1`)
 **Acceptance criteria:**
 - `Whisper` holds a `whisper_engine`, never a concrete engine. The closed `whisper_npu` is
@@ -74,6 +74,11 @@ a datapath, not a single number two implementations must agree on.
 - `--asrmodel TAG` chooses the model. A tag that does not resolve to a Whisper model is
   refused **before** anything is downloaded: `model_list::get_model_info()` answers an
   unknown tag with `llama3.2:1b`.
+- The open engine is ready when its weights (`model.open.safetensors`, `model.safetensors`
+  or `model.gguf`, OPEN-WHISPER-STOCK) and a kernel set are both found. Kernels belong to
+  the model's shape, not its name: when no set sits under the model's own name, a complete
+  set whose `hf_config_check` matches the model's `config.json`, under any xclbins root, is
+  used. The log names the weight file and the rule that found the kernels.
 
 **Measured 2026-09-19:** six clips x three requests through `/v1/audio/transcriptions`,
 byte-identical to the pre-seam build (18/18). `OFLM_WHISPER_ENGINE=open` and
@@ -103,39 +108,105 @@ computes a direct conv1d at strides 1 and 2; mutating the conv tap order or the 
 order each fails the test that names it. The real container is 1,624,143,560 B, 481
 tensors.
 
-### OPEN-WHISPER-GGUF: the same container, built from a GGUF
-**Applies to:** `utilities/q4nx-build/q4nx/open_whisper.py`
-**Test category:** unit (`utilities/q4nx-build/tests/test_open_whisper.py`, `GgufInputTest`)
+### OPEN-WHISPER-STOCK: the engine reads OpenAI's checkpoint as it ships
+**Applies to:** `src/open_whisper/weight_source.cpp`, `weights.cpp`, `decoder.cpp`
+**Verification:** test
+**External tests:** `src/open_whisper/weight_source_test.cpp` (built and run by `src/open_whisper/build.cmd`)
 **Acceptance criteria:**
-- `q4nx-build --open-whisper -i model.gguf` writes the same `model.open.safetensors` layout
-  as the checkpoint build (OPEN-WHISPER-CONTAINER), so the engine, its selection logic and
-  the closed-engine guard are untouched: nothing in `src/` reads a GGUF.
-- A GGUF whose tensors are F16 builds a container **byte-identical** to the one built from
-  the HuggingFace checkpoint it came from. A quantized one (Q8_0, K-quants) is dequantized
-  to float32 first and differs only by that quantization.
-- Config, tokenizer and generation_config come from the HuggingFace repo (`--sidecars`,
-  default `openai/whisper-large-v3-turbo`, JSON files only), and the GGUF's layer counts,
-  widths, special-token ids, suppress list, vocabulary and BPE merges are compared against
-  them. Any difference is a refusal naming it.
-- A GGUF whose `general.architecture` is not `whisper`, or that lacks a tensor, is refused.
-- The manifest records the GGUF file, its sha256 and its tensor types.
+- A model directory holding OpenAI's `model.safetensors` (transformers' names; F16, BF16 or
+  F32) loads on the open engine with no conversion step. At load, its tensors are arranged
+  into the container's (OPEN-WHISPER-CONTAINER): the same names, fusions, f32/bf16 split and
+  round-to-nearest-even, so every container tensor is bit-identical to the one q4nx-build's
+  `whisper_tensors()` writes from the same checkpoint. The encoder, decoder and tiling are
+  unchanged.
+- A tensor that is missing, or has another shape, is refused at load, naming it.
+- When a directory holds more than one weight file, the engine reads `model.open.safetensors`,
+  then `model.safetensors`, then `model.gguf`, and the load log names the one it read and the
+  ones it ignored.
 
-**Weights stay bf16 at run time:** the quant level changes the download and the rounding
-the container starts from, not the 1.2 GB of resident encoder weights. An 8-bit encoder
-GEMM stream is a separate piece of work.
+**Test (2026-10-16):** a tiny Whisper (d_model 32, one encoder and two decoder layers, FFN
+64) written as a checkpoint: all 67 container tensors match the converter's output for the
+same values, by dtype, shape and bytes (fixtures and expected hashes from
+`src/open_whisper/testdata/gen_weight_fixtures.py`, which runs the converter's own code).
+Swapping q and v in the fused operand, or moving the cross-attention bias, fails it.
 
-**Verification (manual), 2026-10-16, handy-computer/whisper-large-v3-turbo-gguf:**
-`q4nx-build --open-whisper -i whisper-large-v3-turbo-F16.gguf --sidecars <HF dir>` and the
-same build from the checkpoint produce `cmp`-identical files (1,624,143,560 B, 481 tensors).
-The Q8_0 build differs from them by 0.6 % relative error per tensor (worst 0.9 %, the
-`fc2` operands). Transcribing two 30 s clips in transformers with Q8_0 and with Q4_K_M weights gives the same
-text as the fp16 checkpoint.
+**Verification (manual), 2026-10-16:** `weight_source_test --compare <model.open.safetensors>
+<model.safetensors>` on openai/whisper-large-v3-turbo against the container built from it:
+481 of 481 tensors, 808,924,160 values, identical.
 
-**On the NPU, same day:** a kernel set built with `export_whisper_kernels.py` (about a
-minute), `OFLM_WHISPER_ENGINE=open oflm serve --asr 1`, and a 30 s clip posted twice to
-`/v1/audio/transcriptions` with the Q8_0-built container and then with the checkpoint-built
-one. All four responses are byte-identical text (about 9 s a request). One clip, one
-quantization: Q4_K_M was not run on the engine.
+### OPEN-WHISPER-GGUF: the engine reads a GGUF of the model
+**Applies to:** `src/open_whisper/weight_source.cpp`, `src/open_qwen36/gguf_file.cpp`
+**Verification:** test
+**External tests:** `src/open_whisper/weight_source_test.cpp`
+**Acceptance criteria:**
+- A model directory holding `model.gguf` in the `stt.whisper` layout (handy-computer's
+  whisper-large-v3-turbo GGUFs: `enc.blocks.N.attn.q.weight` and so on) loads with no
+  conversion step, through the same `GgufFile` reader the LLM engine uses. Its tensors are
+  arranged into the container's as for OPEN-WHISPER-STOCK.
+- An F16 GGUF gives every container tensor bit-identical to the container built from the
+  checkpoint it was made from. A quantized one (Q8_0, Q4_K, Q5_K, Q6_K) is dequantized with
+  llama.cpp's loops and gives the container the converter writes from those values.
+- Refused at load, naming the reason: `general.architecture` other than `whisper`; any
+  `stt.whisper.*` geometry key (layers, widths, heads, mels, positions, vocabulary) that is
+  not the engine's; a scaled or untied token embedding; a missing tensor; a tensor of
+  another shape; a type the reader does not dequantize.
+- The engine keeps its weights in bf16 whatever the file holds: the quant changes the
+  download and adds its rounding, not the 1.2 GB of resident encoder operands. An 8-bit
+  encoder stream is separate work.
+
+**Test (2026-10-16):** the same tiny Whisper as an F16 and a Q8_0 GGUF, all 67 tensors
+against the converter run on the values the gguf package reads from each file; Q4_K, Q5_K
+and Q6_K rows against the gguf package's dequant of the same bytes, bit for bit; the name
+map against the real turbo GGUF's tensor list (all 587 tensors but the two frontend ones
+used, with their shapes); a GGUF of another geometry, or without the `stt.whisper` keys,
+refused.
+
+**Verification (manual), 2026-10-16,** handy-computer/whisper-large-v3-turbo-gguf with
+`weight_source_test --compare`: the F16 GGUF against the container built from OpenAI's
+checkpoint, 481 of 481 tensors identical; the Q8_0 GGUF against the container the old
+converter built from the same Q8_0 file, 481 of 481 identical; the Q4_K_M file loads through
+all three of its quant types (319 tensors, the F32 ones, identical; the rest differ by the
+quantization). Q5_K_M and Q6_K were not run on real files.
+
+### OPEN-WHISPER-INSTALL: oflm-add installs a GGUF or OpenAI's checkpoint
+**Applies to:** `utilities/oflm-add`
+**Verification:** test
+**External tests:** `utilities/oflm-add/tests/test_whisper_install.py`
+**Acceptance criteria:**
+- `oflm-add handy-computer/whisper-large-v3-turbo-gguf` installs one of the repo's GGUFs as
+  `model.gguf` (`--quant`, default Q8_0) and registers `whisper-v3:turbo-<quant>`;
+  `oflm-add openai/whisper-large-v3-turbo` installs the checkpoint and registers
+  `whisper-v3:turbo-safetensors`. Both are ASR entries (`asr: true`, family `whisper-v3`,
+  `details.weights` `gguf` or `safetensors`) in the user registry, with no download URL, so
+  nothing can be re-fetched over them. `--tag` overrides the tag.
+- A GGUF carries no config or tokenizer files. `config.json`, `tokenizer.json`,
+  `tokenizer_config.json` and `generation_config.json` come from the checkpoint the GGUF
+  names in `general.repo_url` (else its README's `base_model`), and the install is refused
+  unless they agree with the GGUF's own metadata: the geometry, every vocabulary id, the BPE
+  merges, the special-token ids and both suppress lists.
+- `tokenizer_config.json` gains `bos_token_id` and `eos_token_id` from `config.json`, the
+  two fields the host reads that OpenAI's file lacks (the container build added the same two).
+- Only whisper-large-v3-turbo's geometry installs; another is refused, since no kernel set
+  exists for it.
+- No kernel link is made. The engine finds the Whisper kernel set by geometry
+  (OPEN-WHISPER-SEAM); the installer reports the set it will use, or how to build one.
+
+**Why the files are fetched, not derived from the GGUF:** the GGUF carries the vocabulary,
+merges, special ids and suppress lists, but not every value the host reads: generation's
+`max_initial_timestamp_index`, and which added tokens are special (they decide how
+`<|0.00|>` tokenizes and what a decode prints). A file rebuilt from the metadata would rest
+on conventions for those, and would differ from OpenAI's without failing anywhere. The
+fetched files are OpenAI's own, checked against the metadata.
+
+**Test (2026-10-16):** 7 unit tests: quant choice, the GGUF checks, every sidecar check
+(merges, vocabulary, a special id, a suppress list), the tokenizer_config fields, kernel
+discovery by geometry under another name, and a local GGUF install end to end with the
+fetch stubbed.
+
+**Verification (manual), 2026-10-16:** installing the Q8_0 GGUF from a local directory into
+a scratch registry fetched the four files from openai/whisper-large-v3-turbo; config.json,
+tokenizer.json and generation_config.json are byte-identical to OpenAI's, and
+tokenizer_config.json to the one in the container directory (OpenAI's plus the two ids).
 
 ### OPEN-WHISPER-KERNELS: one xclbin, one instruction stream per encoder shape
 **Applies to:** `open_kernels/designs/whisper_gemm/`, `open_kernels/export_whisper_kernels.py`
@@ -336,11 +407,10 @@ XDNA1. That is the version worth building, and it is not a variant of this one.
 
 ## Not settled
 
-- **The open container is not published**, so there is no registry entry for it yet: an
-  entry pointing at a repository that does not exist is the failure this file exists to
-  avoid. It is built locally with `q4nx-build --open-whisper` (from the HuggingFace checkpoint or a
-  Whisper GGUF, OPEN-WHISPER-GGUF) and selected with
-  `--asrmodel` from a user registry.
+- **The shipped `whisper-v3:turbo` entry still points at the closed container.** The open
+  engine no longer needs a converted repository (OPEN-WHISPER-STOCK, -GGUF): `oflm-add`
+  installs OpenAI's checkpoint or a GGUF under another tag (OPEN-WHISPER-INSTALL). Whether
+  the default tag should move to one of those is the maintainer's call.
 - **The decoder** runs on the host first. Moving it to the NPU needs an `attn.h` variant
   with no RoPE and no cache append, plus a decoder layer design with LayerNorm, biases and
   a non-gated GELU.

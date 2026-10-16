@@ -16,11 +16,27 @@ parent: Models
 - **Maximum Encoder Window:** 30 seconds of audio (1500 frames)
 
 > ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
-> only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
-> and a kernel set, which the published container does not have. Its decoder also
-> runs entirely on the host in fp32 -- the open Whisper README makes no NPU
-> performance claim for it. Build the container yourself with
-> `q4nx-build --open-whisper -i <checkpoint dir | whisper-large-v3-turbo-*.gguf>`.
+> only `model.q4nx`. The open Whisper engine reads OpenAI's own checkpoint or a GGUF
+> of it instead, with no conversion step; install one with `oflm-add` (below). Its
+> decoder runs entirely on the host in fp32 -- the open Whisper README makes no NPU
+> performance claim for it.
+
+### The open engine: OpenAI's checkpoint or a GGUF
+
+```shell
+oflm-add handy-computer/whisper-large-v3-turbo-gguf             # registers whisper-v3:turbo-q8_0
+oflm-add handy-computer/whisper-large-v3-turbo-gguf --quant F16 # or Q6_K, Q5_K_M, Q4_K_M
+oflm-add openai/whisper-large-v3-turbo                          # registers whisper-v3:turbo-safetensors
+oflm serve --asr 1 --asrmodel whisper-v3:turbo-q8_0
+```
+
+The engine loads the file as it ships: a GGUF's tensors are widened to the engine's
+bf16 at load, so a smaller quant saves download and disk, not memory. A GGUF holds
+no tokenizer or config files; `oflm-add` fetches them from the checkpoint the GGUF
+names (here `openai/whisper-large-v3-turbo`) and refuses the install if they do not
+match the GGUF's own vocabulary and settings. The open engine also needs its kernel
+set (`open_kernels/export_whisper_kernels.py`), which ships with releases; it is
+found by the model's geometry, so any directory name works.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 

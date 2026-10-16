@@ -152,8 +152,12 @@ def run_suites(args, baseurl, suites, model_filter, results):
         results.append(EmbeddingTask(baseurl, args.backend_os, model_filter=model_filter).run())
 
     if suites["audio"]:
-        results.append(AudioTask(baseurl, args.backend_os, model_filter=model_filter)
-                       .run(temperature=args.temp, reasoning=args.reasoning))
+        if model_filter and all(m.startswith("whisper") for m in model_filter):
+            # A filter of only Whisper tags leaves the chat-audio suite nothing to run.
+            print("Audio chat checks skipped: Whisper is not a chat model.")
+        else:
+            results.append(AudioTask(baseurl, args.backend_os, model_filter=model_filter)
+                           .run(temperature=args.temp, reasoning=args.reasoning))
 
         # The audio task above posts chat.completions, which Whisper refuses as a
         # non-chat model; this one is the only thing that exercises

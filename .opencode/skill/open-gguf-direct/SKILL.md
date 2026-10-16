@@ -267,6 +267,8 @@ as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
   expert_stripes/expert_down GGUF ops (3D [experts, n, k] tensors), the
   singular/plural `model.layer(s)` name mismatch, q8 f32 numerics bug above.
 - open_gemma3 / open_embedding engines untouched (they read safetensors).
+- open_whisper reads a Whisper GGUF through GgufFile, whole tensors widened to bf16 at
+  load (Q5_K added for it); see `open-whisper-weights/SKILL.md`.
 - End-to-end `flm serve` with a real GGUF (needs a dense-family GGUF matching
   a shipped spec's vocab exactly; none in the HF cache qualifies today —
   Peach is llama-arch with vocab 64000 vs the llama31-8b spec's 128256).
