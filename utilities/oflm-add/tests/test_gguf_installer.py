@@ -65,6 +65,19 @@ def test_modelscope_selected_gguf_downloads_as_canonical_name(monkeypatch, tmp_p
     assert kwargs["expected_sha"] == "abcd"
 
 
+def test_gemma3_1b_gguf_resolves_to_the_text_only_entry():
+    """Traces: OPEN-FAMILY-GEMMA3. A Gemma 3 GGUF's name says gemma3, but the official list
+    registers the 1B (no vision tower) as gemma3-text; the 4B stays gemma3."""
+    reg = {"models": {"gemma3": {
+        "1b": {"name": "Gemma3-1B-NPU2", "size": 1000000000, "details": {"family": "gemma3-text"}},
+        "4b": {"name": "Gemma3-4B-NPU2", "size": 4000000000, "details": {"family": "gemma3"}}}}}
+    one, note = oflm_add.resolve_official(reg, "gemma-3-1b-it-qat-q4_0-gguf", "gemma3", 1000000000)
+    assert one[3]["name"] == "Gemma3-1B-NPU2" and note is None
+    four, _ = oflm_add.resolve_official(reg, "gemma-3-4b-it-qat-q4_0-gguf", "gemma3", 4000000000)
+    assert four[3]["name"] == "Gemma3-4B-NPU2"
+    assert "gemma3-text" in oflm_add.GGUF_CAPABLE_FAMILIES
+
+
 def test_explicit_kernel_manifest_can_enable_gguf(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"gguf": {}}), encoding="utf-8")

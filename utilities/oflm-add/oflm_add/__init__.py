@@ -72,7 +72,10 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "gemma3-text", "granite", "hunyuan"}
+# A family whose text-only sizes the official list registers under a text engine of their
+# own: Gemma 3 1B has no vision tower and is `gemma3-text`, while a GGUF's name only says gemma3.
+TEXT_ONLY_FAMILY = {"gemma3": "gemma3-text"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -497,6 +500,9 @@ def resolve_official(system_registry, dir_name, family, size):
     if official:
         return official, None
     official = match_official_by_family_size(system_registry, family, size)
+    if official:
+        return official, None
+    official = match_official_by_family_size(system_registry, TEXT_ONLY_FAMILY.get(family), size)
     if official:
         return official, None
     entries = _official_entries(system_registry, family)
@@ -2011,6 +2017,8 @@ def main():
         size_value = (base_entry or {}).get("size") or size_from_tag(tag)
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
         base_entry = official[3] if official else None
+        if base_entry and (base_entry.get("details") or {}).get("family") == TEXT_ONLY_FAMILY.get(family):
+            family = TEXT_ONLY_FAMILY[family]          # the official text-only size picks its engine
         src_tag = f"{official[1]}:{official[2]}" if official else None
         xclbin_source = args.xclbin_from or (base_entry or {}).get("name")
 
@@ -2103,6 +2111,9 @@ def main():
                               want=NPU_EMBED_FILES if npue_embed else None)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
+        # a snapshot that holds only a README (a model card was fetched) is not the weights
+        if snapshot and gguf_mode and not (snapshot / gguf_name).is_file():
+            snapshot = None
         if snapshot:
             if not args.quiet:
                 log(f"[INFO] Found local {'ModelScope' if modelscope else 'HF'} cache: {snapshot}")
