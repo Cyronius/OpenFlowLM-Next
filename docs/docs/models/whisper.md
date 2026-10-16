@@ -19,7 +19,8 @@ parent: Models
 > only `model.q4nx`; the open Whisper path needs both `model.open.safetensors`
 > and a kernel set, which the published container does not have. Its decoder also
 > runs entirely on the host in fp32 -- the open Whisper README makes no NPU
-> performance claim for it.
+> performance claim for it. Build the container yourself with
+> `q4nx-build --open-whisper -i <checkpoint dir | whisper-large-v3-turbo-*.gguf>`.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 

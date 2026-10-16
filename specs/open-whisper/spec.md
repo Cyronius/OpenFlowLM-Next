@@ -103,6 +103,40 @@ computes a direct conv1d at strides 1 and 2; mutating the conv tap order or the 
 order each fails the test that names it. The real container is 1,624,143,560 B, 481
 tensors.
 
+### OPEN-WHISPER-GGUF: the same container, built from a GGUF
+**Applies to:** `utilities/q4nx-build/q4nx/open_whisper.py`
+**Test category:** unit (`utilities/q4nx-build/tests/test_open_whisper.py`, `GgufInputTest`)
+**Acceptance criteria:**
+- `q4nx-build --open-whisper -i model.gguf` writes the same `model.open.safetensors` layout
+  as the checkpoint build (OPEN-WHISPER-CONTAINER), so the engine, its selection logic and
+  the closed-engine guard are untouched: nothing in `src/` reads a GGUF.
+- A GGUF whose tensors are F16 builds a container **byte-identical** to the one built from
+  the HuggingFace checkpoint it came from. A quantized one (Q8_0, K-quants) is dequantized
+  to float32 first and differs only by that quantization.
+- Config, tokenizer and generation_config come from the HuggingFace repo (`--sidecars`,
+  default `openai/whisper-large-v3-turbo`, JSON files only), and the GGUF's layer counts,
+  widths, special-token ids, suppress list, vocabulary and BPE merges are compared against
+  them. Any difference is a refusal naming it.
+- A GGUF whose `general.architecture` is not `whisper`, or that lacks a tensor, is refused.
+- The manifest records the GGUF file, its sha256 and its tensor types.
+
+**Weights stay bf16 at run time:** the quant level changes the download and the rounding
+the container starts from, not the 1.2 GB of resident encoder weights. An 8-bit encoder
+GEMM stream is a separate piece of work.
+
+**Verification (manual), 2026-10-16, handy-computer/whisper-large-v3-turbo-gguf:**
+`q4nx-build --open-whisper -i whisper-large-v3-turbo-F16.gguf --sidecars <HF dir>` and the
+same build from the checkpoint produce `cmp`-identical files (1,624,143,560 B, 481 tensors).
+The Q8_0 build differs from them by 0.6 % relative error per tensor (worst 0.9 %, the
+`fc2` operands). Transcribing two 30 s clips in transformers with Q8_0 and with Q4_K_M weights gives the same
+text as the fp16 checkpoint.
+
+**On the NPU, same day:** a kernel set built with `export_whisper_kernels.py` (about a
+minute), `OFLM_WHISPER_ENGINE=open oflm serve --asr 1`, and a 30 s clip posted twice to
+`/v1/audio/transcriptions` with the Q8_0-built container and then with the checkpoint-built
+one. All four responses are byte-identical text (about 9 s a request). One clip, one
+quantization: Q4_K_M was not run on the engine.
+
 ### OPEN-WHISPER-KERNELS: one xclbin, one instruction stream per encoder shape
 **Applies to:** `open_kernels/designs/whisper_gemm/`, `open_kernels/export_whisper_kernels.py`
 **Test category:** hardware (`open_kernels/harness/run_kernel`)
@@ -304,7 +338,8 @@ XDNA1. That is the version worth building, and it is not a variant of this one.
 
 - **The open container is not published**, so there is no registry entry for it yet: an
   entry pointing at a repository that does not exist is the failure this file exists to
-  avoid. It is built locally with `q4nx-build --open-whisper` and selected with
+  avoid. It is built locally with `q4nx-build --open-whisper` (from the HuggingFace checkpoint or a
+  Whisper GGUF, OPEN-WHISPER-GGUF) and selected with
   `--asrmodel` from a user registry.
 - **The decoder** runs on the host first. Moving it to the NPU needs an `attn.h` variant
   with no RoPE and no cache append, plus a decoder layer design with LayerNorm, biases and

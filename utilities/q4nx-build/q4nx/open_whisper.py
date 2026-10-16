@@ -1,8 +1,9 @@
 """Reproducible builder for the open Whisper engine's model repo (issue #72).
 
     q4nx-build --open-whisper -i openai/whisper-large-v3-turbo -o Whisper-V3-Turbo-OpenNPU2
+    q4nx-build --open-whisper -i whisper-large-v3-turbo-Q8_0.gguf -o Whisper-V3-Turbo-OpenNPU2
 
-It reads the HuggingFace checkpoint and writes the tensors in the shapes the open engine
+It reads the HuggingFace checkpoint (or a GGUF of it, see below) and writes the tensors in the shapes the open engine
 consumes, so the engine does no rearranging beyond the DMA tiling of its GEMM operands:
 
 * **Encoder GEMM operands are B = W^T, row-major [K, N], bf16.** Tiling for the NPU is
@@ -25,6 +26,14 @@ consumes, so the engine does no rearranging beyond the DMA tiling of its GEMM op
 `setup_tokenizer` reads both and HuggingFace's file carries neither. These are the only two
 fields FLM's shipped copy adds (diffed in NpuEmbeddings task 0179).
 
+**GGUF input** (`-i *.gguf`): the weights come from the GGUF, dequantized to float32 and then
+through the same transform as the HuggingFace path, so the container is identical in layout
+and the engine cannot tell the two apart. Any tensor type the `gguf` package can dequantize
+works (F16, Q8_0, K-quants). The tokenizer, config and generation_config are copied from the
+HuggingFace repo (`--sidecars`, default `openai/whisper-large-v3-turbo`, small JSON files
+only), and the GGUF's own vocabulary, merges and special-token ids are compared against
+them -- a mismatch is a refusal, not a warning.
+
 The weights file is named `model.open.safetensors`, not `model.q4nx`, so the closed
 engine's reader can never be handed it. The output is byte-reproducible: tensors in sorted
 order, sorted JSON, no timestamps or host paths.
@@ -33,6 +42,7 @@ order, sorted JSON, no timestamps or host paths.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import struct
 from pathlib import Path
@@ -70,6 +80,9 @@ GEOMETRY = {"d_model": 1280, "encoder_layers": 32, "decoder_layers": 4,
 
 _NP_OF = {"F16": np.float16, "BF16": np.uint16, "F32": np.float32}
 
+DEFAULT_SIDECARS = "openai/whisper-large-v3-turbo"
+SIDECAR_PATTERNS = ["*.json", "merges.txt"]
+
 
 def bf16_bits(x: np.ndarray) -> np.ndarray:
     """fp32 -> bf16 bit patterns (uint16), round to nearest, ties to even."""
@@ -92,6 +105,132 @@ class _Reader:
         if m["dtype"] == "BF16":
             a = (a.astype(np.uint32) << 16).view(np.float32)
         return a.astype(np.float32)
+
+
+class _GgufReader:
+    """The same interface as _Reader, over a GGUF: `meta` is keyed by the HuggingFace names
+    whisper_tensors asks for, and a call returns that tensor as [out, in] float32."""
+
+    def __init__(self, path: Path):
+        from gguf import GGUFReader
+        self.path = path
+        self.gguf = GGUFReader(str(path))
+        self._by_gguf = {t.name: t for t in self.gguf.tensors}
+        arch = self.field("general.architecture")
+        if arch != "whisper":
+            raise ValueError(f"{path.name}: general.architecture is {arch!r}, expected 'whisper'")
+        n_enc = int(self.field("stt.whisper.encoder.n_layers"))
+        n_dec = int(self.field("stt.whisper.decoder.n_layers"))
+        self._name = gguf_name_map(n_enc, n_dec)
+        missing = sorted(g for g in self._name.values() if g not in self._by_gguf)
+        if missing:
+            raise ValueError(f"{path.name}: missing tensors {missing[:4]}"
+                             f"{' ...' if len(missing) > 4 else ''}")
+        self.meta = {hf: None for hf in self._name}
+
+    def field(self, key: str):
+        f = self.gguf.fields.get(key)
+        if f is None:
+            raise ValueError(f"{self.path.name}: no metadata key {key!r}")
+        return f.contents()
+
+    def types(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for g in self._name.values():
+            k = self._by_gguf[g].tensor_type.name
+            out[k] = out.get(k, 0) + 1
+        return dict(sorted(out.items()))
+
+    def __call__(self, name: str) -> np.ndarray:
+        from gguf import GGMLQuantizationType as Q
+        from gguf import dequantize
+        t = self._by_gguf[self._name[name]]
+        shape = tuple(int(x) for x in reversed(t.shape))   # GGUF lists the fastest axis first
+        if t.tensor_type in (Q.F32, Q.F16):
+            a = np.asarray(t.data)
+        else:
+            a = dequantize(t.data, t.tensor_type)
+        return np.ascontiguousarray(a, dtype=np.float32).reshape(shape)
+
+
+def gguf_name_map(n_enc: int, n_dec: int) -> Dict[str, str]:
+    """HuggingFace tensor name -> this GGUF family's name (stt.whisper, `enc.` / `dec.`)."""
+    m = {"model.encoder.conv1.weight": "enc.conv.0.weight",
+         "model.encoder.conv1.bias": "enc.conv.0.bias",
+         "model.encoder.conv2.weight": "enc.conv.1.weight",
+         "model.encoder.conv2.bias": "enc.conv.1.bias",
+         "model.encoder.embed_positions.weight": "enc.pos_emb.weight",
+         "model.encoder.layer_norm.weight": "enc.final_norm.weight",
+         "model.encoder.layer_norm.bias": "enc.final_norm.bias",
+         "model.decoder.embed_tokens.weight": "dec.token_embd.weight",
+         "model.decoder.embed_positions.weight": "dec.pos_emb.weight",
+         "model.decoder.layer_norm.weight": "dec.final_norm.weight",
+         "model.decoder.layer_norm.bias": "dec.final_norm.bias"}
+
+    def block(hf: str, gg: str, attns: Dict[str, str], norms: Dict[str, str]) -> None:
+        for h_attn, g_attn in attns.items():
+            for n, g in (("q_proj", "q"), ("k_proj", "k"), ("v_proj", "v"), ("out_proj", "out")):
+                m[f"{hf}.{h_attn}.{n}.weight"] = f"{gg}.{g_attn}.{g}.weight"
+                if n != "k_proj":                          # k_proj has no bias
+                    m[f"{hf}.{h_attn}.{n}.bias"] = f"{gg}.{g_attn}.{g}.bias"
+        for h_norm, g_norm in norms.items():
+            for w in ("weight", "bias"):
+                m[f"{hf}.{h_norm}.{w}"] = f"{gg}.{g_norm}.{w}"
+        for fc in ("fc1", "fc2"):
+            for w in ("weight", "bias"):
+                m[f"{hf}.{fc}.{w}"] = f"{gg}.ffn.{fc}.{w}"
+
+    for i in range(n_enc):
+        block(f"model.encoder.layers.{i}", f"enc.blocks.{i}", {"self_attn": "attn"},
+              {"self_attn_layer_norm": "norm_attn", "final_layer_norm": "norm_ffn"})
+    for i in range(n_dec):
+        block(f"model.decoder.layers.{i}", f"dec.blocks.{i}",
+              {"self_attn": "self_attn", "encoder_attn": "cross_attn"},
+              {"self_attn_layer_norm": "norm_self", "encoder_attn_layer_norm": "norm_cross",
+               "final_layer_norm": "norm_ffn"})
+    return m
+
+
+def check_gguf_against_sidecars(g: _GgufReader, cfg: dict, gen_cfg: dict, tokenizer: dict) -> None:
+    """The GGUF and the HuggingFace sidecars must describe one model: a vocabulary that
+    differs by one id still decodes to plausible text."""
+    problems: List[str] = []
+    for key, want in (("stt.whisper.encoder.n_layers", cfg["encoder_layers"]),
+                      ("stt.whisper.decoder.n_layers", cfg["decoder_layers"]),
+                      ("stt.whisper.encoder.d_model", cfg["d_model"]),
+                      ("stt.whisper.encoder.ffn_dim", cfg["encoder_ffn_dim"]),
+                      ("stt.whisper.encoder.num_mel_bins", cfg["num_mel_bins"]),
+                      ("stt.whisper.encoder.max_source_positions", cfg["max_source_positions"]),
+                      ("stt.whisper.decoder.max_target_positions", cfg["max_target_positions"]),
+                      ("stt.whisper.decoder.vocab_size", cfg["vocab_size"]),
+                      ("stt.whisper.decoder_start_token_id", gen_cfg["decoder_start_token_id"]),
+                      ("stt.whisper.no_timestamps_token_id", gen_cfg["no_timestamps_token_id"]),
+                      ("tokenizer.ggml.eos_token_id", gen_cfg["eos_token_id"])):
+        have = int(g.field(key))
+        if have != want:
+            problems.append(f"{key} is {have}, the sidecars say {want}")
+    if [int(x) for x in g.field("stt.whisper.suppress_tokens")] != list(gen_cfg.get("suppress_tokens", [])):
+        problems.append("suppress_tokens differ")
+    tokens = list(g.field("tokenizer.ggml.tokens"))
+    model = tokenizer["model"]
+    by_id = {i: t for t, i in model["vocab"].items()}
+    by_id.update({a["id"]: a["content"] for a in tokenizer["added_tokens"]})
+    bad = [i for i in range(len(tokens)) if by_id.get(i) != tokens[i]]
+    if len(tokens) != len(by_id) or bad:
+        problems.append(f"vocabulary differs from tokenizer.json ({len(bad)} ids, first {bad[:3]})")
+    merges = [m if isinstance(m, str) else " ".join(m) for m in model["merges"]]
+    if list(g.field("tokenizer.ggml.merges")) != merges:
+        problems.append("BPE merges differ from tokenizer.json")
+    if problems:
+        raise ValueError("GGUF and sidecar files disagree: " + "; ".join(problems))
+
+
+def resolve_sidecars(spec: str) -> Path:
+    """A local directory, or an HF repo id fetched without its weights."""
+    if os.path.isdir(spec):
+        return Path(spec)
+    from huggingface_hub import snapshot_download
+    return Path(snapshot_download(repo_id=spec, allow_patterns=SIDECAR_PATTERNS))
 
 
 def conv_b(w: np.ndarray) -> np.ndarray:
@@ -172,12 +311,21 @@ def write_safetensors(path: Path, tensors: Dict[str, Tuple[str, np.ndarray]]) ->
 
 
 def build_open_whisper_repo(source: str, output_dir: str, npu_assets: Optional[str] = None,
-                            geometry: Optional[Dict[str, int]] = None) -> dict:
-    """Build the repo. `geometry` overrides the required config values (tests only)."""
+                            geometry: Optional[Dict[str, int]] = None,
+                            sidecars: Optional[str] = None) -> dict:
+    """Build the repo. `source` is a HuggingFace checkpoint (directory or repo id) or a
+    .gguf file; for a GGUF, `sidecars` names where config/tokenizer files come from.
+    `geometry` overrides the required config values (tests only)."""
     if npu_assets:
         raise ValueError("--npu-assets is not used by --open-whisper: kernels are built by "
                          "open_kernels/export_whisper_kernels.py")
-    src = resolve_source(source)
+    gguf_path = Path(source) if source.lower().endswith(".gguf") else None
+    if gguf_path is not None and not gguf_path.is_file():
+        raise FileNotFoundError(f"{gguf_path} not found")
+    if sidecars and gguf_path is None:
+        raise ValueError("--sidecars only applies to a GGUF input; a HuggingFace checkpoint "
+                         "carries its own config and tokenizer")
+    src = resolve_sidecars(sidecars or DEFAULT_SIDECARS) if gguf_path else resolve_source(source)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -211,15 +359,24 @@ def build_open_whisper_repo(source: str, output_dir: str, npu_assets: Optional[s
         json.dumps(tok_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     produced.append("tokenizer_config.json")
 
-    weights = src / "model.safetensors"
-    tensors = whisper_tensors(_Reader(weights), cfg["encoder_layers"], cfg["decoder_layers"],
-                              cfg["d_model"])
+    if gguf_path is not None:
+        weights = gguf_path
+        reader = _GgufReader(gguf_path)
+        check_gguf_against_sidecars(
+            reader, cfg, json.loads((src / "generation_config.json").read_text(encoding="utf-8")),
+            json.loads((src / "tokenizer.json").read_text(encoding="utf-8")))
+        source_info = {"file": gguf_path.name, "format": "gguf", "tensor_types": reader.types()}
+    else:
+        weights = src / "model.safetensors"
+        reader = _Reader(weights)
+        source_info = {"file": "model.safetensors"}
+    tensors = whisper_tensors(reader, cfg["encoder_layers"], cfg["decoder_layers"], cfg["d_model"])
     write_safetensors(out / WEIGHTS_NAME, tensors)
     produced.append(WEIGHTS_NAME)
 
     manifest = {
         "format": MANIFEST_FORMAT,
-        "source": {"file": "model.safetensors", "sha256": sha256_file(weights)},
+        "source": {**source_info, "sha256": sha256_file(weights)},
         "weights": WEIGHTS_NAME,
         "b_layout": "row-major [K, N] = W^T; tiled for the NPU by the engine at load",
         "conv_im2col_k_order": "tap-major: k = tap * C_in + channel, taps (t*s-1, t*s, t*s+1)",

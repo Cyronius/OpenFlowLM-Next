@@ -669,7 +669,14 @@ def _parse_args(argv):
         help="Build the open Whisper engine's model repo (issue #72): encoder GEMM "
              "operands as bf16 W^T with the fused Q|K|V and cross K|V the kernel set "
              "expects, f32 biases/norms, the decoder in bf16, and a tokenizer_config.json "
-             "carrying the bos/eos ids the host reads.",
+             "carrying the bos/eos ids the host reads. -i may be a HuggingFace checkpoint "
+             "or a Whisper .gguf (any quant the gguf package can dequantize).",
+    )
+    parser.add_argument(
+        "--sidecars", dest="sidecars", default=None, metavar="DIR_OR_REPO",
+        help="With --open-whisper and a .gguf input: where config.json, tokenizer files and "
+             "generation_config.json come from (default: openai/whisper-large-v3-turbo, "
+             "JSON files only). The GGUF's vocabulary and merges are checked against them.",
     )
     parser.add_argument(
         "--open-diffusion", dest="open_diffusion", action="store_true",
@@ -723,7 +730,8 @@ def main(argv=None) -> int:
         from q4nx.open_whisper import MODEL_INFO_ARTIFACT, build_open_whisper_repo
 
         output_folder = os.path.abspath(args.output_flag or ".")
-        result = build_open_whisper_repo(input_path, output_folder, npu_assets=args.npu_assets)
+        result = build_open_whisper_repo(input_path, output_folder, npu_assets=args.npu_assets,
+                                         sidecars=args.sidecars)
         print(f"[INFO] Open Whisper repo built at {result['output_dir']}")
         print(f"[INFO] Source: {result['source']}")
         print(f"[INFO] Tensors: {result['tensor_count']}")
