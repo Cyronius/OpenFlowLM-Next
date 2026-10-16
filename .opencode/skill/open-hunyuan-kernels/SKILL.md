@@ -69,8 +69,10 @@ oflm-add tencent/Hy-MT2-1.8B-GGUF          # or a local dir holding the .gguf, R
   it into `tokenizer_config.json` as `[120020]`, without which the app exits at load.
 - With no official registry entry, the GGUF gate cannot see a kernel set and falls back
   to safetensors; pass `--open-kernels <set>` (a set with the nested `gguf` manifest).
-- Picking the file: oflm-add prefers Q4_K over Q8_0. Pass a local dir with only the
-  Q8_0 file to get the validated one.
+- Picking the file: oflm-add prefers Q4_K over Q8_0, so the remote install takes
+  `Hy-MT2-1.8B-Q4_K_M.gguf` (Q4_K plus Q6_K tensors, both requantized at load; its
+  translation quality is not scored). Pass a local dir with only the Q8_0 file to get
+  the validated one.
 - `oflm serve` routes `details.family: hunyuan` to `HunYuan` (`modeling_hunyuan.cpp`):
   open kernels only, the model's own `chat_template.jinja`, model-card sampling
   (temperature 0.7, top_p 0.6, top_k 20, repetition 1.05).
