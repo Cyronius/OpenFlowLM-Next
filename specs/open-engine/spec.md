@@ -1140,7 +1140,7 @@ Windows + XRT):** the 8-layer slice over 8 positions from id 120000 passed -- lo
 >= 0.99995, the same argmax and top-5 at every position, every layer's residual corr >= 0.99996
 (maxrel <= 1.3e-2), and the head's padded rows 120818..120831 exactly zero. The full export
 (every set, the catalogue point included) builds; `dx`, `dx_f32` and `dx_attn` each leave 16
-bytes of program memory. Through `oflm serve` all 32 layers load from the GGUF in 26 s, a German
+bytes of program memory. Through `oflm serve` all 32 layers load from the GGUF, a German
 translation instruction comes back token for token the same as llama.cpp's on the same Q8_0 file,
 and `oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES-200 devtest, greedy, chrF against
 llama.cpp on the Q8_0 file: en->zh 38.63 vs 39.52 (100 sentences), en->de 58.47 vs 59.35 (67,

@@ -89,7 +89,7 @@ FLORES+ on Hugging Face is gated; the public FLORES-200 tarball
 ## Validated 2026-10-16 (Hy-MT2-1.8B, Q8_0 GGUF)
 
 - 8-layer slice, 8 positions: logits corr >= 0.99995, argmax and top-5 equal everywhere.
-- `oflm serve`: 32 layers resident in 26 s; a German translation matched llama.cpp's on the
+- `oflm serve`: all 32 layers resident; a German translation matched llama.cpp's on the
   same file token for token; `oflm-test --llm --gen-lim 256` 5/5.
 - FLORES chrF, q4_1 on the NPU vs llama.cpp Q8_0: en->zh 38.63 / 39.52 (100 sentences),
   en->de 58.47 / 59.35 (67). About 0.9 lower, inside noise at this size.
