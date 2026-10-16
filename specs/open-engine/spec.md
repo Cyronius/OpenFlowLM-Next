@@ -2322,6 +2322,59 @@ K 3072), each needing a compare run against `replica_gptoss.moe_block` the way
 OPEN-FAMILY-QWEN36MOE's does. Until then this requirement is the refusals and the budget,
 which is what a recipe meets first.
 
+**Decided 2026-10-16: GPT-OSS does not go through this block.** Its experts get a layout
+of their own (OPEN-GPTOSS-EXPERT-LAYOUT, `plans/gptoss-expert-layout.md`): MXFP4 tiles
+instead of q4_1 stripes, 64-row bands dealt unevenly instead of stripes shared between
+cores, two phases per token instead of a second activation table, h in three x elements.
+The refusals above stay as they are; they describe qwen36moe, and they still fire.
+
+### OPEN-GPTOSS-EXPERT-LAYOUT: GPT-OSS's experts as MXFP4 tiles, dealt unevenly, in two phases
+**Applies to:** openflowlm-next (`open_kernels/model/gptoss_layout.py`; no design consumes it yet)
+**Test category:** unit (`tests/test_gptoss_layout.py`); manual for the slice on the real GGUF
+
+GPT-OSS's routed experts shall be laid out as `plans/gptoss-expert-layout.md` decides, not through
+qwen36moe's MoE block (OPEN-MOE-WIDE-FF):
+
+- The experts stay MXFP4, the format the GGUF ships. Re-quantizing them to q4_1 measured a mean KL
+  divergence of 0.18 to 0.20 against the shipped model (the plan has the runs).
+- A pool tile is 32 rows by 288 columns in 5120 bytes: the rows 0-15 and 16-31 nibble planes at 0
+  and 2304 in `gemv_q4.h`'s order (nibble `p = k * 16 + r % 16`, the low one when `p` is even), the E8M0
+  bytes at 4608 indexed `kb * 32 + r`, and in k-tile 0 of each band half the 32 rows' output
+  biases as bf16 at 4928. 2880 is ten tiles, so K is not padded, and two tiles are the 10,240-byte
+  weight element the q4_1 projections already use.
+- A projection is 45 bands of 64 rows, chunk `i` of a band covering row half `i % 2` and k-tile
+  `i // 2`, dealt 6,6,6,6,6,5,5,5 to the eight cores; no row is padded.
+- Each expert is one contiguous block, gate and up interleaved band by band, then down, so routing
+  moves every fill of a slot by one expert stride.
+- Per token every slot's gate | up and clamped SwiGLU run first, then, after one barrier, every
+  slot's down against its own h; a core holds one activation table at a time.
+
+**Acceptance criteria (unit):**
+- A tile round-trips codes, exponents and biases exactly; one code lands at exactly the nibble the
+  index law names; a bias that is not a bf16 value is refused.
+- A projection packed in band order reads back to the same values and biases, the bias in k-tile
+  0 of each band half only; an expert block is gate band, up band, ..., then the down bands.
+- `deal(2880, 8)` is (6, 6, 6, 6, 6, 5, 5, 5); a row count that is not whole bands is refused.
+- `check()` passes: per core the weight and result bytes the program takes equal what the host
+  moves, the x broadcast matches, every slot reads exactly its expert block once, slot `s` is slot
+  0 moved by `s` blocks, every slot's h is drained whole before the barrier, no fifo is held past
+  its depth, and the core's data memory is 47,056 bytes (49,792 with o_proj's 4096-wide table) of
+  61,440. A slot shifted by one band, a core's fill one band short, an oversized table and an xm
+  wider than the x fifo each fail it.
+- The layout's arithmetic (activations quantized as `gemv_tab.h` does, h rounded to bf16, f32 per
+  band) is within 5e-3 of `replica_gptoss` on synthetic weights, and a band dealt to nobody moves
+  it by more than 0.1.
+- `qwen36moe.common` still refuses the padded spec on the stripe assignment.
+
+**Verification (manual): the slice on the real GGUF.** `python -I open_kernels/model/gptoss_layout.py
+--gguf <gpt-oss-20b-MXFP4.gguf> --layer L` packs layer L's four routed experts into tiles, reads
+them back, and compares the layout's block output with `replica_gptoss` in fp64 on a token
+embedding through the post-attention norm. **Result 2026-10-16** (`ggml-org/gpt-oss-20b-GGUF`,
+sha256 `27cd6c43...`): tiles exact at layers 0, 11 and 23; relative error 2.1e-3, 2.6e-3, 3.1e-3.
+
+**Not covered:** the IRON design, the MXFP4 GEMV kernel on hardware (its rate is the plan's first
+gate), the main core's program memory, the router and the attention half.
+
 ### OPEN-EMBED-STRIDE: an embedding row is read at the container's width, not the buffer's
 **Applies to:** openflowlm-next (`src/open_qwen36/q4nx_file.cpp`, `core.cpp`,
 `open_kernels/model/q4nx.py`)
