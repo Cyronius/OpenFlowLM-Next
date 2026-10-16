@@ -2322,21 +2322,26 @@ K 3072), each needing a compare run against `replica_gptoss.moe_block` the way
 OPEN-FAMILY-QWEN36MOE's does. Until then this requirement is the refusals and the budget,
 which is what a recipe meets first.
 
-**Decided 2026-10-16: GPT-OSS does not go through this block.** Its experts get a layout
-of their own (OPEN-GPTOSS-EXPERT-LAYOUT, `plans/gptoss-expert-layout.md`): MXFP4 tiles
-instead of q4_1 stripes, 64-row bands dealt unevenly instead of stripes shared between
-cores, two phases per token instead of a second activation table, h in three x elements.
-The refusals above stay as they are; they describe qwen36moe, and they still fire.
+**Proposed 2026-10-16, not decided: GPT-OSS would not go through this block.** The design
+spike in `plans/gptoss-expert-layout.md` recommends a layout of its own
+(OPEN-GPTOSS-EXPERT-LAYOUT): MXFP4 tiles instead of q4_1 stripes, 64-row bands dealt to cores
+instead of stripes shared between them, two phases per token instead of a second activation
+table, h in three x elements. Which expert format and which row deal the build uses are the
+user's decisions and are still open. The refusals above stay as they are; they describe
+qwen36moe, and they still fire.
 
-### OPEN-GPTOSS-EXPERT-LAYOUT: GPT-OSS's experts as MXFP4 tiles, dealt unevenly, in two phases
+### OPEN-GPTOSS-EXPERT-LAYOUT: a host prototype of the proposed GPT-OSS expert layout
 **Applies to:** openflowlm-next (`open_kernels/model/gptoss_layout.py`; no design consumes it yet)
 **Test category:** unit (`tests/test_gptoss_layout.py`); manual for the slice on the real GGUF
 
-GPT-OSS's routed experts shall be laid out as `plans/gptoss-expert-layout.md` decides, not through
-qwen36moe's MoE block (OPEN-MOE-WIDE-FF):
+`gptoss_layout.py` shall model the expert layout `plans/gptoss-expert-layout.md` recommends, and
+shall refuse a stream that does not fit it. **This records a proposal, not a decision.** Whether
+the experts stay MXFP4 (or are re-quantized to q4_1, or held as exact int8 on the q8 GEMV) and
+whether the rows are dealt unevenly or padded to 3072 are the user's decisions, open as of
+2026-10-16; if either goes the other way, this requirement changes with it. The modeled layout:
 
-- The experts stay MXFP4, the format the GGUF ships. Re-quantizing them to q4_1 measured a mean KL
-  divergence of 0.18 to 0.20 against the shipped model (the plan has the runs).
+- The experts stay MXFP4, the format the GGUF ships. (Re-quantizing them to q4_1 measured a mean
+  KL divergence of 0.18 to 0.20 against the shipped model; the plan has the runs.)
 - A pool tile is 32 rows by 288 columns in 5120 bytes: the rows 0-15 and 16-31 nibble planes at 0
   and 2304 in `gemv_q4.h`'s order (nibble `p = k * 16 + r % 16`, the low one when `p` is even), the E8M0
   bytes at 4608 indexed `kb * 32 + r`, and in k-tile 0 of each band half the 32 rows' output
@@ -2353,27 +2358,52 @@ qwen36moe's MoE block (OPEN-MOE-WIDE-FF):
 - A tile round-trips codes, exponents and biases exactly; one code lands at exactly the nibble the
   index law names; a bias that is not a bf16 value is refused.
 - A projection packed in band order reads back to the same values and biases, the bias in k-tile
-  0 of each band half only; an expert block is gate band, up band, ..., then the down bands.
+  0 of each band half only; an expert block is gate band, up band, ..., then the down bands. The
+  packer and the reader both refuse a projection that is not whole 64-row bands of 288-column
+  tiles, rather than dropping the remainder.
 - `deal(2880, 8)` is (6, 6, 6, 6, 6, 5, 5, 5); a row count that is not whole bands is refused.
 - `check()` passes: per core the weight and result bytes the program takes equal what the host
-  moves, the x broadcast matches, every slot reads exactly its expert block once, slot `s` is slot
-  0 moved by `s` blocks, every slot's h is drained whole before the barrier, no fifo is held past
-  its depth, and the core's data memory is 47,056 bytes (49,792 with o_proj's 4096-wide table) of
-  61,440. A slot shifted by one band, a core's fill one band short, an oversized table and an xm
-  wider than the x fifo each fail it.
+  moves; the x broadcast matches; every slot reads exactly its expert block once; slot `s` is slot
+  0 moved by `s` blocks; the barrier sits after the last h drain and before the first h fill;
+  every slot's h is drained whole before it, and read back after it from that slot's own region,
+  in slot order; xm is read from its own region; each core's header fills read the routing record
+  and that core's own residual rows, its weight fills come in its program's order, and its drains
+  land on the rows its fills compute; no fifo is held past its depth; the streams fit the shim's
+  16 channels each way; and the core's data memory is 47,056 bytes (49,792 with o_proj's
+  4096-wide table) of 61,440. Eleven broken sequences each fail it: a slot shifted by one band, a
+  core's fill one band short, an oversized table, an xm wider than the x fifo, the barrier
+  deleted, the h fills issued ahead of it, a slot reading another slot's h, the outputs all
+  drained at row 0, two cores' outputs swapped, the residual headers all reading core 0's rows,
+  and two slots' gate | up fills issued in swapped order.
+- At 16 and 24 cores `layout()` deals 3 or 2 and 2 or 1 bands per core in 44,752 and 43,984 bytes
+  of data memory, and `check()` refuses both on the shim: one stream per core needs 17 or 25 fill
+  channels of 16. The memory-tile split that would fix that is not modeled.
+- `expert_stream_bytes` prices the options the plan compares: the MXFP4 tiles at 5120/4896 of the
+  GGUF's own bytes, q4_1 at 5/4.25 per value plus the K pad, and the exact int8 form in
+  `gemv_q8.h`'s 16-row half-tiles (5120 bytes per 16 x 256, K padded) at 2.4 times the MXFP4
+  tiles, 3,185,049,600 bytes per token.
 - The layout's arithmetic (activations quantized as `gemv_tab.h` does, h rounded to bf16, f32 per
   band) is within 5e-3 of `replica_gptoss` on synthetic weights, and a band dealt to nobody moves
   it by more than 0.1.
 - `qwen36moe.common` still refuses the padded spec on the stripe assignment.
 
+`core_program()` and `host_sequence()` are hand-written models of the core's fifo program and the
+runtime sequence, not output of the stub-IRON tracer, which needs an IRON design and none exists
+yet. They were written together, so `check()` catches a mismatch between them but not an
+assumption they share, and it models no DMA timing.
+
 **Verification (manual): the slice on the real GGUF.** `python -I open_kernels/model/gptoss_layout.py
---gguf <gpt-oss-20b-MXFP4.gguf> --layer L` packs layer L's four routed experts into tiles, reads
-them back, and compares the layout's block output with `replica_gptoss` in fp64 on a token
-embedding through the post-attention norm. **Result 2026-10-16** (`ggml-org/gpt-oss-20b-GGUF`,
-sha256 `27cd6c43...`): tiles exact at layers 0, 11 and 23; relative error 2.1e-3, 2.6e-3, 3.1e-3.
+--gguf <gpt-oss-20b-MXFP4.gguf> --layer L --token T` packs layer L's four routed experts into
+tiles, reads them back, and compares the layout's block output with `replica_gptoss` in fp64 on
+token T's embedding through the post-attention norm. **Result 2026-10-16**
+(`ggml-org/gpt-oss-20b-GGUF`, sha256 `27cd6c43...`): tiles exact at layer 0 token 13225 (the
+default), layer 11 token 3417 and layer 23 token 3417; relative error 2.1e-3, 2.6e-3, 3.1e-3.
+Re-run with exactly these commands after `check()` and the packer gained the refusals above:
+identical numbers.
 
 **Not covered:** the IRON design, the MXFP4 GEMV kernel on hardware (its rate is the plan's first
-gate), the main core's program memory, the router and the attention half.
+gate), the memory-tile split a spread over more cores would need, the main core's program memory,
+the router and the attention half.
 
 ### OPEN-EMBED-STRIDE: an embedding row is read at the container's width, not the buffer's
 **Applies to:** openflowlm-next (`src/open_qwen36/q4nx_file.cpp`, `core.cpp`,

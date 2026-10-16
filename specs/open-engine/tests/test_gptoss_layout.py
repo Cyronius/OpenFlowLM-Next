@@ -28,9 +28,6 @@ def _values(codes, exps):
     return KVALUES[codes] * np.repeat(e8m0(exps), 32, axis=1)
 
 
-# ---- the tile
-
-
 def test_2880_is_ten_tiles_and_a_tile_pair_is_the_q4_1_weight_element():
     """288 columns: 256 would pad K, 320 would not fit the 5120-byte half of the shared w element."""
     assert 2880 == 10 * G.TILE_COLS
@@ -76,6 +73,16 @@ def test_a_projection_packs_in_band_order_and_reads_back_exactly():
     assert all(G.unpack_tile(bands[0, i])[2].any() == (i < 2) for i in range(bands.shape[1]))
 
 
+@pytest.mark.parametrize("rows, K", [(96, 288), (64, 400)])
+def test_a_projection_that_is_not_whole_bands_and_tiles_is_refused(rows, K):
+    """Flooring would drop the rows or columns past the last whole band or tile without a word."""
+    codes, exps, bias = _projection(rows, K)
+    with pytest.raises(ValueError, match="whole"):
+        G.pack_projection(codes, exps, bias)
+    with pytest.raises(ValueError, match="whole"):
+        G.dequant_projection(np.zeros(rows * K, np.uint8), rows, K)
+
+
 def test_an_expert_block_interleaves_gate_and_up_by_band_then_down():
     rows = K = 576
     g, u, d = (_projection(rows, K) for _ in range(3))
@@ -86,9 +93,6 @@ def test_an_expert_block_interleaves_gate_and_up_by_band_then_down():
     gp, up = G.pack_projection(*g).reshape(-1), G.pack_projection(*u).reshape(-1)
     assert np.array_equal(blk[:band], gp[:band]) and np.array_equal(blk[band:2 * band], up[:band])
     assert np.array_equal(blk[L.down_off:], G.pack_projection(*d).reshape(-1))
-
-
-# ---- the deal and the streams
 
 
 def test_45_bands_go_six_six_six_six_six_five_five_five():
@@ -164,7 +168,69 @@ def test_the_checks_catch_a_broken_sequence(monkeypatch):
         G.check(G.layout(hidden=4608, ff=2880))
 
 
-# ---- the arithmetic
+def _bar(seq):
+    return next(i for i, t in enumerate(seq) if t[0] == "finish")
+
+
+def _no_barrier(seq, L, A):
+    return seq[:_bar(seq)] + seq[_bar(seq) + 1:]
+
+
+def _h_fills_before_the_barrier(seq, L, A):
+    b = _bar(seq)
+    return seq[:b] + [t for t in seq[b:] if t[1] == "x"] + [t for t in seq[b:] if t[1] != "x"]
+
+
+def _slot_0_reads_slot_1s_h(seq, L, A):
+    return [t[:4] + (A.h + A.h_stride,) + t[5:] if t[1] == "x" and t[6] == 0 else t for t in seq]
+
+
+def _outputs_all_at_row_0(seq, L, A):
+    return [t[:4] + (0,) + t[5:] if t[3] == "xres" else t for t in seq]
+
+
+def _outputs_of_cores_0_and_1_swapped(seq, L, A):
+    off = {t[2]: t[4] for t in seq if t[3] == "xres"}
+    return [t[:4] + (off[1 - t[2]],) + t[5:] if t[3] == "xres" and t[2] < 2 else t for t in seq]
+
+
+def _residual_headers_all_read_core_0s_rows(seq, L, A):
+    return [t[:4] + (A.res,) + t[5:] if t[1] == "w" and t[3] == "act" and t[4] != A.rout else t for t in seq]
+
+
+def _slots_1_and_2_gate_up_issued_swapped(seq, L, A):
+    at = {s: [i for i, t in enumerate(seq) if t[3] == "pool" and t[6] == s
+              and t[4] < s * L.expert_bytes + L.down_off] for s in (1, 2)}
+    out = list(seq)
+    for i, j in zip(at[1], at[2]):
+        out[i], out[j] = seq[j], seq[i]
+    return out
+
+
+@pytest.mark.parametrize("edit, message", [
+    (_no_barrier, "barrier"),
+    (_h_fills_before_the_barrier, "barrier"),
+    (_slot_0_reads_slot_1s_h, "each slot's own h"),
+    (_outputs_all_at_row_0, "core 1: its drains"),
+    (_outputs_of_cores_0_and_1_swapped, "core 0: its drains"),
+    (_residual_headers_all_read_core_0s_rows, "core 1: its header fills"),
+    (_slots_1_and_2_gate_up_issued_swapped, "core 0: its w fills are not in its program's order"),
+])
+def test_the_checks_catch_a_misplaced_barrier_or_act_offset(monkeypatch, edit, message):
+    """Each sequence moves every byte the balances count and still computes a wrong answer."""
+    good = G.host_sequence
+    monkeypatch.setattr(G, "host_sequence", lambda L, A=G.Act(): edit(good(L, A), L, A))
+    with pytest.raises(AssertionError, match=message):
+        G.check(G.layout())
+
+
+def test_more_cores_deal_and_fit_but_their_streams_need_a_memory_tile_split():
+    """One shim stream per core runs out of the shim's 16 channels past 15 cores; the split is not modeled."""
+    for n, bands, l1 in ((16, (3,) * 13 + (2,) * 3, 44752), (24, (2,) * 21 + (1,) * 3, 43984)):
+        L = G.layout(n_cores=n)
+        assert L.up_bands == L.down_bands == bands and L.l1 == l1
+        with pytest.raises(AssertionError, match=f"{n + 1} fill and {n} drain streams"):
+            G.check(L)
 
 
 def test_the_layouts_arithmetic_matches_the_fp64_reference():
@@ -193,7 +259,7 @@ def test_the_layouts_arithmetic_matches_the_fp64_reference():
 
 
 def test_the_bytes_the_options_stream():
-    """The tile pad costs 5120/4896 over the GGUF's bytes; q4_1 costs 5/4.25 per value plus the K pad."""
+    """The tile pad costs 5120/4896 over the GGUF's bytes; q4_1 costs 5/4.25 per value plus the K pad; int8 2.4x."""
     ideal = G.expert_stream_bytes("mxfp4_ideal")
     tiles = G.expert_stream_bytes("mxfp4")
     q41 = G.expert_stream_bytes("q4_1")
@@ -201,3 +267,7 @@ def test_the_bytes_the_options_stream():
     assert tiles * 4896 == ideal * 5120
     assert q41 == pytest.approx(ideal * (5 / 4.25) * (3072 / 2880), rel=1e-9)
     assert G.expert_stream_bytes("q4_1", pad_rows=True) == pytest.approx(q41 * 3072 / 2880, rel=1e-9)
+    # gemv_q8.h's half-tile is 16 rows x 256 K in 5120 B, not the container's 8704 B per 32 rows
+    q8 = G.expert_stream_bytes("q8")
+    assert q8 == 4 * 24 * 3 * 2880 * 3072 * 5 // 4 == 3_185_049_600
+    assert q8 * 5 == tiles * 12

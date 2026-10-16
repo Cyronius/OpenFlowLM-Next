@@ -1,10 +1,10 @@
 // MXFP4 GEMV tile for a compile-only Peano look at its cost (2026-10-16; plans/gptoss-expert-layout.md).
-//   python open_kernels/kernel_remarks.py utilities/aie-probes/gemv_mx4_probe.cc -Os -I open_kernels/designs/gemv_q4
+//   python open_kernels/kernel_remarks.py utilities/aie-probes/gemv_mx4_probe.cc -- -Os [-DMX4_DECODE=2]
 #include "aie_kernel_utils.h"
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
-#include "gemv_tab.h"
+#include "../../open_kernels/designs/gemv_q4/gemv_tab.h"
 
 // The tile of open_kernels/model/gptoss_layout.py: nibble planes at 0 and 2304, E8M0 at 4608, bias at 4928.
 #ifndef MX4_NB
@@ -31,8 +31,7 @@ static inline aie::vector<int8_t, 64> e2m1x2(const aie::vector<uint8_t, 64> &c) 
   return aie::select(mag, aie::neg(mag), neg);
 }
 #else
-// codes re-ordered by value at pack time (0..14) -> 2 x e2m1 + 12, no compare or select; the 12
-// comes back out through the block sums the way q4_1's minimum does
+// codes sorted by value at pack time (0..14) -> 2 x e2m1 + 12; the 12 leaves through the block sums like q4_1's min
 static inline aie::vector<int8_t, 64> e2m1x2(const aie::vector<uint8_t, 64> &c) {
   const aie::vector<int8_t, 64> t = c.template cast_to<int8_t>();
   const aie::vector<int8_t, 64> t2 = aie::add(t, t);

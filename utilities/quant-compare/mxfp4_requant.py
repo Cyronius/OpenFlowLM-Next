@@ -29,8 +29,7 @@ def tensor_bytes(t: dict) -> int:
 
 
 def mxfp4_rows(path: str, base: int, t: dict, expert: int) -> tuple[np.ndarray, np.ndarray]:
-    """One expert's [rows, cols] f32 matrix out of a [cols, rows, experts] MXFP4 tensor, and its
-    E8M0 exponent bytes."""
+    """One expert's [rows, cols] f32 matrix out of a [cols, rows, experts] MXFP4 tensor, and its E8M0 bytes."""
     cols, rows = t["dims"][0], t["dims"][1]
     nblk = rows * cols // 32
     raw = np.fromfile(path, np.uint8, count=nblk * 17, offset=base + t["offset"] + expert * nblk * 17)
