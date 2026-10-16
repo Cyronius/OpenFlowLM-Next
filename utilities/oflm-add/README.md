@@ -39,7 +39,7 @@ The installer automates what those chaotic repos don't state:
 1. Picks the best compatible `*.gguf` (exact `Q4_1`/`Q4_0` pools first, then `Q4_K`/`Q6_K`, `Q8_0` last) and verifies its tensor types match the filename claim.
 2. Detects `details.family` from the repo name, else the GGUF's `general.architecture`, else `config.json` (`model_type`, then `architectures`) from the repo or its base-model chain. Unmapped shapes (MoE variants with different geometry, vision-language checkpoints) refuse with a `--family` hint instead of linking the wrong kernels.
 3. Climbs the README `base_model` chain (quant -> finetune -> base, cycles visited once) for the auxiliary files the GGUF repo omits (`config.json`, `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`); gated or vanished bases fall back to the GGUF's embedded tokenizer.
-4. Guesses the tag size from the GGUF's bytes and quant (or the config geometry) when the slug carries no size marker, and links the closest official kernels by family and size, so `oflm serve` works out of the box.
+4. Guesses the tag size from the GGUF's bytes and quant (or the config geometry) when the slug carries no size marker, and links the closest official kernels by family and size, so `oflm serve` works out of the box. A size the official list files under a text-only family (Gemma 3 1B is `gemma3-text`, while its GGUF says `gemma3`) links that entry and takes its family.
 
 `--family` and `--tag` always override the heuristics when you know better.
 

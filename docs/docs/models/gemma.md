@@ -22,6 +22,13 @@ parent: Models
 oflm run gemma3:1b
 ```
 
+This tag runs on the closed engine. For the open kernels, install Google's QAT GGUF and run
+the tag `oflm-add` prints:
+
+```shell
+oflm-add google/gemma-3-1b-it-qat-q4_0-gguf
+```
+
 ---
 
 ## 🧩 Model Card: [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it)

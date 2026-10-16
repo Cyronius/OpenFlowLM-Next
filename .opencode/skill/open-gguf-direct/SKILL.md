@@ -235,6 +235,25 @@ records (`ATTN_QKV_BIAS` / `ATTN_PTAB_SPLIT`), and `lfm2.py` re-exports
 GGUF twins export in the same build, so a Qwen2.5-3B or LFM2 container shipped
 as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
 
+## Gemma 3 1B additions (2026-10-16, `.opencode/skill/open-gemma3-1b/SKILL.md`)
+
+- **Sandwich-norm names.** In a Gemma GGUF, HF's `post_attention_layernorm` is
+  `post_attention_norm` and `pre_feedforward_layernorm` is `ffn_norm`; in a llama GGUF
+  `ffn_norm` is HF's `post_attention_layernorm`. `GgufFile::resolve` decides by whether the
+  file has `post_attention_norm`. Before this, every Gemma 3 GGUF ran with the two swapped.
+- **Float heads.** `std_perm_gguf` re-quantizes F16 / BF16 / F32 tensors as it does Q8_0
+  (Gemma's tied F16 embedding is its head).
+- **Padded pools (OPEN-PACK-PAD).** A `std_perm_gguf` op may carry `src_dim` / `src_rows`, the
+  file tensor's own shape inside a wider / taller pool; the pad stays zero, and a file whose
+  shape the op misstates is refused. `embed_row` and `pack_norm` zero-extend into a wider
+  buffer. A `.q4nx` `std_perm` refuses a padded op.
+- **A padded set serves only a GGUF.** `Engine::find_kernels` declines a set whose q4nx view
+  is padded (`Manifest::reads_gguf_only`) unless the model directory has a `model.gguf` and no
+  `model.q4nx` (`Core::reads_gguf`, the same rule the Core loads by), so a `.q4nx` model under
+  the same name keeps its closed engine.
+- **Text-only official entries.** `oflm-add` matches a `gemma3` GGUF to the official
+  `gemma3-text` entry of the same size (`TEXT_ONLY_FAMILY`) and installs it under that family.
+
 ## Gotchas learned here
 
 - **designs/dense/gen_kernels.py regenerates gemv_q4_gy.cc / gemv_q4_gms.cc

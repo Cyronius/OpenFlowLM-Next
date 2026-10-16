@@ -49,7 +49,7 @@ one of them is built from source here.
 | Qwen 2.5 / 2.5-VL | `qwen2.5-it:3b`, `qwen2.5vl-it:3b` | ✅ open | ❌ closed | |
 | Qwen 3-VL | `qwen3vl-it:4b` | ✅ open | ❌ closed | |
 | LLaMA 3 | `llama3.1:8b`, `llama3.2:1b`, `llama3.2:3b` | ✅ **open** | — | |
-| Gemma 3 (text) | `gemma3:1b` | ✅ **open** | — | |
+| Gemma 3 (text) | `gemma3:1b` | ✅ **open** with the GGUF | — | `gemma3:1b` as published (`Gemma3-1B-NPU2`, a `model.q4nx`) runs on the closed `gemma_text_npu` DLL. For the open kernels, install Google's GGUF with `oflm-add google/gemma-3-1b-it-qat-q4_0-gguf` and run the tag it prints: the 1B's 1152-wide layers run zero-padded, which only the GGUF loader does. |
 | Gemma 3 (multimodal) | `gemma3:4b` | ✅ open | ❌ closed | Images always need the closed `gemma_npu` DLL. |
 | MedGemma, TranslateGemma | `medgemma:4b`, `medgemma1.5:4b`, `translategemma:4b` | ✅ open | ❌ closed | Same `gemma3` family, same image caveat. |
 | Phi-4-mini | `phi4-mini-it:4b` | ✅ **open** | — | |

@@ -1040,8 +1040,8 @@ for checkpoint / restore, null on the open engine -- `oflm serve` segfaulted on 
 request. Fixed to the `causal_lm` virtuals every other open-engine adapter already uses.
 
 ### OPEN-FAMILY-GEMMA3: Gemma 3 on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`)
-**Test category:** manual (needs the NPU and `OpenFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`
+**Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/dense/dx.py`, `designs/ln/ln_nr32.cc`, `harness/stream_patch.hpp`, `src/open_qwen36/`, `utilities/oflm-add`)
+**Test category:** manual (needs the NPU and `OpenFlowLM/Gemma3-4B-NPU2`); the derivation, the two RoPE tables, the window's row counts and the 4B layout are unit-tested in `tests/test_gemma3.py`, the 1B in `tests/test_gemma3_1b.py`
 
 A Gemma 3 text model (GQA with q/k RMSNorm, GeGLU-tanh, sandwich norms, five
 sliding-window layers per global one, a local and a linearly scaled global
@@ -1092,15 +1092,30 @@ this requirement:
   The GGUF derivation also reads an f32 `1e-6` and a linear RoPE factor of 1 as the config's
   own values, so both sources give the same `spec_hash`.
 
-**Acceptance criteria (unit), 1B:** `tests/test_gemma3_1b.py`.
+**Acceptance criteria (unit), 1B:** `tests/test_gemma3_1b.py`; the sandwich-norm names in
+`src/open_qwen36/gguf_pack_test.cpp`; the install resolving a `gemma3` GGUF of the 1B's size to
+the official `gemma3-text` entry (the 4B staying `gemma3`) in
+`utilities/oflm-add/tests/test_gguf_installer.py`.
 
-**Procedure (manual), 1B:** export `recipes/specs/gemma3-1b.json` (with
-`OPEN_KERNELS_UNVALIDATED=1` until the points are in the catalogue); write the fp64 reference
+**Procedure (manual), 1B:** export `recipes/specs/gemma3-1b.json`; write the fp64 reference
 from the GGUF (`model/make_decode.py --gguf <file> --model-dir <dir with config.json> --ids
 <prompt> --layers 2`, which writes `ref_ids.txt`); run `open_qwen36_cli --model <dir with
 model.gguf + config.json> --kernels <set> --layers 2 --ids <ref_ids> --prefill-logits
 --dump-logits <out>/y`; compare with `model/compare_decode.py`. Then the same over all 26
-layers, then `oflm-add` the GGUF repo, `oflm serve`, and `oflm-test --llm --model gemma3:1b`.
+layers, then `oflm-add google/gemma-3-1b-it-qat-q4_0-gguf`, `oflm serve gemma3:1b` (the load
+logs `Gemma 3 (text) on the open kernels`), and `oflm-test --llm --model gemma3:1b`.
+
+**Result 2026-10-16 (Gemma 3 1B, `google/gemma-3-1b-it-qat-q4_0-gguf`, on the XDNA2 NPU):**
+against the fp64 reference written from the same GGUF (`model/gguf_model.py`), a 2-layer slice
+through `open_qwen36_cli` matched at all 8 positions (logits corr >= 0.999995, same argmax),
+and the full 26 layers matched at 25 of 26 positions (corr >= 0.99990, same argmax); the 26th
+is a near tie, a 0.019-logit gap between the reference's top two that our logits order the
+other way by 0.028. `oflm-add` installs the GGUF as `gemma3:1b` (family `gemma3-text`, the
+family's kernel set linked), `oflm serve` runs it on the open kernels, and `oflm-test --llm
+--model gemma3:1b` passes 5 of 5 (two-turn chats, streamed and not, and the recall of a code
+from an earlier turn) with answers capped at 1024 tokens. The official `Gemma3-1B-NPU2`
+container stays on the closed engine (OPEN-PACK-PAD). Logs: `.claude/plans/gemma3-1b-run/`
+(15 slice, 16-17 full model, 13-14 serve and oflm-test, 21 and 24 the official container).
 
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
@@ -2010,7 +2025,10 @@ identical xclbin.
 **Result 2026-10-16:** 73 kernel sets over the 15 shipped specs give identical MLIR, and every
 attention translation unit preprocesses identically at every shipped spec's flags (the logs
 are kept with the Gemma 3 1B bring-up). The one-kv-head kernels compile with Peano at Gemma 3
-1B's flags; on hardware they are OPEN-FAMILY-GEMMA3's 1B result.
+1B's flags; on hardware they are OPEN-FAMILY-GEMMA3's 1B result. As a built-bytes check, the
+Gemma 3 4B `dx` set exported from the tree with this and the padding change matches the base
+commit's export under `--check` (instruction stream byte-identical, xclbin differing only in
+its build stamps).
 
 ### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
