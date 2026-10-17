@@ -9,6 +9,7 @@
 #include "AutoModel/gemma4_tool_parser.hpp"
 #include "metrices.hpp"
 #include "error_measure.hpp"
+#include "open_qwen36/engine.hpp"
 #include <cassert>
 
 /************              Gemma4_12B family            **************/
@@ -22,6 +23,9 @@ void Gemma4_12B::load_model(std::string model_path, json model_info, int default
     auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA4_ENGINE", "Gemma 4 12B (text)");
     this->open_text_ = static_cast<bool>(open_engine);
     if (open_engine) {
+        // The GGUF's tokenizer.ggml.suppress_tokens; unmasked, the text path emits <image|> mid-sentence
+        if (auto* eng = dynamic_cast<open_qwen36::Engine*>(open_engine.get()))
+            eng->suppress_tokens({eoa_token_id, eoi_token_id});
         this->lm_engine = std::move(open_engine);
         // Google's config.json nests the text model under text_config, where top-level readers (the sampler's vocab_size) never look
         auto& jc = this->lm_config->_json_config;

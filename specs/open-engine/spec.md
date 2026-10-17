@@ -1076,7 +1076,7 @@ engine -- the open one has no vision path.
 
 ### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B / 12B (text) on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `designs/attn/attn_q.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `src/common/AutoModel/modeling_gemma4_12b.cpp`, `utilities/oflm-add`)
-**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
+**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids and family routing: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
 
 Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
 run as text on the open kernels through the dense recipe, the model loaded straight from the GGUF and
@@ -1116,7 +1116,13 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   norm and RoPE, then the weightless v norm, so the cache still holds two different tensors. The pack
   plan streams `attn_k` into the v slot as well, and the attention kernel's v path does the rest. The
   layer output scalar is applied on the host after every layer without the per-layer-input stage.
-  The `gemma4-12b` adapter selects the open engine the same way, text only.
+  The `gemma4-12b` adapter selects the open engine the same way, text only. It never samples
+  `<image|>` or `<audio|>` (258882, 258883; the GGUF's `tokenizer.ggml.suppress_tokens`): the open
+  engine reports their logits as -inf. Unmasked, the model writes `<image|>` mid-sentence at
+  temperature 0.3, and the server passes it through as text.
+  `oflm-add` routes a 12B whose name has no `gemma4-12b` / `gemma-4-12b` prefix by its contents: a
+  `gemma4_unified` config, or a gemma4 GGUF with no per-layer inputs at 48 layers of 3840. Any other
+  Gemma 4 without per-layer inputs is refused with a `--family` hint, not sent to the E-series.
 - The 12B's global kind needs two design knobs, both off for every other build: each attention core
   keeps only its own four heads' q (`ATTN_QLOCAL`; all 16 heads of 512 would take 32 KB of the core's
   64 KB), and the main cores take the 16 KB attention output one x element at a time (it is four
@@ -1190,7 +1196,8 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    config is derived from the GGUF). Short slices saturate the soft cap (their top logits are all 30), so
    they run on a copy of the set whose manifest has `logit_softcap: 0` and are compared with the
    replica's uncapped head; the full model is compared after the cap. Step 4 with the GGUF beside
-   google/gemma-4-12B-it's text files.
+   google/gemma-4-12B-it's text files; the server log of `oflm-test --llm --gen-lim 256` (temperature
+   0.3) shall contain no `<image|>` or `<audio|>`.
 
 Steps 3 and 4 are also the regression checks for two load fixes with no unit test (the GGUF config
 derivation and the adapter sit in XRT-linked code): on E2B, step 3 stops at load unless `derive_config`
@@ -1230,7 +1237,12 @@ audio label. `oflm serve` runs it on the open kernels and answers "The capital o
 the text-only reason. `oflm-test --llm --gen-lim 128` passes 5 of 5, context retention included; at
 `--gen-lim 256` the 15-minute budget reached three checks, all passing. `oflm-test --tools`, non-stream
 only for the same budget: L1 to L4 pass (a basic and an inferred call, restraint, two parallel calls); the
-tool loop (L5) had made its lookup call when the budget ran out.
+tool loop (L5) had made its lookup call when the budget ran out. That `--gen-lim 256` run's replies held
+`<image|>` twice, mid-sentence.
+
+**Result 2026-10-17 (serve, 12B, `<image|>` / `<audio|>` suppressed):** the probe and the image refusal as
+above; `oflm-test --llm --gen-lim 256` passes 5 of 5 inside the 15 minutes, context retention included, and
+none of its eight replies holds `<image|>` or `<audio|>`.
 
 **Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
 soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split

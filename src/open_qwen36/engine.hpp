@@ -64,8 +64,11 @@ public:
     static std::string find_kernels(const LM_Config& config, std::string* how = nullptr);
 
     const Core& core() const { return *core_; }
+    /// Token ids whose logits read -inf from here on, so the sampler never picks them.
+    void suppress_tokens(std::vector<int> ids) { suppressed_ = std::move(ids); }
 
 private:
+    std::vector<int> suppressed_;
     CoreConfig cfg_;
     oflm_rt::device* dev_;
     std::unique_ptr<Core> core_;

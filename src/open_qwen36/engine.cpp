@@ -115,6 +115,8 @@ buffer<bf16> Engine::logits_view() {
     for (size_t i = 0; i < real; ++i) logits_[i] = bf16(lg[i]);
     // lm_head rows past the tokenizer's vocab are padding with undefined content
     for (size_t i = real; i < vocab; ++i) logits_[i] = bf16(-std::numeric_limits<float>::infinity());
+    for (int id : suppressed_)
+        if (id >= 0 && static_cast<size_t>(id) < vocab) logits_[id] = bf16(-std::numeric_limits<float>::infinity());
     return buffer<bf16>(logits_.data(), logits_.size());
 }
 

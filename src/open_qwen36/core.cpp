@@ -174,7 +174,8 @@ nlohmann::json derive_config(const GgufFile& g) {
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
     c["num_attention_heads"] = u("attention.head_count");
     // the Gemma 4 12B lists head_count_kv per layer, an array this reader skips: the gemma4 branch reads its k projections
-    if (!g.kv_str(arch + ".attention.head_count_kv").empty()) c["num_key_value_heads"] = u("attention.head_count_kv");
+    if (arch != "gemma4" || !g.kv_str(arch + ".attention.head_count_kv").empty())
+        c["num_key_value_heads"] = u("attention.head_count_kv");
     // Gemma 4 E2B lists one FFN width per layer, an array this reader skips: layer 0's tensor says it
     if (g.kv_str(arch + ".feed_forward_length").empty())
         c["intermediate_size"] = g.tensor("blk.0.ffn_up.weight").dims.at(1);
