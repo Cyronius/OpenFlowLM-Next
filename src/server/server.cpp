@@ -197,8 +197,7 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
                path == "/api/embeddings" ||
                path == "/v1/images/generations" ||
                path == "/v1/images/edits" ||
-               // CPU-only, but queued with the rest: busy cores slow a concurrent NPU
-               // job 2-3x (shared package power), and two syntheses would split the cores.
+               // CPU-only, but busy cores slow a concurrent NPU job 2-3x (SERVER-SPEECH-QUEUE).
                path == "/v1/audio/speech";
     }
     return false;
@@ -830,7 +829,7 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
 
             response_ref.result(status);
             if (openai_compat::is_binary_body(response_data)) {
-                // a file, e.g. /v1/audio/speech's WAV (SERVER-SPEECH-FORMATS)
+                // a file, e.g. /v1/audio/speech's WAV (SERVER-SPEECH)
                 const auto& bytes = response_data.at("oflm_binary_body").get_binary();
                 response_ref.body().assign(bytes.begin(), bytes.end());
                 response_ref.set(http::field::content_type, response_data.at("content_type").get<std::string>());

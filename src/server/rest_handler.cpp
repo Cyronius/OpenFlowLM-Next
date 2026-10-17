@@ -486,7 +486,8 @@ void RestHandler::ensure_tts_model_loaded(const std::string& model_tag) {
         this->tts_engine->phonemize("a", false);   // the US lexicon now, not on the first request
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         header_print("OFLM", "Loaded text-to-speech model " + resolved + " (" +
-                                 this->tts_engine->model().weights_dtype() + " weights, " +
+                                 this->tts_engine->model().weights_dtype() + " file, weights held as " +
+                                 (open_tts::weight_dtype() == open_tts::DType::F16 ? "f16, " : "f32, ") +
                                  std::to_string(this->tts_engine->voices().size()) + " voices) in " +
                                  std::to_string((int)ms) + " ms, on the CPU");
     } catch (const std::exception& e) {
@@ -2038,7 +2039,7 @@ void RestHandler::handle_openai_audio_speech(const json& request,
         if (!info.unknown.empty()) {
             std::string u;
             for (const auto& w : info.unknown) u += (u.empty() ? "" : ", ") + w;
-            header_print("OFLM", "speech: words not in the lexicon, spelled out: " + u);
+            header_print("OFLM", "speech: words not in the lexicon: " + u);
         }
         std::printf("[oflm] speech: %.2f s of audio in %zu chunk(s), voice %s, host wall clock %.0f ms\n",
                     info.seconds, info.chunks.size(), voice.c_str(), ms);

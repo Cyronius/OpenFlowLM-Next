@@ -611,9 +611,7 @@ inline json images_request(const json& req, const std::vector<int>& sizes, int a
     return json();
 }
 
-// ---------------------------------------------------------------------------------
-// The Speech API (/v1/audio/speech). specs/server-api: SERVER-SPEECH-*.
-// ---------------------------------------------------------------------------------
+// The Speech API (/v1/audio/speech): SERVER-SPEECH-* in specs/server-api.
 
 /// A response that is a file, not JSON: the responder sends `bytes` with `content_type`.
 inline json binary_body(const std::string& bytes, const std::string& content_type) {
@@ -637,16 +635,7 @@ struct SpeechRequest {
 
 constexpr size_t kSpeechMaxInput = 4096;   ///< OpenAI's limit, in characters
 
-/// Parse and check a speech request into `out`: an empty json when acceptable, else the 400.
-///
-/// The rules (SERVER-SPEECH-PARAMS):
-///   - `input` (a non-empty string of at most 4096 characters) and `voice` (a string) are required;
-///   - `response_format` is wav or pcm; mp3, opus, aac and flac are OpenAI's and are refused as
-///     not implemented, because this build carries no encoder for them;
-///   - `speed` is a number in [0.25, 4.0], OpenAI's range, default 1;
-///   - `stream_format: "sse"` is refused as not implemented; `"audio"` is the whole file;
-///   - `instructions` is a string that is accepted and ignored: Kokoro takes no instructions;
-///   - `null` is the same as leaving a field out, and fields this server does not know are ignored.
+/// An empty json when the request is acceptable, else the 400; the rules are SERVER-SPEECH-PARAMS.
 inline json speech_request(const json& req, SpeechRequest& out) {
     out = SpeechRequest{};
     if (json err = require_field(req, "input", FieldType::String); !err.is_null()) return err;
