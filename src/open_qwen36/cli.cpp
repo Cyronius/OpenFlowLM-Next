@@ -43,11 +43,21 @@
 #include <vector>
 
 #include "open_qwen36/core.hpp"
+#include "open_qwen36/vision/vit.hpp"
 
 using open_qwen36::Core;
 using open_qwen36::CoreConfig;
 
 namespace {
+
+std::vector<float> read_f32_file(const std::string& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) { std::fprintf(stderr, "cannot read %s\n", p.c_str()); std::exit(2); }
+    std::vector<float> v(static_cast<size_t>(f.tellg()) / 4);
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(v.size() * 4));
+    return v;
+}
 
 std::vector<int> parse_ids(const std::string& s) {
     std::vector<int> ids;
@@ -108,6 +118,11 @@ struct Args {
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
+    // OPEN-VISION-GEMMA3: the run of --image-token ids in --ids takes these rows, through the image block
+    std::string image, mmproj, embeds, dump_features;
+    int image_token = 262144;
+    bool causal_image = false;      // --causal-image: the rows one at a time, causally (the A/B)
+    std::vector<float> rows;        // filled in main from --embeds or from --image through the tower
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -200,6 +215,12 @@ Args parse(int argc, char** argv) {
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
+        else if (k == "--image") a.image = val();
+        else if (k == "--mmproj") a.mmproj = val();
+        else if (k == "--embeds") a.embeds = val();
+        else if (k == "--dump-features") a.dump_features = val();
+        else if (k == "--image-token") a.image_token = std::atoi(val().c_str());
+        else if (k == "--causal-image") a.causal_image = true;
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
@@ -284,7 +305,25 @@ std::vector<int> request(Core& core, const Args& a) {
             i += t_real;
         }
     }
+    const size_t H = core.manifest().hidden;
     for (; i < a.ids.size(); ++i) {
+        if (!a.rows.empty() && a.ids[i] == a.image_token) {
+            size_t j = i;
+            while (j < a.ids.size() && a.ids[j] == a.image_token) ++j;
+            if ((j - i) * H != a.rows.size()) {
+                std::fprintf(stderr, "ERROR: %zu image tokens but %zu rows\n", j - i, a.rows.size() / H);
+                std::exit(2);
+            }
+            const bool last = j == a.ids.size(), want = a.prefill_logits || last;
+            if (a.causal_image) core.step_rows(a.rows.data(), j - i, want);
+            else core.step_bidir_block(a.rows.data(), j - i, want);
+            std::fprintf(stderr, "image block [%zu, %zu) %s: %.0f ms\n", i, j, a.causal_image ? "causal" : "both ways",
+                         core.last_timing().total_ms);
+            if (!a.dump_prefix.empty() && want) dump_pos(a.dump_prefix, static_cast<int>(j - 1), core.logits());
+            if (!a.dump_prefix.empty() && last) dump(a.dump_prefix, dumped++, core.logits());
+            i = j - 1;
+            continue;
+        }
         bool last = i + 1 == a.ids.size();
         bool want = a.prefill_logits || last;
         core.step(a.ids[i], want);
@@ -386,6 +425,27 @@ int main(int argc, char** argv) {
         else if (!std::getenv("OFLM_OPEN_HOST_ATTN_DECODE")) core.set_decode_route("auto");
         std::fprintf(stderr, "resident after %.1f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        if (!a.embeds.empty()) {
+            a.rows = read_f32_file(a.embeds);
+        } else if (!a.image.empty()) {
+            namespace V = open_qwen36::vision;
+            if (a.mmproj.empty()) { std::fprintf(stderr, "--image needs --mmproj\n"); return 2; }
+            const V::VitConfig vc = V::VitConfig::siglip_from_gguf(a.mmproj);
+            const V::VitWeights vw = V::load_vit(a.mmproj, vc);
+            const std::vector<float> px = read_f32_file(a.image);
+            if (px.size() != static_cast<size_t>(vc.channels) * vc.image * vc.image) {
+                std::fprintf(stderr, "%s is not one %d px [3, %d, %d] f32 image\n", a.image.c_str(), vc.image, vc.image, vc.image);
+                return 2;
+            }
+            const auto tv = std::chrono::steady_clock::now();
+            a.rows = V::siglip_forward(vc, vw, V::siglip_patches(vc, px.data()).data());
+            std::fprintf(stderr, "Siglip tower -> %d tokens in %.1f s\n", vc.tokens(),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - tv).count());
+            if (!a.dump_features.empty()) {
+                std::ofstream f(a.dump_features, std::ios::binary);
+                f.write(reinterpret_cast<const char*>(a.rows.data()), static_cast<std::streamsize>(a.rows.size() * 4));
+            }
+        }
         if (a.bench) {
             core.bench_dispatch(a.bench_layer, a.bench);
             std::printf("DONE\n");

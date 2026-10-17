@@ -1772,6 +1772,10 @@ void Core::mrope_begin() {
     mrope_pos_ = pos_;
 }
 
+void Core::step_rows(const float* rows, size_t n, bool want_logits) {
+    for (size_t t = 0; t < n; ++t) step_impl(-1, rows + t * w_->hidden, want_logits && t + 1 == n, nullptr);
+}
+
 bool Core::bidir_block_ok(std::string* why) const {
     auto no = [why](const std::string& s) {
         if (why) *why = s;

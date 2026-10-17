@@ -153,6 +153,77 @@ void Engine::ensure_vit() {
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
+void Engine::ensure_siglip() {
+    if (vit_) return;
+    const fs::path mm = fs::path(cfg_.model_dir) / "mmproj.gguf";
+    if (!fs::is_regular_file(mm))
+        throw std::runtime_error("open_qwen36: " + cfg_.model_dir + " has no mmproj.gguf, the vision tower an image needs "
+                                 "on the open engine (oflm-add installs the model's mmproj there); "
+                                 "OFLM_GEMMA_ENGINE=closed runs this model on the closed engine instead");
+    auto t0 = std::chrono::steady_clock::now();
+    vcfg_ = vision::VitConfig::siglip_from_gguf(mm.string());
+    if (static_cast<size_t>(vcfg_.out) != core_->manifest().hidden)
+        throw std::runtime_error("open_qwen36: mmproj.gguf projects to " + std::to_string(vcfg_.out) +
+                                 " where this model's hidden size is " + std::to_string(core_->manifest().hidden));
+    vit_ = std::make_unique<vision::VitWeights>(vision::load_vit(mm.string(), vcfg_));
+    std::fprintf(stderr, "open_qwen36: vision tower resident (mmproj.gguf: Siglip, %d blocks, %s projector) in %.1f s\n",
+                 vcfg_.depth, vcfg_.projector.c_str(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+buffer<bf16> Engine::prefill_gemma3(std::vector<int>& ids, const bytes& px) {
+    ensure_siglip();
+    int image_id = -1;
+    {
+        std::ifstream cf(cfg_.model_dir + "/config.json");
+        auto j = nlohmann::json::parse(cf, nullptr, false);
+        if (j.is_object()) image_id = j.value("image_token_index", j.value("image_token_id", -1));
+    }
+    if (image_id < 0)
+        throw std::runtime_error("open_qwen36: config.json names no image_token_index for this Gemma 3 model");
+    const size_t per = static_cast<size_t>(vcfg_.channels) * vcfg_.image * vcfg_.image;
+    if (px.size() % (per * 2))
+        throw std::runtime_error("open_qwen36: the image payload is not whole " + std::to_string(vcfg_.image) + " px images");
+    const size_t nimg = px.size() / (per * 2), want = static_cast<size_t>(vcfg_.tokens());
+    // the towers first, outside guarded(): a tower that fails says why without costing an engine rebuild
+    std::vector<std::vector<float>> rows;
+    for (size_t i = 0; i < ids.size();) {
+        if (ids[i] != image_id) { ++i; continue; }
+        size_t j = i;
+        while (j < ids.size() && ids[j] == image_id) ++j;
+        if (j - i != want)
+            throw std::runtime_error("open_qwen36: a run of " + std::to_string(j - i) + " image tokens; a Gemma 3 image is " +
+                                     std::to_string(want));
+        if (rows.size() >= nimg) throw std::runtime_error("open_qwen36: more images in the prompt than in the payload");
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(px.data()) + rows.size() * per;
+        std::vector<float> chw(per);
+        for (size_t k = 0; k < per; ++k) {
+            const uint32_t u = static_cast<uint32_t>(p[k]) << 16;
+            std::memcpy(&chw[k], &u, 4);
+        }
+        auto t0 = std::chrono::steady_clock::now();
+        rows.push_back(vision::siglip_forward(vcfg_, *vit_, vision::siglip_patches(vcfg_, chw.data()).data()));
+        std::fprintf(stderr, "open_qwen36: image %zu: Siglip tower -> %zu tokens in %.2f s\n", rows.size(), want,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        i = j;
+    }
+    if (rows.size() != nimg)
+        std::fprintf(stderr, "open_qwen36: WARNING: %zu image(s) in the payload, %zu in the prompt\n", nimg, rows.size());
+    return guarded([&] {
+        size_t img = 0;
+        for (size_t i = 0; i < ids.size();) {
+            if (ids[i] != image_id) {
+                core_->step(ids[i], i + 1 == ids.size());
+                ++i;
+                continue;
+            }
+            core_->step_bidir_block(rows[img++].data(), want, i + want == ids.size());
+            i += want;
+        }
+        return logits_view();
+    });
+}
+
 buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
     if (ids.empty()) return logits_view();
     if (payload == nullptr) {
@@ -209,6 +280,9 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             return logits_view();
         });
     }
+    // Gemma 3's payload is the app's own bf16 images (modeling_gemma3_image.cpp), and each image
+    // attends both ways inside itself, so it takes its own path (OPEN-VISION-GEMMA3).
+    if (core_->manifest().family == "gemma3") return prefill_gemma3(ids, *static_cast<const bytes*>(payload));
     // Images: the app has expanded each one into grid_h * grid_w / 4 image tokens and
     // hands the preprocessed patches for the whole prompt. The vision tower (host CPU)
     // turns each image into that many embedding rows; each row is stepped through the

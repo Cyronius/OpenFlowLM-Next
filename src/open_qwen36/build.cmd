@@ -47,11 +47,24 @@ if errorlevel 1 goto :clfail
 set "WHICH=gguf_pack_test"
 out\gguf_pack_test.exe
 if %errorlevel% neq 0 goto :testfail
+echo [open_qwen36] bidir_block_test
+cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
+   /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
+   bidir_block_test.cpp /Fe:out\bidir_block_test.exe /Fo:out\
+if errorlevel 1 goto :clfail
+set "WHICH=bidir_block_test"
+out\bidir_block_test.exe
+if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] vit_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj /openmp /arch:AVX2 /fp:fast ^
    /I "." /I ".." /I "..\include" ^
-   vision\vit_test.cpp vision\vit.cpp q4nx_file.cpp /Fe:out\vit_test.exe /Fo:out\
+   vision\vit_test.cpp vision\vit.cpp q4nx_file.cpp gguf_file.cpp /Fe:out\vit_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
+set "WHICH=vit_test --siglip"
+out\vit_test.exe --siglip ..\..\specs\open-engine\tests\fixtures\siglip_tiny_up\mmproj.gguf ..\..\specs\open-engine\tests\fixtures\siglip_tiny_up
+if %errorlevel% neq 0 goto :testfail
+out\vit_test.exe --siglip ..\..\specs\open-engine\tests\fixtures\siglip_tiny_down\mmproj.gguf ..\..\specs\open-engine\tests\fixtures\siglip_tiny_down
+if %errorlevel% neq 0 goto :testfail
 REM vit_test needs the model's vision_weight.q4nx and a fixture from replica_vit.py; run it by hand:
 REM   python ..\..\open_kernels\model\replica_vit.py --grid 16 16 --no-hf --fixture <dir>
 REM   out\vit_test.exe %USERPROFILE%\.oflm\models\Qwen3.6-35B-A3B-NPU2 <dir>
@@ -65,7 +78,7 @@ REM C:\dev\XRT source checkout (no XRT build step run in it) never produces,
 REM and cl fails with C1083 before ever reaching this file's own code.
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp vision\vit.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\ ^
    /link /DELAYLOAD:VCOMP140.DLL delayimp.lib
 if errorlevel 1 goto :clfail

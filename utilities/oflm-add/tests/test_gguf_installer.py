@@ -77,6 +77,54 @@ def test_gemma3_1b_gguf_resolves_to_the_text_only_entry():
     assert "gemma3-text" in oflm_add.GGUF_CAPABLE_FAMILIES
 
 
+def test_a_projector_is_never_installed_as_the_model():
+    """Traces: OPEN-VISION-GEMMA3. A Q8_0 projector would otherwise win where a repo has no 4-bit model file."""
+    chosen, refused = oflm_add.choose_gguf_file(["translategemma-4b-it.mmproj-Q8_0.gguf", "translategemma-4b-it.Q8_0.gguf"])
+    assert chosen == "translategemma-4b-it.Q8_0.gguf"
+    assert "vision projector" in refused["translategemma-4b-it.mmproj-Q8_0.gguf"]
+    chosen, _ = oflm_add.choose_gguf_file(["mmproj-model-f16-4B.gguf", "gemma-3-4b-it-qat-Q4_0.gguf"])
+    assert chosen == "gemma-3-4b-it-qat-Q4_0.gguf"
+
+
+def test_choose_mmproj_prefers_16_bit_and_refuses_a_quantized_one():
+    """Traces: OPEN-VISION-GEMMA3. The names unsloth, ggml-org, Google, bartowski and mradermacher ship."""
+    chosen, refused = oflm_add.choose_mmproj(["mmproj-F32.gguf", "mmproj-BF16.gguf", "mmproj-F16.gguf", "m-Q4_0.gguf"])
+    assert chosen == "mmproj-F16.gguf" and not refused
+    assert oflm_add.choose_mmproj(["mmproj-model-f16-4B.gguf"])[0] == "mmproj-model-f16-4B.gguf"
+    assert oflm_add.choose_mmproj(["mmproj-google_gemma-3-4b-it-bf16.gguf"])[0] == "mmproj-google_gemma-3-4b-it-bf16.gguf"
+    chosen, refused = oflm_add.choose_mmproj(["translategemma-4b-it.mmproj-Q8_0.gguf", "translategemma-4b-it.mmproj-f16.gguf"])
+    assert chosen == "translategemma-4b-it.mmproj-f16.gguf"
+    assert "16-bit or f32" in refused["translategemma-4b-it.mmproj-Q8_0.gguf"]
+    assert oflm_add.choose_mmproj(["gemma-3-1b-it-q4_0.gguf"]) == (None, {})
+    assert "gemma3" in oflm_add.MMPROJ_FAMILIES and "gemma3-text" not in oflm_add.MMPROJ_FAMILIES
+
+
+def test_an_installed_projector_marks_the_entry_vlm():
+    """Traces: OPEN-VISION-GEMMA3."""
+    base = {"name": "Gemma3-4B-NPU2", "vlm": True, "files": ["model.q4nx", "vision_weight.q4nx"]}
+    with_tower = oflm_add.build_entry(base, "gemma-3-4b-it-qat-GGUF", ["model.gguf", "mmproj.gguf"], 4000000000)
+    text_only = oflm_add.build_entry(base, "gemma-3-4b-it-qat-GGUF", ["model.gguf"], 4000000000)
+    assert with_tower["vlm"] is True and text_only["vlm"] is False
+    assert base["files"] == ["model.q4nx", "vision_weight.q4nx"]
+
+
+def test_the_chat_template_must_read_message_images(tmp_path):
+    """Traces: OPEN-VISION-GEMMA3. The server hands images over as message['images']."""
+    hf_style = "{%- for item in message['content'] -%}{%- if item['type'] == 'image' -%}<start_of_image>{%- endif -%}"
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"chat_template": hf_style}), encoding="utf-8")
+    assert not oflm_add.template_reads_images(tmp_path)
+    (tmp_path / "chat_template.jinja").write_text("{%- if 'images' in message -%}x{%- endif -%}", encoding="utf-8")
+    assert oflm_add.template_reads_images(tmp_path)
+
+
+def test_official_repo_id_fills_the_owner():
+    reg = {"hf_owner": "Atomic-Germ"}
+    assert oflm_add.official_repo_id(reg, {"url": "https://huggingface.co/{hf_owner}/Gemma3-4B-NPU2"}) == "Atomic-Germ/Gemma3-4B-NPU2"
+    assert oflm_add.official_repo_id(reg, {"url": "https://huggingface.co/{hf_owner}/medgemma-4b-it-NPU2/resolve/main"}) == \
+        "Atomic-Germ/medgemma-4b-it-NPU2"
+    assert oflm_add.official_repo_id(reg, {}) is None
+
+
 def test_explicit_kernel_manifest_can_enable_gguf(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"gguf": {}}), encoding="utf-8")

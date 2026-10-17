@@ -75,6 +75,10 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "gemma3-text", "granite", "hunyuan"}
 # The official list files Gemma 3 1B (no vision tower) as gemma3-text; its GGUF says gemma3.
 TEXT_ONLY_FAMILY = {"gemma3": "gemma3-text"}
+# A vision tower GGUF (llama.cpp's mmproj) beside the model installs as mmproj.gguf for the families
+# whose open engine reads one (OPEN-VISION-GEMMA3); it keeps its matrices as shipped, 16-bit or f32.
+MMPROJ_FAMILIES = {"gemma3"}
+MMPROJ_PREFERENCE = ["F16", "BF16", "F32"]
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -131,6 +135,9 @@ def choose_gguf_file(names):
     for n in names:
         if not n.endswith(".gguf"):
             continue
+        if is_mmproj(n):
+            refused[n] = "a vision projector, not the model's weights"
+            continue
         if re.search(r"-\d+-of-\d+\.gguf$", n):
             refused[n] = "multi-part GGUF (not supported; a single-file export needed)"
             continue
@@ -144,6 +151,57 @@ def choose_gguf_file(names):
     if not cands:
         return None, refused
     return cands[0][1], refused
+
+
+def is_mmproj(name):
+    return "mmproj" in name.lower()
+
+
+def mmproj_kind(name):
+    """'F16' / 'BF16' / 'F32' from a projector file name, else None (a quantized or unmarked one)."""
+    stem = name.lower()[:-5] if name.lower().endswith(".gguf") else name.lower()
+    for k in ("bf16", "f16", "f32"):
+        if re.search(rf"(^|[.\-_]){k}($|[.\-_])", stem):
+            return k.upper()
+    return None
+
+
+def choose_mmproj(names):
+    """The vision projector to install beside the model: (chosen, refused)."""
+    refused, cands = {}, []
+    for n in names:
+        if not (n.endswith(".gguf") and is_mmproj(n)):
+            continue
+        k = mmproj_kind(n)
+        if k not in MMPROJ_PREFERENCE:
+            refused[n] = ("not a 16-bit or f32 projector; the open engine's vision tower keeps the weights "
+                          "as shipped and reads F16 / BF16 / F32")
+            continue
+        cands.append((MMPROJ_PREFERENCE.index(k), n))
+    cands.sort()
+    return (cands[0][1] if cands else None), refused
+
+
+def template_reads_images(target):
+    """Whether the installed chat template passes message['images'], which is how the server hands
+    images to the model classes (src/server/rest_handler.cpp normalize_template)."""
+    p = Path(target) / "chat_template.jinja"
+    if p.is_file():
+        text = p.read_text(encoding="utf-8", errors="replace")
+    else:
+        tc = Path(target) / "tokenizer_config.json"
+        text = (load_json(tc) if tc.is_file() else {}).get("chat_template") or ""
+        if isinstance(text, list):
+            text = " ".join(t.get("template", "") for t in text if isinstance(t, dict))
+    return "images" in text
+
+
+def official_repo_id(system_registry, entry):
+    """The Hugging Face repo id an official entry downloads from ({hf_owner} filled in), or None."""
+    url = (entry or {}).get("url") or ""
+    url = url.replace("{hf_owner}", system_registry.get("hf_owner", ""))
+    m = re.match(r"https://huggingface\.co/([^/]+/[^/]+)", url)
+    return m.group(1) if m else None
 
 
 def root_file_names(tree):
@@ -923,23 +981,26 @@ def download_file(url, dest, expected_size=None, expected_sha=None, verify=True,
     os.replace(tmp, dest)
 
 
-def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False, gguf_name=None, want=None):
+def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, quiet=False, gguf_name=None, want=None,
+                 mmproj_name=None):
     """Populate target/ with the model files; returns the list of files present.
 
     With gguf_name set (the GGUF-direct path) the wanted set is the tokenizer
-    files plus that one GGUF, stored canonically as model.gguf. Otherwise the
+    files plus that one GGUF, stored canonically as model.gguf (and mmproj_name
+    as mmproj.gguf). Otherwise the
     default is ALL_FILES; an explicit `want` list overrides it (used by the
     NPU-embedding path, which fetches a safetensors checkpoint, not model.q4nx)."""
     obtained = []
     target.mkdir(parents=True, exist_ok=True)
     if gguf_name:
-        want_list = GGUF_FILES + GGUF_OPTIONAL
+        want_list = GGUF_FILES + GGUF_OPTIONAL + (["mmproj.gguf"] if mmproj_name else [])
     else:
         want_list = want if want is not None else ALL_FILES
+    names = {"model.gguf": gguf_name, "mmproj.gguf": mmproj_name}
     if modelscope:
         domain, entries = ms_file_tree(repo_id)
         for fname in want_list:
-            remote = gguf_name if fname == "model.gguf" else fname
+            remote = names.get(fname) or fname
             if remote not in entries:
                 continue
             dest = target / fname
@@ -974,7 +1035,7 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
         if p:
             entries[p] = e
     for fname in want_list:
-        remote = gguf_name if fname == "model.gguf" else fname
+        remote = names.get(fname) or fname
         if remote not in entries:
             continue
         dest = target / fname
@@ -999,11 +1060,13 @@ def fetch_assets(repo_id, target, modelscope=False, verify=True, force=False, qu
     return obtained
 
 
-def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None):
+def copy_from_dir(src_dir, target, force=False, gguf_name=None, want=None, mmproj_name=None):
     obtained = []
-    want_list = (GGUF_FILES + GGUF_OPTIONAL) if gguf_name else (want if want is not None else ALL_FILES)
+    want_list = ((GGUF_FILES + GGUF_OPTIONAL + (["mmproj.gguf"] if mmproj_name else [])) if gguf_name
+                 else (want if want is not None else ALL_FILES))
+    names = {"model.gguf": gguf_name, "mmproj.gguf": mmproj_name}
     for fname in want_list:
-        src = src_dir / (gguf_name if fname == "model.gguf" else fname)
+        src = src_dir / (names.get(fname) or fname)
         if src.is_file():
             dest = target / fname
             if dest.is_file() and not force:
@@ -1148,7 +1211,7 @@ def build_entry(base_entry, dir_name, files, size):
     entry.setdefault("details", {}).setdefault("format", "NPU2")
     if size:
         entry["size"] = size
-    entry["vlm"] = any(f.startswith("vision") for f in files)
+    entry["vlm"] = any(f.startswith("vision") or f == "mmproj.gguf" for f in files)
     return entry
 
 
@@ -1885,6 +1948,7 @@ def main():
         except Exception as ex:
             log(f"[WARN] Could not list the repo tree ({ex}); assuming the NPU2 path.")
     gguf_name, gguf_refused = choose_gguf_file(gguf_names)
+    mmproj_name, mmproj_refused = choose_mmproj(gguf_names)
     cache = None
     if local_dir:
         have_q4nx = (local_dir / "model.q4nx").is_file()
@@ -2057,6 +2121,9 @@ def main():
             # directory is fixed by the engine; point the xclbin link there.
             xclbin_source = "Embedding-Gemma-300M-OpenNPU2"
 
+    # the vision tower rides along only where the open engine reads one
+    mmproj_use = mmproj_name if gguf_mode and family in MMPROJ_FAMILIES else None
+
     if not args.dry_run:
         if official:
             note = f" ({official_note})" if official_note else ""
@@ -2073,7 +2140,9 @@ def main():
         if gguf_mode:
             print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
-            for n, why in sorted(gguf_refused.items()):
+            if mmproj_use:
+                print(f"vision tower   : {mmproj_use} -> mmproj.gguf")
+            for n, why in sorted({**gguf_refused, **mmproj_refused}.items()):
                 print(f"  skipped      : {n} ({why})")
             bases = get_base_chain()
             print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
@@ -2101,13 +2170,15 @@ def main():
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
         for n, why in sorted(gguf_refused.items()):
             log(f"[INFO]   skipping {n}: {why}")
+    if gguf_mode and mmproj_use and not args.quiet:
+        log(f"[INFO] vision tower: {mmproj_use} -> mmproj.gguf")
     if local_dir:
         if not args.quiet:
             log(f"[INFO] Using local model directory: {local_dir}")
         target.mkdir(parents=True, exist_ok=True)
         files = copy_from_dir(local_dir, target, force=args.force,
                               gguf_name=gguf_name if gguf_mode else None,
-                              want=NPU_EMBED_FILES if npue_embed else None)
+                              want=NPU_EMBED_FILES if npue_embed else None, mmproj_name=mmproj_use)
     else:
         snapshot = ms_cache_snapshot(repo) if modelscope else hf_cache_snapshot(repo)
         # a snapshot that holds only a README (a model card was fetched) is not the weights
@@ -2119,14 +2190,17 @@ def main():
             target.mkdir(parents=True, exist_ok=True)
             files = copy_from_dir(snapshot, target, force=args.force,
                                   gguf_name=gguf_name if gguf_mode else None,
-                                  want=NPU_EMBED_FILES if npue_embed else None)
+                                  want=NPU_EMBED_FILES if npue_embed else None, mmproj_name=mmproj_use)
+            if mmproj_use and "mmproj.gguf" not in files and not modelscope:
+                if fetch_from_repo(repo, mmproj_use, target / "mmproj.gguf", force=args.force):
+                    files.append("mmproj.gguf")
         else:
             if not args.quiet:
                 log(f"[INFO] Downloading model files from {'ModelScope' if modelscope else 'Hugging Face'}: {repo}")
             target.mkdir(parents=True, exist_ok=True)
             files = fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=args.force,
                                  quiet=args.quiet, gguf_name=gguf_name if gguf_mode else None,
-                                 want=NPU_EMBED_FILES if npue_embed else None)
+                                 want=NPU_EMBED_FILES if npue_embed else None, mmproj_name=mmproj_use)
 
     if npue_embed:
         # Core safetensors checkpoint + tokenizer; vocab.txt / 1_Pooling are absent
@@ -2189,6 +2263,31 @@ def main():
                     log(f"[INFO] tokenizer files from the GGUF itself: {', '.join(wrote)}")
             missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
+    if (target / "mmproj.gguf").is_file() and not template_reads_images(target):
+        # A base repo's own template reads images from content parts; the server passes them as
+        # message['images'], which the official entry's template reads (modeling_gemma3.cpp).
+        rid = official_repo_id(system_registry, base_entry)
+        got = None
+        if rid and not modelscope:
+            tmp = target / ".official_tokenizer_config.json"
+            try:
+                if fetch_from_repo(rid, "tokenizer_config.json", tmp, force=True):
+                    t = load_json(tmp).get("chat_template")
+                    if isinstance(t, str) and "images" in t:
+                        (target / "chat_template.jinja").write_text(t, encoding="utf-8")
+                        got = rid
+            except Exception as ex:
+                log(f"[WARN] fetching {rid}'s chat template failed: {ex}")
+            finally:
+                if tmp.is_file():
+                    tmp.unlink()
+        if got:
+            log(f"[INFO] chat_template.jinja <- {got} (the template that passes the server's images to the model)")
+            if "chat_template.jinja" not in files:
+                files.append("chat_template.jinja")
+        else:
+            log("[WARN] this model's chat template ignores message images, so an image would not reach the "
+                "model; put a template that reads message['images'] in chat_template.jinja")
     if missing:
         if gguf_mode and missing == ["config.json"]:
             missing = []

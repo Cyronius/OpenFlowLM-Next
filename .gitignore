@@ -100,3 +100,5 @@ bin/
 # local GGUF scratch (the GGUF-direct bring-up downloads/mirrors big quants here)
 TestGGUF/
 *.gguf
+# a few kilobytes of synthetic GGUF the unit tests read
+!specs/open-engine/tests/fixtures/**/*.gguf

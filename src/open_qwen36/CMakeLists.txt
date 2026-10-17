@@ -34,7 +34,7 @@ set(_inc
     "${CMAKE_CURRENT_SOURCE_DIR}/../../open_kernels/harness"  # stream_patch.hpp
 )
 
-add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp)
+add_executable(open_qwen36_cli cli.cpp core.cpp block_host.cpp pools.cpp manifest.cpp q4nx_file.cpp gguf_file.cpp vision/vit.cpp)
 target_include_directories(open_qwen36_cli PRIVATE "${XRT_INCLUDE_DIR}" ${_inc})
 target_link_directories(open_qwen36_cli PRIVATE "${XRT_LIB_DIR}")
 target_link_libraries(open_qwen36_cli PRIVATE xrt_coreutil)
@@ -47,7 +47,10 @@ endforeach()
 target_include_directories(manifest_test PRIVATE ${_inc})
 
 # vit_test (no XRT): the host vision tower against open_kernels/model/replica_vit.py's fixture
-add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp)
+add_executable(vit_test vision/vit_test.cpp vision/vit.cpp q4nx_file.cpp gguf_file.cpp)
+# bidir_block_test (no XRT): OPEN-VISION-GEMMA3's image-block schedule and attnpos words
+add_executable(bidir_block_test bidir_block_test.cpp)
+target_include_directories(bidir_block_test PRIVATE ${_inc})
 target_include_directories(vit_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${_inc})
 find_package(OpenMP REQUIRED)
 if(OpenMP_CXX_FOUND)
@@ -69,7 +72,7 @@ foreach(t open_qwen36_cli block_host_test)
     endif()
 endforeach()
 
-foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test)
+foreach(t open_qwen36_cli manifest_test gguf_pack_test vit_test block_host_test bidir_block_test)
     if(MSVC)
         target_compile_options(${t} PRIVATE /EHsc /Zc:__cplusplus /bigobj)
         target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -80,6 +83,12 @@ enable_testing()
 add_test(NAME OPEN-VISION-VIT-CONFIG COMMAND vit_test --configs
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures")
 add_test(NAME OPEN-VISION-VIT-WINDOWED COMMAND vit_test --window-index)
+add_test(NAME OPEN-VISION-GEMMA3-MASK COMMAND bidir_block_test)
+foreach(conv up down)
+    add_test(NAME OPEN-VISION-GEMMA3-TOWER-${conv} COMMAND vit_test --siglip
+             "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/siglip_tiny_${conv}/mmproj.gguf"
+             "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/siglip_tiny_${conv}")
+endforeach()
 add_test(NAME GGUF-PACK COMMAND gguf_pack_test)
 add_test(NAME OPEN-MANIFEST COMMAND manifest_test
          "${CMAKE_CURRENT_SOURCE_DIR}/../../specs/open-engine/tests/fixtures/manifest_qwen36.json"

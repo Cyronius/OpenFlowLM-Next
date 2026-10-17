@@ -77,6 +77,10 @@ private:
     std::unique_ptr<vision::VitWeights> vit_;   ///< loaded on the first image (~0.85 GB, ~3 s)
     void ensure_vit();
     template <class Payload> buffer<bf16> prefill_images(std::vector<int>& ids, const Payload& p);
+    /// OPEN-VISION-GEMMA3: the tower from <model>/mmproj.gguf, refusing by name when there is none.
+    void ensure_siglip();
+    /// Gemma 3: each run of image tokens takes the payload's next image (3 x 896 x 896 bf16).
+    buffer<bf16> prefill_gemma3(std::vector<int>& ids, const bytes& pixels);
 
     buffer<bf16> logits_view();
     /// A kernel that timed out or aborted leaves the hardware context dead:

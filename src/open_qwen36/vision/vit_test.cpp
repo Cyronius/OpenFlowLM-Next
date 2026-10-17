@@ -184,6 +184,63 @@ static int deepstack_test(const std::string& md, const std::string& fx, int head
     return g_failed == 0 ? 0 : 1;
 }
 
+/// OPEN-VISION-GEMMA3: the Siglip tower and Gemma 3's projector, read from an mmproj GGUF,
+/// against transformers on the same weights and pixels.
+///   python open_kernels/model/replica_siglip.py --fixture FX [--mmproj FILE --hf DIR]
+///   vit_test --siglip FX/mmproj.gguf FX      (a real mmproj: vit_test --siglip FILE FX)
+static int siglip_test(const std::string& mmproj, const std::string& fx) {
+    using namespace open_qwen36::vision;
+    const VitConfig cfg = VitConfig::siglip_from_gguf(mmproj);
+    std::printf("from the mmproj: %d blocks x %d, %d heads x %d, MLP %d, %d px / %d px patches, pool %d -> %d tokens x %d\n",
+                cfg.depth, cfg.hidden, cfg.heads, cfg.head_dim, cfg.inter, cfg.image, cfg.patch, cfg.pool,
+                cfg.tokens(), cfg.out);
+    auto t0 = std::chrono::steady_clock::now();
+    const VitWeights w = load_vit(mmproj, cfg);
+    std::printf("weights in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    const std::vector<float> px = read_f32(fx + "/pixels.bin");
+    if (px.size() != static_cast<size_t>(cfg.channels) * cfg.image * cfg.image) {
+        std::fprintf(stderr, "pixels.bin holds %zu values, not one %d px image\n", px.size(), cfg.image);
+        return 2;
+    }
+    t0 = std::chrono::steady_clock::now();
+    const std::vector<float> patches = siglip_patches(cfg, px.data());
+    std::vector<float> tower;
+    const std::vector<float> y = siglip_forward(cfg, w, patches.data(), &tower);
+    std::printf("forward in %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    auto compare = [&](const std::vector<float>& got, const std::string& path, size_t width, const char* label) {
+        const std::vector<float> ref = read_f32(path);
+        if (got.size() != ref.size() || got.size() % width) {
+            std::printf("FAIL %-9s %zu values vs ref %zu\n", label, got.size(), ref.size());
+            ++g_failed;
+            return;
+        }
+        double maxe = 0, maxr = 0, worst = 1;
+        size_t at = 0;
+        for (size_t r = 0; r < got.size() / width; ++r) {
+            double gg = 0, rr = 0, gr = 0;
+            for (size_t c = 0; c < width; ++c) {
+                const double a = got[r * width + c], b = ref[r * width + c];
+                gg += a * a; rr += b * b; gr += a * b;
+                maxe = std::max(maxe, std::fabs(a - b));
+                maxr = std::max(maxr, std::fabs(b));
+            }
+            const double cs = gr / std::sqrt(gg * rr);
+            if (cs < worst) { worst = cs; at = r; }
+        }
+        const bool ok = worst > 0.99999 && maxe / maxr < 1e-3;
+        std::printf("%s %-9s worst per-row cosine %.8f (row %zu)  max error %.2e of max\n", ok ? "ok  " : "FAIL", label,
+                    worst, at, maxe / maxr);
+        if (!ok) ++g_failed;
+    };
+    {
+        std::ifstream t(fx + "/tower.bin");
+        if (t) compare(tower, fx + "/tower.bin", static_cast<size_t>(cfg.hidden), "tower");
+    }
+    compare(y, fx + "/ref.bin", static_cast<size_t>(cfg.out), "projected");
+    std::printf("%s\n", g_failed ? "FAILED" : "PASS");
+    return g_failed == 0 ? 0 : 1;
+}
+
 static std::vector<int> parse_ints(const std::string& csv) {
     std::vector<int> out;
     size_t i = 0;
@@ -201,6 +258,7 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::string(argv[1]) == "--configs") return config_tests(argv[2]);
     if (argc >= 6 && std::string(argv[1]) == "--deepstack")
         return deepstack_test(argv[2], argv[3], std::atoi(argv[4]), parse_ints(argv[5]));
+    if (argc >= 4 && std::string(argv[1]) == "--siglip") return siglip_test(argv[2], argv[3]);
     const bool windowed = argc >= 4 && std::string(argv[1]) == "--windowed";
     if (argc < 3) {
         std::fprintf(stderr, "usage: vit_test <model_dir> <fixture_dir> | vit_test --windowed <model_dir> <fixture_dir>"

@@ -73,6 +73,14 @@ class GGUFModel:
     def _float_rows(self, g: str, r0: int, r1: int) -> np.ndarray:
         info = self.t[g]
         cols = info["dims"][0]
+        if info["type"] == "Q8_0":
+            # gguf_file.cpp embed_row: d * q in f32, an f16 scale and 32 int8 codes per block
+            nb = cols // 32
+            off = self.base + info["offset"] + r0 * nb * 34
+            raw = np.asarray(self.mm[off:off + (r1 - r0) * nb * 34]).reshape(r1 - r0, nb, 34)
+            d = raw[..., 0:2].copy().view(np.float16)[..., 0].astype(np.float32)
+            q = raw[..., 2:34].copy().view(np.int8).astype(np.float32)
+            return (d[..., None] * q).reshape(r1 - r0, cols).astype(np.float32)
         es = 4 if info["type"] == "F32" else 2
         off = self.base + info["offset"] + r0 * cols * es
         raw = np.asarray(self.mm[off:off + (r1 - r0) * cols * es])
@@ -96,8 +104,8 @@ class GGUFModel:
                 m, qs = raw[..., 2:4].copy().view(np.float16)[..., 0].astype(np.float32), raw[..., 4:20]
             q = np.concatenate([qs & 0xF, qs >> 4], axis=-1).astype(np.float32)
             return nar(d), nar(m), q
-        if info["type"] in ("F16", "F32"):
-            # pools.cpp std_perm_gguf's re-quantization of a float matrix, exactly
+        if info["type"] in ("F16", "F32", "Q8_0"):
+            # pools.cpp std_perm_gguf's re-quantization of a float (or dequantized Q8_0) matrix, exactly
             v = self._float_rows(g, r0, r1).reshape(r1 - r0, nb, 32)
             lo, hi = v.min(-1), v.max(-1)
             df = fp16_flush((hi - lo) / np.float32(15.0))
@@ -142,7 +150,7 @@ class GGUFModel:
         cols = self.t[g]["dims"][0]
         if cols != hidden:
             raise ValueError(f"the replica runs at the model's own width {cols}, not {hidden}")
-        if self.t[g]["type"] in ("F16", "F32"):
+        if self.t[g]["type"] in ("F16", "F32", "Q8_0"):
             row = self._float_rows(g, tok, tok + 1)[0]
         else:
             d, m, q = self._scales_codes(g, tok, tok + 1, narrow=False)
