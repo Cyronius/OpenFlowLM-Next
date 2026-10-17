@@ -1188,6 +1188,11 @@ one kv head, the 12288-wide FFN), 0.999988 for all 35, same top 5 in order each 
 is "The capital of France is Paris." then `<turn|>`. Program memory: the fullest core is 14,512 B
 (global) and 14,352 B (sliding) of 16,384.
 
+**Result 2026-10-16 (the official container keeps the closed engine):** `oflm serve` on a stand-in
+directory holding the E4B kernel set, a `model.gguf` and a `model.q4nx` prints "not using ...
+open_kernels: it packs GGUF-direct and ... has no model.gguf (or also a model.q4nx)" and goes to the
+closed engine (which then refuses the stand-in `.q4nx`); the open engine never starts.
+
 **Result 2026-10-16 (after merging OPEN-ATTN-ONE-KV-HEAD and adding E2B's recipe):** every shipped spec's
 attention flags are unchanged; the MLIR of all 73 shipped kernel sets matches the base commit's and E4B's
 6 match the pre-merge tree's; every attention translation unit preprocesses identically at every spec's
