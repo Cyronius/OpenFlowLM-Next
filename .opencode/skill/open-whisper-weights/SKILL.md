@@ -3,7 +3,8 @@
 How the open Whisper engine (`src/open_whisper`) gets its weights, and how to install
 whisper-large-v3-turbo for it from OpenAI's checkpoint or a GGUF. Use when adding another
 Whisper file source, debugging a Whisper model that refuses to load, installing Whisper
-with `oflm-add`, or touching `GgufFile`'s whole-tensor reads.
+with `oflm-add`, touching `GgufFile`'s whole-tensor reads, or changing how releases build
+and check the Whisper kernel set.
 
 ## What the engine reads (2026-10-16)
 
@@ -65,9 +66,20 @@ whose `whisper_kernels.json` `hf_config_check` matches the model's config.json. 
 (`open_kernels/export_whisper_kernels.py`) writes `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels`;
 a GGUF installed as `whisper-gguf-Q8_0` finds it by the last rule. The load line names the rule.
 
-Releases do not ship this set yet: `utilities/export-kernels.py` (the CMake `export_kernels`
-target and `utilities/release/stage-prebuilts.sh`) builds the recipe specs and the BERT sets,
-not Whisper. Until it does, the open engine runs only where someone ran the export by hand.
+Releases ship this set (OPEN-WHISPER-RELEASE): `utilities/export-kernels.py` (the CMake
+`export_kernels` target and `utilities/release/stage-prebuilts.sh`) runs the exporter last,
+after the recipe specs and the BERT sets, with `--build-dir
+open_kernels/designs/whisper_gemm/build-export`. Everything under `src/xclbins` ships, and the
+default `<out>/build` is 34 MB of compiler intermediates with zero-byte `.lock` files that
+`verify-prebuilts.py` refuses. `--skip-whisper` leaves it out; `nix/open-kernels.nix` passes it
+by default (`skipWhisper ? true`), since the set has not been built on that file's mlir-aie
+1.4.3 / Peano 22 pins. The CMake target runs without `--force`, so a kept stream build must
+match its sources (`STREAM_SOURCES`) and the mlir-aie / Peano versions as well as its shape,
+as `fa` already did; a stamp from before 2026-10-17 rebuilds every stream once.
+`stage-prebuilts.sh` checks a Whisper set by its own layout (it has no `<kernel>/final.xclbin`
+directories, and `fa/` holds `air.*`), refuses one that carries `build/`, and refuses streams
+with no `whisper_kernels.json` beside them (an export cut short: the marker goes first).
+`verify-package.sh` requires its `whisper_kernels.json`.
 
 ## Tests
 
@@ -83,6 +95,11 @@ not Whisper. Until it does, the open engine runs only where someone ran the expo
   compares all 481 tensors (about 30 s each).
 - `utilities/oflm-add/tests/test_whisper_install.py`; `oflm-test --audio --model <whisper tag>`
   now runs only the transcription checks under that tag.
+- `specs/open-whisper/tests/test_release_export.py`: `export-kernels.py`'s commands with
+  `subprocess.run` stubbed (OPEN-WHISPER-RELEASE). No toolchain needed.
+  `test_release_staging.py` runs `stage-prebuilts.sh`'s shape-check block on built trees, and
+  `test_release_package.py` runs `verify-package.sh` (bash) on a built TGZ. The stream cache
+  has no unit test (the exporter imports IRON); its manual procedure is in the spec.
 
 ## Results on this box (2026-10-16)
 

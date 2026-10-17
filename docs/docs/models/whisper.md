@@ -38,9 +38,9 @@ no tokenizer or config files; `oflm-add` fetches them from the checkpoint the GG
 names (here `openai/whisper-large-v3-turbo`) and refuses the install if they do not
 match the GGUF's own vocabulary and settings.
 
-The open engine also needs its Whisper kernel set, and releases do not ship it yet.
-Build it once from a clone with `python open_kernels/export_whisper_kernels.py` (it
-needs the IRON toolchain and writes `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels`).
+The open engine also needs its Whisper kernel set. Releases ship it with the other
+kernel sets. In a clone, build it once with `python open_kernels/export_whisper_kernels.py`
+(it needs the IRON toolchain and writes `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels`).
 The engine finds the set by the model's geometry, so any install directory works, and
 `oflm-add` says whether it found one.
 

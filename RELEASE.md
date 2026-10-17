@@ -104,8 +104,8 @@ git fetch origin && git switch release/1.2 && git pull
 utilities/release/stage-prebuilts.sh
 ```
 
-That runs `utilities/export-kernels.py --force` (every open kernel spec plus
-the BERT design sets) unless `--no-build` is passed. The collection rule is
+That runs `utilities/export-kernels.py --force` (every open kernel spec, the
+BERT design sets and the Whisper set) unless `--no-build` is passed. The collection rule is
 `.gitignore` itself, asked with `git check-ignore --no-index` so a re-run
 still finds kernels that are already tracked on the branch. A new family is
 picked up with no edit to the script.

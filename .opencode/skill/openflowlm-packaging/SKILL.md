@@ -100,7 +100,8 @@ For a *release* build, note the two differences: the release workflow configures
 with `OFLM_BUILD_KERNELS=OFF` and the kernels are already in the tag (committed
 to the release branch by `stage-prebuilts.sh`, not fetched), and it checks the result
 with `utilities/release/verify-package.sh build/packages --version <v>`, which
-asserts the open-kernel and BERT xclbins are actually present. A local
+asserts the open-kernel and BERT xclbins and the Whisper set's
+`whisper_kernels.json` are actually present. A local
 `OFLM_BUILD_KERNELS=OFF` build of `main` legitimately fails that check — see
 the `openflowlm-release` skill and [RELEASE.md](../../../../RELEASE.md).
 

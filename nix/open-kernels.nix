@@ -26,6 +26,8 @@
   # recipe problems that have since been fixed upstream, and all 13 specs build
   # today -- re-add a name here if a future recipe regresses.
   skipSpecs ? "",
+  # The Whisper set has only been built on ironvenv-requirements.txt's toolchain, not on these pins.
+  skipWhisper ? true,
 }:
 
 let
@@ -97,6 +99,7 @@ stdenv.mkDerivation rec {
     # Skip whatever skipSpecs names (see the derivation's argument for why).
     python utilities/export-kernels.py --force --jobs "''${NIX_BUILD_CORES:-4}" \
       ${lib.optionalString skipBert "--skip-bert"} \
+      ${lib.optionalString skipWhisper "--skip-whisper"} \
       ${lib.optionalString (skipSpecs != "") "--skip-specs ${skipSpecs}"}
   '';
 

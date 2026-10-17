@@ -3,7 +3,7 @@ instruction stream per encoder GEMM shape, plus fa/ (the bidirectional FlashAtte
 kernel, NpuEmbeddings task 0181), plus the files the engine reads beside them.
 
     . C:\dev\mlir-aie\iron_env.ps1          # or: source ~/ironenv142/bin/activate
-    python open_kernels/export_whisper_kernels.py [--out DIR] [--only qkv,o] [--force] [--no-fa]
+    python open_kernels/export_whisper_kernels.py [--out DIR] [--build-dir DIR] [--only qkv,o] [--force] [--no-fa]
 
 By default the set is written to src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/ -- the
 same place the other open engines' exporters write theirs, which the build tree's
@@ -39,6 +39,7 @@ Output (DIR):
     build/<stream>/      each GEMM stream's own build, kept for the identity evidence
     fa/air.xclbin, fa/air.insts.bin, fa/fa.json   the FlashAttention kernel (see above)
     build/fa/            its own build, kept for the identity evidence
+    (--build-dir DIR puts both builds in DIR instead, so a shipped set carries no build cache)
 """
 
 from __future__ import annotations
@@ -69,6 +70,7 @@ DESIGN = HERE / "designs" / "whisper_gemm" / "whisper_gemm.py"
 # kernel set. Never set this in production; it is not documented in --help.
 FA_DESIGN = Path(os.environ.get("OW_TEST_FA_DESIGN_OVERRIDE") or str(HERE / "designs" / "whisper_fa" / "attn_fa.py"))
 FA_SOURCES = ["attn_fa.py", "attn_npu2.cc", "attn_cascade_wrap.cc", "zero.cc"]
+STREAM_SOURCES = [DESIGN, GEMM_RTP / "gemm_pretiled.py", GEMM_RTP / "npue.py", HERE / "build_design.py"]
 FORMAT = "oflm-open-whisper-kernels-v1"
 # The directory name src/model_list.json gives whisper-v3:turbo; the engine looks for
 # <xclbins root>/xclbins/<this>/open_kernels (Whisper_Config::model_name).
@@ -109,12 +111,12 @@ def xclbin_identical_mod_uuid(a: bytes, b: bytes):
     return same(a, b)
 
 
-def build_stream(name: str, out: Path, force: bool, bfp16: bool) -> Path:
+def build_stream(name: str, build_root: Path, force: bool, bfp16: bool) -> Path:
     M, K, N = wg.STREAMS[name]
-    bdir = out / "build" / name
+    bdir = build_root / name
     if not force and (bdir / "final.xclbin").is_file() and (bdir / "insts.bin").is_file():
         stamp = bdir / "shape.json"
-        if _read_stamp(stamp) == {"M": M, "K": K, "N": N, "bfp16": bfp16}:
+        if _read_stamp(stamp) == _stream_stamp(M, K, N, bfp16):
             print(f"  {name:6s} {M}x{K}x{N}  (kept)")
             return bdir
     # WG_BFP16 is SET here, never inherited: an exporter that let the environment
@@ -130,8 +132,7 @@ def build_stream(name: str, out: Path, force: bool, bfp16: bool) -> Path:
         sys.stdout.write(r.stdout[-4000:])
         sys.stderr.write(r.stderr[-4000:])
         raise SystemExit(f"build of stream {name} failed (exit {r.returncode})")
-    (bdir / "shape.json").write_text(
-        json.dumps({"M": M, "K": K, "N": N, "bfp16": bfp16}))
+    (bdir / "shape.json").write_text(json.dumps(_stream_stamp(M, K, N, bfp16)))
     print(f"  {name:6s} {M}x{K}x{N}  built in {time.time() - t0:.0f} s")
     return bdir
 
@@ -166,6 +167,21 @@ def _fa_stamp() -> dict:
     # the new sources.
     # And the toolchain that compiles them: after an mlir-aie or Peano change a kept build
     # would otherwise ship next to a fa.json naming the NEW versions.
+    fa_dir = HERE / "designs" / "whisper_fa"
+    return {"shape": FA_SHAPE,
+            "sources": {f: hashlib.sha256((fa_dir / f).read_bytes()).hexdigest() for f in FA_SOURCES},
+            "toolchain": _toolchain_versions()}
+
+
+def _stream_stamp(M: int, K: int, N: int, bfp16: bool) -> dict:
+    # Sources and toolchain too, as for fa: the CMake target runs this without --force.
+    return {"M": M, "K": K, "N": N, "bfp16": bfp16,
+            "sources": {f.relative_to(HERE.parent).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
+                        for f in STREAM_SOURCES},
+            "toolchain": _toolchain_versions()}
+
+
+def _toolchain_versions() -> dict:
     import importlib.metadata as md
 
     def _ver(pkg: str) -> str:
@@ -174,10 +190,7 @@ def _fa_stamp() -> dict:
         except Exception:
             return "unavailable"
 
-    fa_dir = HERE / "designs" / "whisper_fa"
-    return {"shape": FA_SHAPE,
-            "sources": {f: hashlib.sha256((fa_dir / f).read_bytes()).hexdigest() for f in FA_SOURCES},
-            "toolchain": {"mlir_aie": _ver("mlir_aie"), "llvm-aie": _ver("llvm-aie")}}
+    return {"mlir_aie": _ver("mlir_aie"), "llvm-aie": _ver("llvm-aie")}
 
 
 def _remove_stale_fa(out: Path) -> bool:
@@ -202,12 +215,12 @@ def _remove_stale_fa(out: Path) -> bool:
     return True
 
 
-def build_fa(out: Path, force: bool) -> Path:
+def build_fa(out: Path, build_root: Path, force: bool) -> Path:
     """Build designs/whisper_fa/attn_fa.py at the fixed production shape (FA_SHAPE) and
     stage it into <out>/fa/ (air.xclbin, air.insts.bin, fa.json) -- see the module
     docstring for why this is staged rather than built directly into <out>/fa/.
     """
-    bdir = out / "build" / "fa"
+    bdir = build_root / "fa"
     if not force and (bdir / "final.xclbin").is_file() and (bdir / "insts.bin").is_file():
         stamp = bdir / "shape.json"
         if _read_stamp(stamp) == _fa_stamp():
@@ -292,6 +305,8 @@ def main() -> int:
     ap.add_argument("--model-name", default=MODEL_NAME,
                     help="the model directory name the server resolves the tag to "
                          "(default %(default)s, whisper-v3:turbo in src/model_list.json)")
+    ap.add_argument("--build-dir", type=Path, default=None,
+                    help="where each stream's and fa's build is kept (default <out>/build)")
     ap.add_argument("--only", default=None, help="comma-separated stream names (debugging)")
     ap.add_argument("--force", action="store_true", help="rebuild streams already built")
     # Default changed 2026-09-23 (task 0180 Parts 9/11/15): the golden-token-path gate
@@ -326,6 +341,7 @@ def main() -> int:
     out = (args.out if args.out is not None
            else HERE.parent / "src" / "xclbins" / args.model_name / "open_kernels").resolve()
     out.mkdir(parents=True, exist_ok=True)
+    build_root = (args.build_dir if args.build_dir is not None else out / "build").resolve()
     print(f"whisper kernel set -> {out}")
 
     # PR #111 review, finding D: invalidate first, write the marker last. A PREVIOUS
@@ -346,7 +362,7 @@ def main() -> int:
         marker_path.unlink()
     _remove_stale_fa(out)
 
-    dirs = {n: build_stream(n, out, args.force, args.emulate_bfp16) for n in names}
+    dirs = {n: build_stream(n, build_root, args.force, args.emulate_bfp16) for n in names}
 
     ref_name = names[0]
     ref = (dirs[ref_name] / "final.xclbin").read_bytes()
@@ -393,7 +409,7 @@ def main() -> int:
 
     fa_built = False
     if args.build_fa:
-        build_fa(out, args.force)
+        build_fa(out, build_root, args.force)
         fa_built = True
     else:
         removed = _remove_stale_fa(out)

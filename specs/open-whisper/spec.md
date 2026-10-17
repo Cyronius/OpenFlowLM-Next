@@ -272,6 +272,78 @@ on a remote install replaced a `model.gguf` downloaded earlier; before the fix i
 natively on Windows): all seven xclbins identical up to 70-78 bytes in 11-14 short runs
 (UUID and metadata); rel_fro 1.4e-07 to 7.1e-07, per-row cosine 1.000000000.
 
+### OPEN-WHISPER-RELEASE: release builds carry the Whisper kernel set
+**Applies to:** `utilities/export-kernels.py`, `open_kernels/export_whisper_kernels.py`,
+`utilities/release/stage-prebuilts.sh`, `utilities/release/verify-package.sh`,
+`nix/open-kernels.nix`
+**Verification:** test (the stream cache: manual, below)
+**Acceptance criteria:**
+- `utilities/export-kernels.py`, which the CMake `export_kernels` target and
+  `stage-prebuilts.sh` run, runs `open_kernels/export_whisper_kernels.py` once, with the
+  venv's Python and `--build-dir open_kernels/designs/whisper_gemm/build-export`, after every
+  open_kernels spec and BERT command, adding `--force` when it was given `--force`. Every
+  command before it is the one the script runs with `--skip-whisper`.
+- The set lands in `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/`, which staging collects
+  (`src/xclbins/*/open_kernels*/` in `.gitignore`) and where the engine looks
+  (OPEN-WHISPER-SEAM). The build cache stays out of `src/xclbins`, because everything under it
+  ships, and git ignores it.
+- `--skip-whisper` and `--bert-only` leave the set out. So does `nix/open-kernels.nix` while its
+  `skipWhisper` is true, the default: the set has not been built on that file's pinned
+  toolchain. `--specs`, `--skip-specs` and `--skip-bert` name the other two families and do
+  not. A failed Whisper export fails the run.
+- Without `--force`, as the CMake target runs it, the exporter keeps a stream's build only
+  when the build's stamp matches the stream's shape, the bytes of `whisper_gemm.py`,
+  `gemm_pretiled.py`, `npue.py` and `build_design.py`, and the mlir-aie and Peano versions,
+  the way it already keeps `fa`. Anything else rebuilds the stream.
+- `stage-prebuilts.sh` checks a Whisper set by its own layout: a `whisper_kernels.json` that
+  says complete, `final.xclbin`, `insts.bin`, every stream file `design.json` names, and
+  `fa/air.xclbin`, `fa/air.insts.bin` and `fa/fa.json` when the marker says `fa`. It refuses a
+  set that carries `build/`. It also refuses kernel files or a `design.json` directly in an
+  `open_kernels/` that has no marker: the exporter deletes the marker before it replaces
+  anything, so that is what an export cut short leaves. Every other directory gets the same
+  check as before.
+- `verify-package.sh` fails a package without `xclbins/<model>/open_kernels/whisper_kernels.json`,
+  unless `--allow-missing-kernels`.
+
+**Tests** (`specs/open-whisper/tests/`): `test_release_export.py` drives `export-kernels.py`
+with `subprocess.run` and the toolchain checks stubbed: the staging and CMake command lines,
+the commands with and without `--skip-whisper` across six flag sets (the Nix one included),
+which flags leave the set out, a failed Whisper export, and the build cache's place.
+`test_release_staging.py` runs the shape-check block of `stage-prebuilts.sh`, taken from the
+script, on built trees: a complete set beside another family, an export cut short, an `--only`
+export, a missing stream, a missing `fa/`, a `build/` inside, and the other family's own rule.
+`test_release_package.py` runs `verify-package.sh` on a built TGZ with and without the marker,
+and with `--allow-missing-kernels`; it needs bash and tar, and is skipped without bash.
+
+**Verification (manual):** the stream cache. The exporter imports IRON (through
+`whisper_gemm.py`), so this needs the toolchain's venv, and a real build of the seven streams
+takes minutes. In a scratch copy of the exporter and the files it imports, load the exporter
+in the release venv, replace the `build_design.py` run with a stub that writes `final.xclbin`
+and `insts.bin`, and call `build_stream` for every stream without `--force`: on an empty
+cache; again; after writing a shape-only stamp (the format before 2026-10-17) into one
+stream; after writing another mlir-aie version into one stream's stamp; after appending a
+comment to `gemm_pretiled.py`; after restoring it.
+
+2026-10-17, mlir-aie 1.4.2 and Peano 21.0.0.2026080301: all seven built; none (all kept);
+that one stream; that one stream; all seven; all seven again (their stamps named the edited
+file). A real export with the new stamp has not been run yet; only the stamp changed, and the
+build it guards is the one the proof below ran.
+
+**Proof that the other kernel sets did not change (2026-10-16, one-off, for the release
+commit).** The scratch tree held the commit's `open_kernels/`, `npu_offload/`,
+`utilities/export-kernels.py` and `.gitignore`, and a `src/xclbins` with the tracked closed
+sets plus 35 exported open_kernels sets (1371 files; the rest of the repository was not
+copied). The `--force` run was cut by a timeout during `fa` and finished without `--force`,
+keeping the seven streams it had built. The step added the set's 16 files, its build cache and
+six `__pycache__` files, and changed or removed nothing; all 1001 other files under
+`src/xclbins` kept their hashes, and staging collects the same files for every other family.
+The old shape check refuses the Whisper set (`fa/` has no `final.xclbin`); the new one passes
+it and gives the other 301 kernel directories the same result as the old, and so does the
+check with the rule for an export cut short (2026-10-17, same lists). The old and new
+`verify-package.sh` agree on every other check; the new one adds the Whisper line. Against the
+set exported from upstream/main the same day, every instruction stream is byte-identical and
+both xclbins differ only in build stamps.
+
 ### OPEN-WHISPER-ENCODER: the encoder on the NPU
 **Applies to:** `src/open_whisper/`
 **Test category:** hardware (`open_whisper_cli --golden`)
@@ -453,11 +525,6 @@ XDNA1. That is the version worth building, and it is not a variant of this one.
   engine no longer needs a converted repository (OPEN-WHISPER-STOCK, -GGUF): `oflm-add`
   installs OpenAI's checkpoint or a GGUF under another tag (OPEN-WHISPER-INSTALL). Whether
   the default tag should move to one of those is the maintainer's call.
-- **Releases do not carry the Whisper kernel set.** `utilities/export-kernels.py`, which the
-  CMake `export_kernels` target and release staging run, builds the recipe specs and the
-  BERT sets but never calls `open_kernels/export_whisper_kernels.py`. So the open engine
-  runs only where someone ran that export; on a release, both installs above are refused at
-  load for want of a kernel set. Adding the export there is a distribution change.
 - **The decoder** runs on the host first. Moving it to the NPU needs an `attn.h` variant
   with no RoPE and no cache append, plus a decoder layer design with LayerNorm, biases and
   a non-gated GELU.

@@ -35,13 +35,15 @@ set -euo pipefail
 DIR="${1:-build/packages}"
 [ $# -gt 0 ] && shift
 VERSION=""
-# The two prebuilt families, as regexes over the package's own path list. Both
+# The three prebuilt families, as regexes over the package's own path list. All
 # are required: utilities/export-kernels.py builds them in one run, so one
-# without the other means an incomplete bundle, not a deliberate omission.
+# without the others means an incomplete bundle, not a deliberate omission.
 # Overridable because the naming is a .gitignore convention and a new family
 # should not need an edit here to be checked at all.
 EXPECT_KERNELS='xclbins/[^/]+/open_kernels[^/]*/.*\.xclbin$'
 EXPECT_BERT='xclbins/BERT-h[^/]*/.*\.xclbin$'
+# The Whisper set's marker, which the engine requires; its xclbins also match EXPECT_KERNELS.
+EXPECT_WHISPER='xclbins/[^/]+/open_kernels/whisper_kernels\.json$'
 # Formats the caller insists on, e.g. "deb,rpm,tgz" from the release workflow.
 # Without it, a directory holding only a TGZ is checked as "whatever is here",
 # which is what a local single-format build wants -- and also what a cpack that
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
         --allow-missing-kernels) ALLOW_MISSING_KERNELS=1; shift ;;
         --expect-kernels) EXPECT_KERNELS="${2:?}"; shift 2 ;;
         --expect-bert)    EXPECT_BERT="${2:?}"; shift 2 ;;
+        --expect-whisper) EXPECT_WHISPER="${2:?}"; shift 2 ;;
         -h|--help)        sed -n '3,25p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -119,13 +122,14 @@ has_dir() {   # label files needle description
 }
 
 has_kernels() {
-    # Both families, and matched on the FILE not the path: share/oflm/
+    # Every family, and matched on the FILE not the path: share/oflm/
     # open_kernels/recipes/*.py is the q4nx recipe module and is tracked in
     # git, so a check that greps for "open_kernels" anywhere passes on a build
     # with no prebuilt kernel in it at all.
-    local open bert
+    local open bert whisper
     open="$(grep -cE "$EXPECT_KERNELS" <<<"$2" || true)"
     bert="$(grep -cE "$EXPECT_BERT" <<<"$2" || true)"
+    whisper="$(grep -cE "$EXPECT_WHISPER" <<<"$2" || true)"
     if [ "$open" -gt 0 ]; then
         pass "ships $open open-kernel xclbin file(s) ($EXPECT_KERNELS)"
     elif [ "$ALLOW_MISSING_KERNELS" = 1 ]; then
@@ -144,6 +148,15 @@ has_kernels() {
              "and utilities/export-kernels.py builds them in the same run as the" \
              "open kernel sets, so their absence means the prebuilt bundle is" \
              "incomplete rather than that this release skips them."
+    fi
+    if [ "$whisper" -gt 0 ]; then
+        pass "ships the Whisper kernel set ($EXPECT_WHISPER)"
+    elif [ "$ALLOW_MISSING_KERNELS" = 1 ]; then
+        pass "ships no Whisper kernel set (--allow-missing-kernels)"
+    else
+        fail "ships no Whisper kernel set. utilities/export-kernels.py builds it in" \
+             "the same run as the open kernel sets, so without it the open Whisper" \
+             "engine refuses every install and the bundle is incomplete."
     fi
 }
 

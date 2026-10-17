@@ -8,7 +8,7 @@ repository root and have Nix with flakes enabled.
 ```bash
 # Imperative / on-the-fly
 nix develop .#open-kernels
-python utilities/export-kernels.py          # dense + BERT sets
+python utilities/export-kernels.py          # dense + BERT + Whisper sets
 nix run .#oflm -- --help                    # run the engine
 
 # Declarative on NixOS
@@ -32,7 +32,7 @@ need `/dev/accel*` access at build time.
 ```bash
 nix develop .#open-kernels
 
-# Build everything (dense open_kernels + open_npue BERT sets)
+# Build everything (dense open_kernels + open_npue BERT sets + the Whisper set)
 python utilities/export-kernels.py
 
 # Build only the BERT embedding sets
@@ -46,6 +46,7 @@ python utilities/export-kernels.py --skip-bert \
 Built xclbins land in:
 - `src/xclbins/<Model-Name-NPU2>/open_kernels/` for dense specs
 - `src/xclbins/BERT-*-*/gemm_rtp/` for BERT sets
+- `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/` for the Whisper set
 
 The shell materializes a writable copy of the IRON venv (`ironvenv/`) in the
 checkout and points `PATH`/`PYTHONPATH` at it, so the export scripts need no
@@ -244,6 +245,11 @@ yourself if you want that fallback; the Hugging Face path needs nothing extra.
   `qwen25-3b`, `minicpm5-2b` and `phi4-mini-4b`; those recipe problems have
   since been fixed upstream.  If one regresses, the derivation's `skipSpecs`
   argument takes a comma-separated spec list (empty by default).
+- The Whisper set has not been built with that toolchain yet, only with
+  `ironvenv-requirements.txt`'s, so the `openflowlm-open-kernels` package leaves
+  it out (`skipWhisper` is true by default).  `python utilities/export-kernels.py`
+  in `nix develop .#open-kernels` builds it; once that works, `skipWhisper =
+  false` puts it in the package.
 - `openflowlm-open-kernels-with-bert` requires `__noChroot` because the BERT
   build opens `/dev/accel*` at build time.  It will not build in a sandboxed
   `nix build` unless sandboxing is disabled; use `nix develop` and build

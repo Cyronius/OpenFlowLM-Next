@@ -274,6 +274,12 @@ Kernels are exported as part of the CMake build via the `export_kernels` CMake t
    - Needs pyxrt and an installed NPU
    - Output: `src/xclbins/<family>/` (e.g. `BERT-h768-bfp16`)
 
+3. **Open Whisper kernels** (the Whisper encoder set), built last
+   - Compiled by `open_kernels/export_whisper_kernels.py`
+   - Compile-only; needs no NPU device
+   - Output: `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/`; its build cache goes to
+     `open_kernels/designs/whisper_gemm/build-export/`
+
 ### Export Flags
 
 The `export_kernels.py` script supports:
@@ -285,6 +291,7 @@ The `export_kernels.py` script supports:
 | `--force` | Rebuild even when build cache is current |
 | `--skip-bert` | Skip the open_npue BERT sets (they need an NPU at build time) |
 | `--bert-only` | Build only the open_npue BERT sets |
+| `--skip-whisper` | Skip the open Whisper set |
 | `-j, --jobs N` | Kernel sets to build in parallel within a spec (default 1) |
 | `--only` | Build only one spec/family |
 | `--check DIR` | Verify against reference directory |
@@ -306,6 +313,7 @@ applies (`--only`, `--check`, `-j`), so that script takes them too.
 |---|---|
 | **Open kernels** | ironvenv (mlir-aie + Peano), XRT on PATH, NPU not required |
 | **Open NPUE** | ironvenv, XRT with pyxrt, NPU present |
+| **Open Whisper** | ironvenv, XRT on PATH, NPU not required |
 
 ---
 

@@ -204,9 +204,14 @@ python3 - "${XCLBINS[@]}" <<'PY' || die "the built kernels are not complete (see
 import json, pathlib, sys
 
 files = sys.argv[1:]
+# A Whisper set is one xclbin, a stream per shape and fa/air.*: the <kernel>/ rule would refuse fa/.
+whisper = {pathlib.Path(f).parent for f in files
+           if f.endswith("/open_kernels/whisper_kernels.json")}
 by_kernel: dict[str, set[str]] = {}
 for f in files:
     p = pathlib.Path(f)
+    if whisper.intersection(p.parents):
+        continue
     # src/xclbins/<family>/open_kernels/<kernel>/{final.xclbin,insts.bin}
     if p.parent.name == "open_kernels" or p.parent.parent.name != "open_kernels":
         continue
@@ -228,10 +233,37 @@ if not by_kernel:
     bad.append("no <family>/open_kernels/<kernel>/ directories at all; is the "
                "export writing somewhere else?")
 
+for ws in sorted(whisper):
+    have = {pathlib.Path(f).relative_to(ws).as_posix() for f in files
+            if ws in pathlib.Path(f).parents}
+    try:
+        marker = json.loads((ws / "whisper_kernels.json").read_text())
+        streams = [s["file"] for s in json.loads((ws / "design.json").read_text())["streams"]]
+    except Exception as exc:  # noqa: BLE001 - the message is the point
+        bad.append(f"{ws}: whisper_kernels.json or design.json does not parse ({exc})")
+        continue
+    need = ["final.xclbin", "insts.bin", *streams]
+    if marker.get("fa"):
+        need += ["fa/air.xclbin", "fa/air.insts.bin", "fa/fa.json"]
+    bad += [f"{ws}: no {n}" for n in need if n not in have]
+    if not marker.get("complete"):
+        bad.append(f"{ws}: whisper_kernels.json says the set is not complete (an --only export)")
+    if any(n.startswith("build/") for n in have):
+        bad.append(f"{ws}: carries build/, the build cache of an export run by hand; delete it")
+
+# The Whisper exporter deletes its marker first, so a run cut short leaves streams with no marker.
+unmarked = sorted({str(p.parent) for p in map(pathlib.Path, files)
+                   if p.parent.name == "open_kernels" and p.parent not in whisper
+                   and (p.suffix in (".xclbin", ".bin") or p.name == "design.json")})
+bad += [f"{d}: kernel files but no whisper_kernels.json, so a Whisper export did not finish; "
+        "re-run it" for d in unmarked]
+
 if bad:
     print("\n".join(f"  INCOMPLETE: {b}" for b in bad), file=sys.stderr)
     sys.exit(1)
 print(f"    {len(by_kernel)} kernel directories, each with final.xclbin and insts.bin")
+if whisper:
+    print(f"    {len(whisper)} Whisper set(s), each with every stream its design.json names")
 PY
 
 FAMILIES="$(printf '%s\n' "${XCLBINS[@]}" | cut -d/ -f3 | sort -u | tr '\n' ' ')"

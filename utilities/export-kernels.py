@@ -6,7 +6,7 @@ the same toolchain.
 
 Usage: utilities/export-kernels.py [--specs a,b,c] [--force]
 
-Two kernel families share the one toolchain venv:
+Three kernel families share the one toolchain venv:
 
   * open_kernels (open_qwen36 + the dense families) -- compiled by
     open_kernels/export_qwen36_kernels.py, one command per recipe spec in
@@ -17,6 +17,10 @@ Two kernel families share the one toolchain venv:
     npu_offload/gemm_rtp/families.json, then verified against that file with
     npu_offload/gemm_rtp/check_design_sets.py. This one allocates NPU tensors
     (device="npu"), so it needs pyxrt and an installed NPU.
+
+  * open_whisper (the Whisper encoder set) -- built last, by
+    open_kernels/export_whisper_kernels.py, into
+    src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/. Compile-only; needs no NPU.
 
 Requirements (assumed present, or set up here):
   * XRT installed at /opt/xilinx/xrt, or wherever XILINX_XRT points
@@ -63,6 +67,10 @@ BERT_EXPORT = GEMM_RTP / "export_gemm_rtp.py"
 BERT_SPEC = GEMM_RTP / "families.json"
 BERT_CHECK = GEMM_RTP / "check_design_sets.py"
 XCLBINS = REPO / "src" / "xclbins"
+
+WHISPER_EXPORT = REPO / "open_kernels" / "export_whisper_kernels.py"
+# Not the default <out>/build: src/xclbins ships whole, and that cache is 34 MB with empty .lock files.
+WHISPER_BUILD = REPO / "open_kernels" / "designs" / "whisper_gemm" / "build-export"
 
 # XILINX_XRT is honoured when set so a relocated XRT (the Nix builds combine
 # XRT with the amdxdna plugin in their own prefix) supplies pyxrt too.
@@ -176,6 +184,19 @@ def export_bert_sets(py: Path, force: bool) -> int:
     return len(failed)
 
 
+def export_whisper_set(py: Path, force: bool) -> int:
+    """The open Whisper encoder set (compile-only, no NPU). Returns 0 on success."""
+    print("-- whisper", flush=True)
+    cmd = [str(py), str(WHISPER_EXPORT), "--build-dir", str(WHISPER_BUILD)]
+    if force:
+        cmd.append("--force")
+    if subprocess.run(cmd).returncode != 0:
+        print("   FAILED: whisper", flush=True)
+        return 1
+    print("   ok: whisper", flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--specs", default="", help="comma-separated open_kernels spec names (empty = all)")
@@ -185,7 +206,10 @@ def main() -> int:
     ap.add_argument("--skip-bert", action="store_true",
                     help="skip open_npue BERT embedding sets (they need an NPU at build time)")
     ap.add_argument("--bert-only", action="store_true",
-                    help="only build open_npue BERT embedding sets, skip open_kernels dense specs")
+                    help="only build open_npue BERT embedding sets, skip open_kernels dense specs "
+                         "and the Whisper set")
+    ap.add_argument("--skip-whisper", action="store_true",
+                    help="skip the open Whisper encoder set")
     ap.add_argument("-j", "--jobs", type=int, default=1,
                    help="kernel-set builds to run in parallel within each spec (default: 1)")
     a = ap.parse_args()
@@ -228,7 +252,7 @@ def main() -> int:
     if mlir_aie.is_dir():
         os.environ["MLIR_AIE_ROOT"] = str(mlir_aie)
 
-    # ---- the two kernel families ---------------------------------------------
+    # ---- the three kernel families -------------------------------------------
     n_failed = 0
     if not a.bert_only:
         specs = [s for s in spec_list(a.specs) if s.stem not in skip_set]
@@ -240,6 +264,10 @@ def main() -> int:
     if not a.skip_bert:
         n_failed += export_bert_sets(py, a.force)
 
+    # Last, so the other two families' commands and their order stay as they were.
+    if not (a.bert_only or a.skip_whisper):
+        n_failed += export_whisper_set(py, a.force)
+
     print(flush=True)
     if n_failed:
         print(f"kernel export failed: {n_failed} item(s)", flush=True)
@@ -248,6 +276,7 @@ def main() -> int:
         print("kernel export ok: BERT design sets", flush=True)
     else:
         suffix = " + BERT design sets" if not a.skip_bert else ""
+        suffix += " + the Whisper set" if not a.skip_whisper else ""
         print(f"kernel export ok: {len(specs)} open_kernels spec(s){suffix}", flush=True)
     return 0
 

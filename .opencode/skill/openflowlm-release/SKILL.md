@@ -54,6 +54,14 @@ the first staging commit those files are *tracked*, and `--others` finds
 nothing the second time. A file the ignore rules would not ignore is invisible
 to the script, which is the one way to ship a package with no kernels.
 
+The Whisper set is the one set without `<kernel>/` folders.
+`src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels/` holds one `final.xclbin`, an
+`insts_<stream>.bin` per GEMM shape and `fa/air.*` (the attention kernel)
+directly. `stage-prebuilts.sh` checks it against its `whisper_kernels.json` and
+`design.json` instead of the `<kernel>/final.xclbin` rule, and refuses a set
+that carries `build/` or that has streams but no marker (an export cut short).
+`verify-package.sh` requires the marker (`EXPECT_WHISPER`).
+
 ## Before a tag
 
 - `OFLM_VERSION` in **both** `CMakePresets.json` and `src/CMakePresets.json`.
