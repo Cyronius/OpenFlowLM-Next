@@ -52,15 +52,20 @@ def main() -> int:
                 ms.loader.exec_module(mod)
                 text = str(mod.DESIGN.specialize(**mod.SPECIALIZE).as_mlir())
                 (out / f"{stem}.{name}.mlir").write_text(text, encoding="utf-8", newline="\n")
-                print(f"ok   {stem} {name} ({len(text)} chars)")
-            except Exception:
+                print(f"ok   {stem} {name} ({len(text)} chars)", flush=True)
+            except (Exception, SystemExit):     # a design refuses its env with sys.exit
                 bad += 1
-                print(f"FAIL {stem} {name}")
+                print(f"FAIL {stem} {name}", flush=True)
                 traceback.print_exc(limit=3)
             finally:
                 sys.path.remove(str(src.parent))
                 os.environ.clear()
                 os.environ.update(saved)
+                # layer_x's layout / xcommon read the spec at import: a cached copy would serve the next spec
+                for k, m in list(sys.modules.items()):
+                    f = str(getattr(m, "__file__", None) or "")
+                    if f.startswith(str(root)) and not f.startswith(str(root / "recipes")):
+                        del sys.modules[k]
     return 1 if bad else 0
 
 
