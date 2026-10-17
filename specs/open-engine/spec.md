@@ -1100,8 +1100,9 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 - **The logits are soft-capped** at 30 on the host after the tied head (token_embd, Q6_K
   re-quantized to q4_1).
 - The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
-- Text only: the adapter refuses images and audio on the open engine and points at the curated
-  `gemma4-it` tags, whose `.q4nx` containers run them on the closed engine. `OFLM_GEMMA4_ENGINE=closed`
+- Text only: the adapter refuses images and audio on the open engine with an error the client sees
+  (not the generic "Max length reached!"), naming the curated `gemma4-it` tags, whose `.q4nx`
+  containers run them on the closed engine; the server keeps serving. `OFLM_GEMMA4_ENGINE=closed`
   is no way round it: an install holding only `model.gguf` has nothing the closed engine can read.
 - The kernel set lives under the official model's name (`Gemma4-E4B-IT-NPU2`), where the official
   `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
@@ -1150,7 +1151,8 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    and `--xclbin-dir` pointing at a scratch root), `oflm serve`, `oflm-test --llm --model <tag>`,
    `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") comes from the
    sampler's default frequency and presence penalties: replay the request with both at 0 before
-   suspecting the engine.
+   suspecting the engine. An image request to the install comes back as an error naming the
+   `gemma4-it` tags, and a text request after it still answers.
 5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
    "not using ... it packs GGUF-direct" and does not start the open engine.
@@ -1226,12 +1228,20 @@ open_kernels: it packs GGUF-direct and ... has no model.gguf (or also a model.q4
 closed engine (which then refuses the stand-in `.q4nx`); the open engine never starts.
 
 **Result 2026-10-16 (after merging OPEN-ATTN-ONE-KV-HEAD and adding E2B's recipe):** every shipped spec's
-attention flags are unchanged; the MLIR of all 73 shipped kernel sets matches the base commit's and E4B's
-6 match the pre-merge tree's; every attention translation unit preprocesses identically at every spec's
-own flags, 176 against the base and 196 (with E4B's two kinds) against the pre-merge tree
-(`utilities/attn_flags.py`, `utilities/mlir_equiv.py`, `ALL_SPECS=1 utilities/attn_pp_identical.sh`).
-E4B re-exported from the merged tree with `--check` against the set that passed on the NPU: all 12
+attention flags are unchanged; the MLIR of the 73 kernel sets the four dense designs (dx, dx_attn, ln,
+lm_head_q4) build for the 15 shipped specs matches the base commit's, and E4B's 6 match the pre-merge
+tree's. E4B re-exported from the merged tree with `--check` against the set that passed on the NPU: all 12
 kernel files match (instruction streams byte-identical, xclbins apart from build stamps).
+
+**Result 2026-10-17 (rerun with the hardened tools):** every attention translation unit preprocesses
+identically at every spec's own flags, 176 against the base and 196 (with E4B's two kinds) against the
+pre-merge tree, with none failing to preprocess, and every base and pre-merge flag line is unchanged
+(`ALL_SPECS=1 utilities/attn_pp_identical.sh`, `utilities/attn_flags.py`). `utilities/mlir_equiv.py
+--designs all` generates 129 of the 500 sets the 15 shipped specs build, in both trees, and all 129 are
+identical (every dense-recipe set and the Qwen3.5 sets). The other 371 are the attention-block prefill
+sets (their design imports a module from another directory, which the tool cannot load) and the 35B's
+sets after `ux.py`, which exits the tool; they come from design files this branch does not touch, and
+every spec's `builds()` (design, build dir and environment of all 500) is identical to the base's.
 
 ### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
 **Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
