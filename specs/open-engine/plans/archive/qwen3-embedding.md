@@ -113,7 +113,7 @@ Qwen's own 4B embedder GGUF is Q4_K_M, Q6_K, Q8_0 or F16, all requantized on loa
 
 Requirements: no new ones. SERVER-EMBED-QWEN3 and SERVER-RERANK gain the tags
 `qwen3-embedding:4b` and `qwen3-reranker:4b` (one line each in the tag table); OPEN-HIDDEN-STATE's
-procedure is run once per kernel set. The 4B CPU references skip SciFact (about 20 minutes per
+procedure is run once per kernel set. The 4B CPU references skip SciFact (close to an hour per
 fp32 pass on this box) and keep the card, the ten fixed prompts and the reranker pairs.
 
 The two specs build the same kernels. They differ only in `vocab` / `real_vocab`; both round the
