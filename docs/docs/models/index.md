@@ -55,7 +55,7 @@ one of them is built from source here.
 | Phi-4-mini | `phi4-mini-it:4b` | ✅ **open** | — | |
 | LFM2 / LFM2.5 | `lfm2:*`, `lfm2-trans:2.6b`, `lfm2.5-it:1.2b`, `lfm2.5-tk:1.2b` | ✅ **open** | — | Includes the WideDeltaNet recurrent-state chain. |
 | Nanbeige 4.1 | `nanbeige4.1:3b` | ✅ **open** | — | |
-| **Gemma 4** | `gemma4-it:e2b`, `gemma4-it:e4b`, `gemma4-it:12b` | ❌ **closed** | ❌ closed | **No open design exists.** These dispatch entirely to the closed `gemma4e_npu` / `gemma4_12b_npu` engines. |
+| **Gemma 4** | `gemma4-it:e2b`, `gemma4-it:e4b`, `gemma4-it:12b` | ✅ **open** with the GGUF (E2B, E4B) · ❌ closed (12B) | ❌ closed | The tags as published (FLM's `Gemma4-E*B-IT-NPU2` containers, a `model.q4nx`) run on the closed `gemma4e_npu` engine, images and audio included. For text on the open kernels, install Google's QAT GGUF with `oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf` (or `-E2B-`) and run the tag it prints; that install is text only, and its prompts prefill one token at a time for now, so long prompts are slow. The 12B has no open design yet (`gemma4_12b_npu`). |
 | **GPT-OSS** | `gpt-oss:20b`, `gpt-oss-sg:20b` | ❌ **closed** | — | No open design: the MoE experts need a clamped SwiGLU plus bias-carrying projections that no current design has room for. |
 | **Whisper** | `whisper-v3:turbo` | ❌ **closed** | ❌ closed | The published container ships only `model.q4nx`, so the open Whisper path is never selected for it. |
 | DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Qwen3-8B and Llama-3.1-8B**, so they reuse the `qwen3` and `llama3` recipes respectively rather than having one of their own. |

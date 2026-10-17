@@ -72,10 +72,17 @@ recipe and all route images to the closed `gemma_npu` DLL. See the
 oflm run gemma4-it:e2b
 ```
 
-> ⚠️ **Gemma 4 has no open kernels.** Every Gemma 4 tag dispatches entirely to
-> the closed `gemma4e_npu` / `gemma4_12b_npu` engines -- there is no open AIE
-> design for it, so nothing here is built from source in this repository. The
-> same applies to its vision and audio paths. See the
+> ⚠️ **Open kernels: text only, from Google's GGUF.** This tag runs FLM's
+> `.q4nx` container on the closed `gemma4e_npu` engine, which handles text,
+> images and audio. For text on the open kernels, install Google's QAT GGUF and
+> run the tag `oflm-add` prints:
+>
+> ```shell
+> oflm-add google/gemma-4-E2B-it-qat-q4_0-gguf
+> ```
+>
+> That install refuses images and audio, and its prompts prefill one token at a
+> time for now, so long prompts are slow. See the
 > [support-status matrix](/docs/models/#open-vs-closed-support-status).
 
 🖼️ **Note:** In CLI mode, attach an image with:
@@ -115,6 +122,9 @@ oflm run gemma4-it:e2b
 oflm run gemma4-it:e4b
 ```
 
+⚠️ **Open kernels:** as for E2B, text only, from Google's GGUF:
+`oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf`, then run the tag it prints.
+
 🖼️ **Note:** In CLI mode, attach an image with:
 
 ```shell
@@ -151,6 +161,8 @@ oflm run gemma4-it:e4b
 ```shell
 oflm run gemma4-it:12b
 ```
+
+⚠️ **No open kernels.** The 12B runs on the closed `gemma4_12b_npu` engine only.
 
 🖼️ **Note:** In CLI mode, attach an image with:
 
