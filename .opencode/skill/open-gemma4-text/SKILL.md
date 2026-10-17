@@ -107,4 +107,10 @@ for either reason.
   -PassThru` writing the PID to a file, not through `$(...)`: the server inherits the pipe and the
   substitution waits for it to exit. Stop it by that PID.
 - Prefill is token at a time (no block-prefill route for Gemma 4 yet): a 270-token tool prompt takes
-  most of a minute on E4B, so a full `oflm-test --tools` (both modes) runs past 15 minutes.
+  most of a minute on E4B, so a full `oflm-test --tools` (both modes) runs past 15 minutes; run the
+  non-stream and stream halves separately.
+- Results 2026-10-16: E4B `oflm-test --llm` 5 of 5, `--tools` 14 of the 15 checks reached (one
+  sampled loop answer stopped before its total; the same request greedily answers right, and the
+  346-token prompt behind it matches the replica to corr 0.999986). E2B `oflm-test --llm` 5 of 5.
+- Never rewrite a shell script while a bash instance is still running it: bash reads scripts as it
+  goes, and a half-read old instance ran the new text, restarted a server and overwrote its logs.
