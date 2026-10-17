@@ -86,8 +86,6 @@ def fixture_manifest_ph() -> dict:
 
 
 def fixture_manifest_g4() -> dict:
-    """OPEN_KERNELS_UNVALIDATED until OPEN-FAMILY-GEMMA4's points enter the catalogue."""
-    os.environ["OPEN_KERNELS_UNVALIDATED"] = "1"
     return manifest(load_spec(SPEC_G4), key="sha256:fixture")
 
 
