@@ -82,9 +82,9 @@ DEFAULT_OUT = os.path.join(REPO, 'specs', 'open-engine', 'tests', 'fixtures', 'd
 #   SOFTWARE.
 #
 # The sampler from huggingface_bd3.py comes from the same repository's OpenCompass tree
-# (evaluation/opencompass/; OpenCompass is Apache-2.0,
-# https://github.com/open-compass/opencompass). Both are copied unchanged, which
-# --check-sources verifies.
+# (evaluation/opencompass/; OpenCompass is Apache-2.0, license text in LICENSE.opencompass
+# beside this file, https://github.com/open-compass/opencompass). Both are copied unchanged,
+# which --check-sources verifies.
 
 # ---- the reference, verbatim ------------------------------------------------------------
 # JetAstra/SDAR generate.py (git blob a24d2a824bf2b3e4469d6404acf0d5a0f256fb73), lines
