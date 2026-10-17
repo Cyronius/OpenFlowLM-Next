@@ -2023,7 +2023,7 @@ def main():
     # ---- the GGUF-direct gate: the engine must read model.gguf AND the linked
     # xclbins must actually carry the GGUF-direct kernel builds (the nested
     # "gguf" manifest section, produced by the *_f32 sets in utilities/
-    # build-all.sh). Otherwise fall back to the normal safetensors install.
+    # build-all.sh). Otherwise fall back to model.q4nx, which a GGUF-only repo lacks.
     gguf_skip = None
     if gguf_mode:
         if family in EMBEDDING_FAMILIES:
@@ -2033,8 +2033,7 @@ def main():
             pass
         elif family not in GGUF_CAPABLE_FAMILIES:
             gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
-                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
-                         + "); installing the safetensors weights instead")
+                         + ", ".join(sorted(GGUF_CAPABLE_FAMILIES)) + ")")
         else:
             if args.open_kernels:
                 mj = Path(args.open_kernels) / "manifest.json"
@@ -2042,11 +2041,14 @@ def main():
                 sys_xcl = find_system_xclbin_root()
                 mj = (sys_xcl / xclbin_source / "open_kernels" / "manifest.json"
                       if xclbin_source and sys_xcl else Path())
+            linked = args.open_kernels or xclbin_source
             if not manifest_supports_gguf(mj):
-                gguf_skip = (f"the kernels this install links ({xclbin_source or 'no official match'}) "
-                             "have no GGUF-direct build (missing open_kernels gguf manifest); "
-                             "rebuild them with utilities/build-all.sh -- "
-                             "installing the safetensors weights instead")
+                gguf_skip = (f"the kernels this install links ({linked}) have no GGUF-direct build "
+                             "(no gguf section in open_kernels/manifest.json); rebuild them with "
+                             "utilities/build-all.sh" if linked else
+                             "no official registry entry names kernels for this model; pass "
+                             "--open-kernels <set> (a kernel set whose manifest has a gguf section) "
+                             "or --xclbin-from <installed model directory> that carries one")
         if gguf_skip:
             gguf_refused[gguf_name] = gguf_skip
             log(f"[INFO] skipping {gguf_name}: {gguf_skip}")
@@ -2080,8 +2082,9 @@ def main():
         elif npue_embed:
             print(f"weights        : safetensors (NPU-embedding: {base_entry.get('npue_design_family')})")
         elif gguf_refused:
-            print(f"weights        : safetensors (GGUF present but not usable: "
-                  + "; ".join(sorted(set(gguf_refused.values()))) + ")")
+            # without model.q4nx the install below stops at its missing-files check
+            print(f"weights        : {'safetensors' if have_q4nx else 'none, the install stops'} "
+                  "(GGUF present but not usable: " + "; ".join(sorted(set(gguf_refused.values()))) + ")")
         probe = args.open_kernels or (local_dir if local_dir else None)
         if args.open_kernels:
             print(f"open kernels   : {args.open_kernels} (--open-kernels)")

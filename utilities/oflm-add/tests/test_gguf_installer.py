@@ -179,6 +179,40 @@ def test_single_eos_id_in_generation_config_becomes_a_list(tmp_path):
     assert cfg["eos_token_id"] == [120020] and cfg["bos_token_id"] == 120000
 
 
+def test_gguf_only_repo_installs_only_with_a_gguf_kernel_set(tmp_path, capsys, monkeypatch):
+    # Traces: OPEN-FAMILY-HUNYUAN -- the plan must not promise a fallback a GGUF-only repo cannot take
+    system_list = Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        return
+    repo = tmp_path / "Hy-MT2-1.8B-GGUF"
+    repo.mkdir()
+    (repo / "Hy-MT2-1.8B-Q8_0.gguf").write_bytes(_gguf_bytes(
+        [("general.architecture", (8, "hunyuan-dense"))], [("blk.0.attn_q.weight", 8, [2048, 2048])]))
+    (repo / "README.md").write_text("# local test repo\n")
+    gguf_set = {"gguf": {}}
+    explicit = tmp_path / "kernels"
+    shipped = tmp_path / "share" / "oflm" / "xclbins" / "Hy-MT2-1.8B-NPU2" / "open_kernels"
+    for d in (explicit, shipped):
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps(gguf_set), encoding="utf-8")
+    (tmp_path / "fakebin").mkdir()
+    monkeypatch.setenv("OFLM_EXECUTABLE", str(tmp_path / "fakebin" / "oflm"))
+
+    def plan(*extra):
+        monkeypatch.setattr("sys.argv", [
+            "oflm-add", str(repo), "--system-list", str(system_list),
+            "--config", str(tmp_path / "user_list.json"), "--models-root", str(tmp_path / "models"),
+            "--xclbin-dir", str(tmp_path / "xclbins"), "--dry-run", "--quiet", *extra])
+        oflm_add.main()
+        return capsys.readouterr().out
+
+    out = plan()
+    assert "weights        : none, the install stops" in out and "--open-kernels" in out
+    direct = "weights        : Hy-MT2-1.8B-Q8_0.gguf -> model.gguf (GGUF-direct"
+    assert direct in plan("--open-kernels", str(explicit))
+    assert direct in plan("--xclbin-from", "Hy-MT2-1.8B-NPU2")
+
+
 def test_derive_tag_accepts_size_guess():
     assert oflm_add.derive_tag("My-Finetune-Q4_K_M", None, "4.4b") == "my-finetune:4.4b"
     try:
