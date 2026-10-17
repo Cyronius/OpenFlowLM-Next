@@ -21,6 +21,9 @@
 #include <string>
 #include <vector>
 
+#include <cmath>
+
+#include "AutoEmbeddingModel/llm_conventions.hpp"
 #include "AutoModel/model_families.hpp"
 #include "server/openai_compat.hpp"
 
@@ -709,6 +712,125 @@ static void test_images_request() {
     refused(form, "steps", "the form's steps 2.5");
 }
 
+// ---------------------------------------------------------------------------
+// Traces: SERVER-RERANK -- /v1/rerank's body, order, prompt and score.
+// ---------------------------------------------------------------------------
+static void test_rerank() {
+    std::printf("\n-- rerank --\n");
+    using openai_compat::json;
+    openai_compat::RerankRequest r;
+    auto param_of = [](const json& e) { return e["error"]["param"].get<std::string>(); };
+    auto refused = [&](const json& req, const std::string& param, const std::string& what) {
+        const json e = openai_compat::rerank_request(req, r);
+        ok(!e.is_null() && openai_compat::status_for(e) == 400 && param_of(e) == param,
+           what + " -> 400 naming " + param + (e.is_null() ? "  (accepted)" : "  (got " + e.dump() + ")"));
+    };
+    const json good = {{"query", "q"}, {"documents", json::array({"a", json{{"text", "b"}}})}};
+    ok(openai_compat::rerank_request(good, r).is_null(), "a query and two documents are accepted");
+    ok(r.query == "q" && r.documents == std::vector<std::string>{"a", "b"},
+       "documents are strings or objects with a text field");
+    ok(r.top_n == 0 && !r.return_documents && r.instruction.empty() && r.model.empty(), "the defaults");
+    refused(json::object(), "query", "an empty body");
+    refused(json{{"documents", json::array({"a"})}}, "query", "no query");
+    refused(json{{"query", 5}, {"documents", json::array({"a"})}}, "query", "a numeric query");
+    refused(json{{"query", "q"}}, "documents", "no documents");
+    refused(json{{"query", "q"}, {"documents", "a"}}, "documents", "documents as a string");
+    refused(json{{"query", "q"}, {"documents", json::array({"a", 7})}}, "documents[1]", "a numeric document");
+    refused(json{{"query", "q"}, {"documents", json::array({json{{"txt", "a"}}})}}, "documents[0]",
+            "an object document without text");
+    json j = good;
+    j["top_n"] = 0;
+    refused(j, "top_n", "top_n 0");
+    j["top_n"] = "2";
+    refused(j, "top_n", "a string top_n");
+    j = good;
+    j["model"] = "";
+    refused(j, "model", "an empty model");
+    j["model"] = 3;
+    refused(j, "model", "a numeric model");
+    j = good;
+    j["return_documents"] = "yes";
+    refused(j, "return_documents", "a string return_documents");
+    j = good;
+    j["top_n"] = 1;
+    j["return_documents"] = true;
+    j["instruction"] = "Find code";
+    j["model"] = "qwen3-reranker:0.6b";
+    ok(openai_compat::rerank_request(j, r).is_null() && r.top_n == 1 && r.return_documents &&
+           r.instruction == "Find code" && r.model == "qwen3-reranker:0.6b",
+       "top_n, return_documents, instruction and model are carried");
+    ok(openai_compat::rerank_request(json{{"query", "q"}, {"documents", json::array()}}, r).is_null() &&
+           r.documents.empty(), "an empty documents array is a well-formed request");
+
+    const std::vector<double> s = {0.2, 0.9, 0.5, 0.9};
+    ok(openai_compat::rerank_order(s, 0) == std::vector<size_t>{1, 3, 2, 0}, "best first; a tie keeps request order");
+    ok(openai_compat::rerank_order(s, 2) == std::vector<size_t>{1, 3}, "top_n keeps the best n");
+    ok(openai_compat::rerank_order(s, 9) == std::vector<size_t>{1, 3, 2, 0}, "top_n past the count keeps all");
+
+    const auto p = llm_conventions::qwen3_rerank_prompt("Given a web search query, retrieve relevant passages that "
+                                                        "answer the query", "What is the capital of China?",
+                                                        "The capital of China is Beijing.");
+    eq(p.whole(),
+       "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct "
+       "provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
+       "<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n"
+       "<Query>: What is the capital of China?\n<Document>: The capital of China is Beijing."
+       "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+       "the prompt is the card's template, byte for byte");
+    eq(llm_conventions::qwen3_rerank_prompt("", "q", "d").body,
+       "<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: q\n<Document>: d",
+       "no instruction is the card's default one");
+    ok(std::fabs(llm_conventions::yes_no_score(2.0, 0.0) - 0.8808) < 1e-4, "logits (yes, no) = (2, 0) score 0.8808");
+    ok(std::fabs(llm_conventions::yes_no_score(0.0, 0.0) - 0.5) < 1e-12, "equal logits score 0.5");
+    ok(llm_conventions::yes_no_score(7.625, 0.0) > 0.999 && llm_conventions::yes_no_score(-11.375, 0.0) < 1e-4,
+       "the card's logit differences (7.625, -11.375) are near 1 and near 0");
+}
+
+// ---------------------------------------------------------------------------
+// Traces: SERVER-EMBED-QWEN3 -- the text, the pooled ids and `dimensions`.
+// ---------------------------------------------------------------------------
+static void test_embed_qwen3() {
+    std::printf("\n-- embed qwen3 --\n");
+    using openai_compat::json;
+    eq(llm_conventions::qwen3_embed_text(task_query, "Explain gravity", "Given a web search query, retrieve relevant "
+                                         "passages that answer the query"),
+       "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:Explain gravity",
+       "a query carries the instruction, as the card writes it");
+    eq(llm_conventions::qwen3_embed_text(task_document, "The capital of China is Beijing."),
+       "The capital of China is Beijing.", "a document is the text unchanged");
+    bool refused = false;
+    try {
+        llm_conventions::qwen3_embed_text(task_clustering, "x");
+    } catch (const TaskPromptUnavailable&) {
+        refused = true;
+    }
+    ok(refused, "a task the model has no prompt for is refused, not substituted");
+    ok(llm_conventions::pooled_ids({14990}, true, 151643) == std::vector<int>{14990, 151643},
+       "\"hello\" (14990) is pooled over 14990 then 151643 when the GGUF asks for the end-of-text id");
+    ok(llm_conventions::pooled_ids({14990}, false, 151643) == std::vector<int>{14990}, "...and over 14990 alone when not");
+
+    std::vector<float> v = {3.f, 4.f, 12.f, 0.f};
+    llm_conventions::l2_normalize(v);
+    double n2 = 0;
+    for (float x : v) n2 += static_cast<double>(x) * x;
+    ok(std::fabs(n2 - 1.0) < 1e-6, "l2_normalize gives unit length");
+    const std::vector<float> t = llm_conventions::truncate_renormalize(v, 2);
+    ok(t.size() == 2 && std::fabs(t[0] - 0.6f) < 1e-6 && std::fabs(t[1] - 0.8f) < 1e-6,
+       "dimensions 2 of (3, 4, 12, 0)/13 is (0.6, 0.8): the first two, renormalized");
+
+    size_t d = 99;
+    ok(openai_compat::resolve_dimensions(json{{"input", "x"}}, 32, 1024, d).is_null() && d == 0, "no dimensions: full width");
+    ok(openai_compat::resolve_dimensions(json{{"dimensions", 256}}, 32, 1024, d).is_null() && d == 256, "256 of 1024");
+    ok(openai_compat::resolve_dimensions(json{{"dimensions", 1024}}, 32, 1024, d).is_null() && d == 0, "the full width itself");
+    for (const json& bad : {json(16), json(2048), json(0), json(-5), json("256"), json(256.5)})
+        ok(openai_compat::status_for(openai_compat::resolve_dimensions(json{{"dimensions", bad}}, 32, 1024, d)) == 400,
+           "dimensions " + bad.dump() + " is refused with 400");
+    ok(openai_compat::status_for(openai_compat::resolve_dimensions(json{{"dimensions", 256}}, 0, 768, d)) == 400,
+       "a fixed-width model refuses dimensions 256");
+    ok(openai_compat::resolve_dimensions(json{{"dimensions", 768}}, 0, 768, d).is_null() && d == 0,
+       "...and accepts its own width");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -727,6 +849,8 @@ int main(int argc, char** argv) {
     test_stream_errors();
     test_require_field();
     test_images_request();
+    test_rerank();
+    test_embed_qwen3();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

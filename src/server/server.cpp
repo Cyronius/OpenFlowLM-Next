@@ -189,6 +189,7 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
                path == "/v1/chat/completions" ||
                path == "/v1/audio/transcriptions" ||
                path == "/v1/embeddings" ||
+               path == "/v1/rerank" ||
                // Both drive the same engines as the routes above: /v1/completions
                // loads, inserts and decodes on the chat engine, and /api/embeddings
                // shares handle_embeddings with /v1/embeddings. Left off this list they
@@ -1098,6 +1099,19 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
                     request_json = json::parse(req.body());
                 }
                 rest_handler->handle_embeddings(request_json, send_response, send_streaming_response);
+        });
+
+    server->register_handler("POST", "/v1/rerank",
+        [rest_handler](const http::request<http::string_body>& req,
+            std::function<void(const json&)> send_response,
+            std::function<void(const json&, bool)> send_streaming_response,
+            std::shared_ptr<HttpSession> session,
+            std::shared_ptr<CancellationToken> cancellation_token) {
+                json request_json;
+                if (!req.body().empty()) {
+                    request_json = json::parse(req.body());
+                }
+                rest_handler->handle_rerank(request_json, send_response, send_streaming_response);
         });
 
     server->register_handler("POST", "/v1/chat/completions",

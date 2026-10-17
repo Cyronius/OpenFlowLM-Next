@@ -55,6 +55,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --cors 0" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
+    std::cout << "\toflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --imagegen 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
@@ -94,6 +95,8 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("embeddingmodel", po::value<std::string>(&parsed_args.embedding_model)->default_value(""),
              "Which embedding model to serve with --embed 1 "
              "(default: embed-gemma:300m)")
+            ("rerankmodel", po::value<std::string>(&parsed_args.rerank_model)->default_value(""),
+             "Which reranker /v1/rerank serves, e.g. qwen3-reranker:0.6b (for serve command; default: none)")
             ("imagegen", po::value<bool>(&parsed_args.image_resident)->default_value(0),
              "Load the image engine at startup and keep it beside the chat model "
              "(for serve command; default: an image request swaps them)")
@@ -265,6 +268,7 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     {"host", "The host option is only supported with the serve command!"},
                     {"imagegen", "--imagegen is only supported with the serve command!"},
                     {"imagemodel", "--imagemodel is only supported with the serve command!"},
+                    {"rerankmodel", "--rerankmodel is only supported with the serve command!"},
                 };
                 for (const auto& [opt, message] : serve_only) {
                     if (parsed_args.command == "port" && std::string(opt) == "port") {

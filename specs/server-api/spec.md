@@ -470,3 +470,92 @@ embedding and Whisper engines do.
 3. `oflm serve llama3.2:1b --imagegen 1 --imagemodel llama3.2:3b` exits with `--imagemodel: model
    'llama3.2:3b' is not an image model`; `oflm run llama3.2:1b --imagegen 1` is refused.
 4. Not measured: resident beside `--asr 1` and `--embed 1` as well.
+
+## Embeddings and reranking from a decoder LLM
+
+Qwen3-Embedding and Qwen3-Reranker are the Qwen3 network with a different job: the embedder pools
+the hidden state at the last token, and the reranker reads two logits ("yes" and "no") at the end
+of a fixed prompt. Both run on the open kernels through `OPEN-HIDDEN-STATE`
+(`specs/open-engine/spec.md`), read straight from their GGUFs, behind one backend,
+`OpenLlmEmbedding` (`src/include/AutoEmbeddingModel/open_llm_embedding.hpp`). The pure rules -- the
+text a query becomes, the ids, the prompt, the score, the order and `dimensions` -- are
+`llm_conventions.hpp` and `openai_compat.hpp` functions, unit-tested in
+`src/server/openai_compat_test.cpp`.
+
+### SERVER-EMBED-QWEN3: an LLM-backed embedder follows the model's own pooling convention
+**Applies to:** openflowlm-next (`src/include/AutoEmbeddingModel/`, `src/common/AutoEmbeddingModel/open_llm_embedding.cpp`, `src/server/rest_handler.cpp`, `src/server/openai_compat.hpp`, `utilities/oflm-add`)
+**Verification:** test (the text, ids and `dimensions` rules: `src/server/openai_compat_test.cpp`
+`test_embed_qwen3`; the install: `utilities/oflm-add/tests/test_llm_embed_install.py`) and manual
+(the vectors)
+
+`oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b` serves Qwen3-Embedding-0.6B. A query
+(`prompt_name` / `task_type` `query` or `search_query`) is embedded as
+`Instruct: <instruction>\nQuery:<text>` with the card's web-search instruction; a document
+(`document`, `search_document`, `search_result`) is embedded as written; a request naming no task
+gets the model's own default, the text as written, which is what its sentence-transformers config
+says and what llama.cpp and other OpenAI-compatible servers do. Any other task is refused: the
+model declares prompts for query and document only. The ids are the tokenizer's, followed by the
+end-of-text id when the GGUF's `tokenizer.ggml.add_eos_token` is true (151643 for Qwen3-Embedding).
+The vector is the final-norm hidden state at that last id, L2-normalized. `dimensions` (32 to 1024)
+returns the first `dimensions` entries renormalized to unit length (Matryoshka). A model that
+cannot shorten its vectors -- every other backend -- refuses `dimensions` with 400 unless it asks
+for the model's own width; it used to be ignored silently.
+
+`oflm-add` installs the embedder's GGUF under the `qwen3-embedding` family with label
+`embeddings`, never as a chat model, and asks for `--open-kernels` when no official entry carries
+the kernel set.
+
+**Acceptance criteria:**
+- A query under the web-search task is exactly `Instruct: Given a web search query, retrieve
+  relevant passages that answer the query\nQuery:<query>`; a document is the text unchanged; a
+  clustering task is refused with `TaskPromptUnavailable`, which the handler answers with 400.
+- `"hello"` (id 14990) is pooled over `14990, 151643` when the GGUF asks for the end-of-text id,
+  and over `14990` alone when it does not.
+- `dimensions: 2` of `(3, 4, 12, 0)/13` is `(0.6, 0.8)`; 16, 2048, 0, -5, `"256"` and 256.5 are
+  refused with 400 for a 1024-wide model whose floor is 32; a fixed-width model refuses 256 and
+  accepts its own width.
+- `oflm-add` derives the `qwen3-embedding` and `qwen3-reranker` families from the repo names (not
+  `qwen3`), refuses with a message naming `--open-kernels` when it has none, and with it registers
+  the entry with label `embeddings` / `rerank` and links the kernel set at `<model>/open_kernels`.
+- Unit length for every input, and a request naming another model returns 400
+  (SERVER-MODEL-IDENTITY), as for every embedding backend.
+
+**Verification (manual):** with the embedder installed and served, the card's example (two queries
+under `prompt_name: query`, two documents under `document`) gives a 2x2 similarity matrix within
+0.02 of the CPU reference's (transformers, fp32, the official safetensors); `oflm-test --embedding
+--model qwen3-embedding:0.6b` passes.
+
+### SERVER-RERANK: `/v1/rerank` scores and orders documents against a query
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/server/server.cpp`, `src/server/openai_compat.hpp`, `src/include/AutoEmbeddingModel/`)
+**Verification:** test (the body, prompt, score and order: `src/server/openai_compat_test.cpp`
+`test_rerank`) and manual (the scores)
+
+`oflm serve --rerankmodel qwen3-reranker:0.6b` loads a reranker beside any chat and embedding
+model and serves `POST /v1/rerank` in the Cohere / Jina / llama.cpp shape:
+`{model?, query, documents: [string | {text}], top_n?, return_documents?, instruction?}` ->
+`{object: "list", model, results: [{index, relevance_score, document?}], usage}`, results sorted by
+score, best first, ties in request order. Each document is scored on the card's prompt (system
+"Judge whether the Document meets the requirements ...", a user turn of `<Instruct>`, `<Query>`
+and `<Document>` lines, then the assistant turn with an empty think block), tokenized in the
+card's three pieces, as the softmax over the (no, yes) logits at the last position, i.e.
+`sigmoid(yes - no)`. The two logits are the hidden state against the "yes" and "no" rows of the
+tied head (`token_embd`, read exactly from the GGUF on the host), so no lm_head runs. The
+endpoint holds the NPU lock like `/v1/embeddings`.
+
+**Acceptance criteria:**
+- The prompt for (the card's instruction, "What is the capital of China?", "The capital of China
+  is Beijing.") is byte-equal to the card's template; an empty instruction is the card's default.
+- Logits (yes, no) = (2.0, 0.0) score 0.8808 within 1e-4; equal logits score 0.5.
+- Results are sorted by score descending, a tie keeps request order, `top_n` keeps the best n and
+  a `top_n` past the count keeps all.
+- A body with no `query`, a non-string `query`, no `documents`, `documents` that is not an array,
+  a document that is neither a string nor an object with a string `text` (`documents[i]`), a
+  `top_n` that is not a positive integer, a non-boolean `return_documents`, and an empty or
+  non-string `model` each return 400 with `error.param` naming the field (SERVER-REQUEST-VALIDATION).
+  An empty `documents` array is a well-formed request.
+- A server with no reranker loaded, or a request naming another model, returns 400
+  `model_not_found` naming what is loaded (SERVER-MODEL-IDENTITY).
+
+**Verification (manual):** the card's example -- "What is the capital of China?" against its two
+documents -- ranks the Beijing document first, and every score is within 0.02 of the CPU
+reference's (transformers, fp32, the official safetensors).

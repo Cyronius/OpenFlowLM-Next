@@ -59,6 +59,7 @@ struct CoreConfig {
     unsigned timeout_ms = 60000;  ///< per dispatch; 0 blocks
     bool verbose = true;
     std::string prefill_mode = "fast";  ///< OPEN-PREFILL-MODE: fast | lean
+    bool lm_head = true;     ///< false: hidden states only, the head is never packed (OPEN-HIDDEN-STATE)
 };
 
 /// Everything a request needs to be resumed later (the app's checkpoint/restore).
@@ -157,6 +158,9 @@ public:
     void step_embed(const float* x, bool want_logits, const int64_t mpos[3],
                     const float* deepstack = nullptr, int n_deepstack = 0);
     const std::vector<float>& logits() const { return logits_host_; }
+    /// OPEN-HIDDEN-STATE: the last token's final-norm hidden state, from a reset state, no lm_head.
+    std::vector<float> prefill_hidden(const std::vector<int>& ids);
+    size_t hidden() const { return weights().hidden; }
 
     /// M-RoPE (Qwen3-VL, config.json rope_parameters.mrope_section): once a request has
     /// an image, every later token's rotary record is written from a (t, h, w) counter

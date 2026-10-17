@@ -21,6 +21,7 @@ struct program_args_t {
     // default, embed-gemma:300m, so an existing command line is
     // unchanged. See all_embedding_model.hpp for the registry.
     std::string embedding_model = "";
+    std::string rerank_model = "";   // --rerankmodel: the reranker /v1/rerank serves; empty loads none
     // Which Whisper model --asr loads. Empty means whisper-v3:turbo, the
     // only one the registry has always carried.
     std::string asr_model = "";

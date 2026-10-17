@@ -21,6 +21,8 @@
 /// resident engine and compares every step's logits (--det-full: every buffer) bit for
 /// bit against a reference pass (OPEN-REQUEST-ISOLATION); exit 1 if any rep moved.
 /// OFLM_ROUTE_CHECK=1 re-reads each router record and counts reads that changed.
+/// --hidden <prefix> runs Core::prefill_hidden on each prompt (--prompts-file, one id list a line)
+/// and writes f32[hidden] to <prefix>_<i>.bin; --twice repeats each and checks it is bit-identical.
 ///
 /// 0167/#32: --gemm-block prefills via Core::step_gemm_block() (T tokens per
 /// layer as 5 whole-array GEMM dispatches plus T attention dispatches, the
@@ -108,6 +110,8 @@ struct Args {
     std::string pmode = "performance";   // --pmode: the NPU power mode to set first ("none" leaves it)
     std::string decode_route;        // Stage 2.7: --decode-route {npu,host,auto} (default: the env's initial route)
     std::string decode_schedule;    // Stage 2.7: --decode-schedule "6n,6h,6n" -- per-step routes in the decode loop
+    std::string hidden_prefix;      // --hidden <prefix>: prefill_hidden per prompt, f32[hidden] to <prefix>_<i>.bin
+    std::vector<std::vector<int>> prompts;   // --prompts-file: one comma-separated prompt per line
 };
 
 /// Set the NPU power mode, exactly as the app does for `run` / `serve` / `bench`
@@ -200,13 +204,23 @@ Args parse(int argc, char** argv) {
         else if (k == "--timeout-ms") a.cfg.timeout_ms = static_cast<unsigned>(std::strtoul(val().c_str(), nullptr, 10));
         else if (k == "--decode-route") a.decode_route = val();          // Stage 2.7
         else if (k == "--decode-schedule") a.decode_schedule = val();     // Stage 2.7
+        else if (k == "--hidden") a.hidden_prefix = val();
+        else if (k == "--no-lm-head") a.cfg.lm_head = false;
+        else if (k == "--prompts-file") {
+            std::ifstream f(val());
+            for (std::string line; std::getline(f, line);)
+                if (auto p = parse_ids(line); !p.empty()) a.prompts.push_back(std::move(p));
+        }
         else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); std::exit(2); }
     }
+    if (a.ids.empty() && !a.prompts.empty()) a.ids = a.prompts.front();
+    if (a.prompts.empty() && !a.ids.empty()) a.prompts.push_back(a.ids);
     if (a.cfg.model_dir.empty() || a.cfg.kernel_dir.empty() || a.ids.empty()) {
         std::fprintf(stderr, "usage: open_qwen36_cli --model <dir> --kernels <dir> --ids 1,2,3 [--max-tokens N] "
                              "[--layers N] [--max-ctx N] [--dump-logits <prefix>] [--twice] [--at-position P] "
                              "[--gemm-block] [--block-major] [--prefill-logits] [--bench N[:LAYER]] [--bench-decode N] "
-                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean]\n");
+                             "[--bench-step N] [--bench-kernel NAME:REPS[:LAYER]] [--pmode MODE] [--prefill-mode fast|lean] "
+                             "[--hidden <prefix> [--prompts-file <one id list per line>] [--no-lm-head] [--twice]]\n");
         std::exit(2);
     }
     return a;
@@ -440,6 +454,27 @@ int main(int argc, char** argv) {
             const int bad = core.det_step(a.det_step, a.ids, a.det_full);
             std::printf(bad ? "NONDETERMINISTIC\n" : "DONE\n");
             return bad ? 1 : 0;
+        }
+        if (!a.hidden_prefix.empty()) {
+            bool moved = false;
+            for (size_t i = 0; i < a.prompts.size(); ++i) {
+                auto t0 = std::chrono::steady_clock::now();
+                const std::vector<float> h = core.prefill_hidden(a.prompts[i]);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                const std::string p = a.hidden_prefix + "_" + std::to_string(i) + ".bin";
+                std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(h.data()),
+                                                         static_cast<std::streamsize>(h.size() * 4));
+                std::string again;
+                if (a.twice) {
+                    const bool same = core.prefill_hidden(a.prompts[i]) == h;
+                    moved = moved || !same;
+                    again = same ? ", second run bit-identical" : ", SECOND RUN DIFFERS";
+                }
+                std::fprintf(stderr, "hidden %zu: %zu tokens, %.0f ms -> %s%s\n", i, a.prompts[i].size(), ms, p.c_str(),
+                             again.c_str());
+            }
+            std::printf(moved ? "NONDETERMINISTIC\n" : "DONE\n");
+            return moved ? 1 : 0;
         }
         std::vector<int> first = request(core, a);
         if (!a.dump_act.empty()) dump_act_slice(core, a.dump_act);

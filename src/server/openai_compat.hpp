@@ -611,6 +611,95 @@ inline json images_request(const json& req, const std::vector<int>& sizes, int a
     return json();
 }
 
+// ---------------------------------------------------------------------------------
+// /v1/rerank (Cohere / Jina / llama.cpp shape) and /v1/embeddings' `dimensions`.
+// specs/server-api: SERVER-RERANK, SERVER-EMBED-QWEN3.
+// ---------------------------------------------------------------------------------
+
+struct RerankRequest {
+    std::string model;                     ///< empty when the request omits it
+    std::string query;
+    std::vector<std::string> documents;    ///< a string, or an object's "text"
+    size_t top_n = 0;                      ///< 0: every document
+    bool return_documents = false;
+    std::string instruction;               ///< empty: the model's default
+};
+
+/// Parse and check a /v1/rerank body into `out`; an empty json, else the 400 body to send.
+inline json rerank_request(const json& req, RerankRequest& out) {
+    out = RerankRequest{};
+    if (json err = require_field(req, "query", FieldType::String); !err.is_null()) return err;
+    out.query = req.at("query").get<std::string>();
+    if (json err = require_field(req, "documents", FieldType::Array); !err.is_null()) return err;
+    const json& docs = req.at("documents");
+    for (size_t i = 0; i < docs.size(); ++i) {
+        const json& d = docs[i];
+        if (d.is_string()) {
+            out.documents.push_back(d.get<std::string>());
+        } else if (d.is_object() && d.contains("text") && d["text"].is_string()) {
+            out.documents.push_back(d["text"].get<std::string>());
+        } else {
+            return invalid_param("documents[" + std::to_string(i) + "]",
+                                 "documents[" + std::to_string(i) + "] must be a string or an object with a string \"text\".");
+        }
+    }
+    auto has = [&](const char* f) { return req.contains(f) && !req.at(f).is_null(); };
+    if (req.contains("model")) {
+        if (!req.at("model").is_string())
+            return invalid_param("model", "model must be a string naming the loaded reranker, or be omitted.");
+        out.model = req.at("model").get<std::string>();
+        if (out.model.empty())
+            return invalid_param("model", "model is empty. Name the loaded reranker, or omit the field to use it.",
+                                 "model_not_found");
+    }
+    if (has("top_n")) {
+        const json& v = req.at("top_n");
+        if (!v.is_number_integer() || (!v.is_number_unsigned() && v.get<long long>() < 1))
+            return invalid_param("top_n", "top_n must be a positive integer.");
+        out.top_n = v.get<size_t>();
+    }
+    if (has("return_documents")) {
+        if (!req.at("return_documents").is_boolean())
+            return invalid_param("return_documents", "return_documents must be a boolean.");
+        out.return_documents = req.at("return_documents").get<bool>();
+    }
+    if (has("instruction")) {
+        if (!req.at("instruction").is_string())
+            return invalid_param("instruction", "instruction must be a string.");
+        out.instruction = req.at("instruction").get<std::string>();
+    }
+    return json();
+}
+
+/// Document indices by score, highest first; ties keep request order. `top_n` 0 keeps every one.
+inline std::vector<size_t> rerank_order(const std::vector<double>& scores, size_t top_n) {
+    std::vector<size_t> idx(scores.size());
+    for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+    std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) { return scores[a] > scores[b]; });
+    if (top_n > 0 && top_n < idx.size()) idx.resize(top_n);
+    return idx;
+}
+
+/// /v1/embeddings' optional `dimensions`: 0 when absent (the full width), else the width to truncate to.
+/// `min_dims` 0 means the model has a fixed width, which only `full_dims` itself matches.
+inline json resolve_dimensions(const json& req, size_t min_dims, size_t full_dims, size_t& out) {
+    out = 0;
+    if (!req.contains("dimensions") || req.at("dimensions").is_null()) return json();
+    const json& v = req.at("dimensions");
+    if (!v.is_number_integer() || (!v.is_number_unsigned() && v.get<long long>() < 1))
+        return invalid_param("dimensions", "dimensions must be a positive integer.");
+    const size_t d = v.get<size_t>();
+    if (full_dims != 0 && d == full_dims) return json();
+    if (min_dims == 0)
+        return invalid_param("dimensions", "this model's vectors cannot be shortened; remove dimensions" +
+                                               (full_dims ? ", or ask for exactly " + std::to_string(full_dims) : std::string()) + ".");
+    if (d < min_dims || (full_dims != 0 && d > full_dims))
+        return invalid_param("dimensions", "dimensions must be between " + std::to_string(min_dims) + " and " +
+                                               std::to_string(full_dims) + " for this model.");
+    out = d;
+    return json();
+}
+
 /// A multipart form's text fields as the JSON images_request() reads. Form values are
 /// all strings; the numeric and boolean controls are converted when they parse as
 /// such, and left as strings otherwise, so a bad one is refused as the wrong type.

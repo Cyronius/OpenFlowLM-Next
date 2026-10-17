@@ -129,4 +129,23 @@ public:
 	/// while the BERT family has no task concept. Default false, so a new
 	/// backend refuses a prompt it would otherwise silently drop.
 	virtual bool supports_task_prompts() const { return false; }
+
+	/// The narrowest width a request's `dimensions` may truncate to (Matryoshka), 0 when the width is fixed.
+	virtual size_t min_dimensions() const { return 0; }
+
+	/// The task a request that names none gets; Qwen3-Embedding's own default is the raw text.
+	virtual embedding_task_type_t default_task() const { return task_query; }
+
+	/// SERVER-RERANK: whether this model scores documents (rerank()) rather than embedding them.
+	virtual bool is_reranker() const { return false; }
+
+	/// One relevance score in [0, 1] per document, in the order given; `tokens` as in embed_batch().
+	virtual std::vector<double> rerank(const std::string& query, const std::vector<std::string>& documents,
+	                                   const std::string& instruction, int64_t* tokens = nullptr) {
+		(void)query;
+		(void)documents;
+		(void)instruction;
+		if (tokens) *tokens = -1;
+		throw std::runtime_error("this model is not a reranker");
+	}
 };

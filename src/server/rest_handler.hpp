@@ -68,7 +68,12 @@ public:
     void handle_embeddings(const json& request,
                           std::function<void(const json&)> send_response,
                           StreamResponseCallback send_streaming_response);
-    
+
+    // specs/server-api: SERVER-RERANK
+    void handle_rerank(const json& request,
+                       std::function<void(const json&)> send_response,
+                       StreamResponseCallback send_streaming_response);
+
 
     void handle_models(const json& request,
                       std::function<void(const json&)> send_response,
@@ -139,6 +144,7 @@ private:
     ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
+    void ensure_rerank_model_loaded(const std::string& model_tag);
     /// current_model_tag is written by ensure_model_loaded() on the NPU-queued
     /// routes and read by GET /api/ps, which is not queued. These two are the
     /// only way either side touches it across threads (#135).
@@ -169,6 +175,7 @@ private:
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
     std::unique_ptr<Whisper> whisper_engine;
     std::unique_ptr<AutoEmbeddingModel> auto_embedding_engine;
+    std::unique_ptr<AutoEmbeddingModel> auto_rerank_engine;   // --rerankmodel, beside the embedding model
 #endif
     oflm_rt::device npu_device_inst;
     model_list& supported_models;
@@ -184,6 +191,7 @@ private:
     // Empty means embed-gemma:300m, so an existing command line keeps
     // its behaviour exactly.
     std::string embedding_model_tag;
+    std::string rerank_model_tag;
     int prefill_chunk_len;
     int generate_context_id;
     int chat_context_id;

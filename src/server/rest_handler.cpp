@@ -7,6 +7,7 @@
  *  \version 0.9.24
  */
 #include "rest_handler.hpp"
+#include "AutoEmbeddingModel/llm_conventions.hpp"
 #include "wstream_buf.hpp"
 #include "streaming_ostream.hpp"
 #include "streaming_ostream_openai.hpp"
@@ -370,7 +371,7 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), rerank_model_tag(args.rerank_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
     this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
@@ -402,6 +403,9 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
                                     ? std::string("embed-gemma:300m")
                                     : this->embedding_model_tag;
         ensure_embed_model_loaded(embed_tag);
+    }
+    if (!this->rerank_model_tag.empty()) {
+        ensure_rerank_model_loaded(this->rerank_model_tag);
     }
 #else
     if (this->asr) {
@@ -643,6 +647,10 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
     // member (the --embeddingmodel value), and shadowing it here would compile
     // fine while making the two impossible to tell apart at a glance.
     auto [resolved_tag, auto_embedding_engine] = get_auto_embedding_model(ensure_tag, &this->npu_device_inst);
+    if (auto_embedding_engine->is_reranker()) {
+        header_print("ERROR", resolved_tag + " is a reranker, not an embedding model: serve it with --rerankmodel " + resolved_tag);
+        exit(EXIT_FAILURE);
+    }
     this->auto_embedding_engine = std::move(auto_embedding_engine);
     auto [new_embedding_model_tag, embedding_model_info] = this->supported_models.get_model_info(resolved_tag);
     std::string embedding_model_path = this->supported_models.get_model_path(new_embedding_model_tag);
@@ -655,6 +663,39 @@ void RestHandler::ensure_embed_model_loaded(const std::string& model_tag) {
     }
 #else
     throw std::runtime_error("Embedding models are not supported in this build");
+#endif
+}
+
+///@brief Load the reranker /v1/rerank serves (--rerankmodel); same registry as the embedding models
+void RestHandler::ensure_rerank_model_loaded(const std::string& model_tag) {
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+    std::string ensure_tag = model_tag;
+    switch (this->downloader.is_model_downloaded(ensure_tag)) {
+        case ModelDownloader::ModelStatus::Ready:
+            break;
+        case ModelDownloader::ModelStatus::Outdated:
+        case ModelDownloader::ModelStatus::Missing:
+            this->downloader.pull_model(ensure_tag, this->modelscope);
+            break;
+        case ModelDownloader::ModelStatus::Incompatible:
+            header_print("ERROR", ensure_tag + " is incompatible with this version of OpenFlowLM");
+            exit(EXIT_FAILURE);
+    }
+    auto [resolved_tag, engine] = get_auto_embedding_model(ensure_tag, &this->npu_device_inst);
+    if (!engine->is_reranker()) {
+        header_print("ERROR", resolved_tag + " is not a reranker: serve it with --embed 1 --embeddingmodel " + resolved_tag);
+        exit(EXIT_FAILURE);
+    }
+    auto [info_tag, info] = this->supported_models.get_model_info(resolved_tag);
+    try {
+        engine->load_model(this->supported_models.get_model_path(info_tag), info, this->preemption);
+    } catch (const std::exception& e) {
+        header_print("ERROR", "Failed to load reranker: " + std::string(e.what()));
+        exit(EXIT_FAILURE);
+    }
+    this->auto_rerank_engine = std::move(engine);
+#else
+    throw std::runtime_error("Rerankers are not supported in this build");
 #endif
 }
 
@@ -1244,6 +1285,7 @@ void RestHandler::handle_embeddings(const json& request,
         if (this->auto_embedding_engine) {
             declared = this->auto_embedding_engine->prompt_names();
             supports_prompts = this->auto_embedding_engine->supports_task_prompts();
+            task_type = this->auto_embedding_engine->default_task();
         }
 #endif
         const openai_compat::TaskResolution tr = openai_compat::resolve_task(request);
@@ -1339,6 +1381,19 @@ void RestHandler::handle_embeddings(const json& request,
             return;
         }
 
+        // SERVER-EMBED-QWEN3: `dimensions` shortens a Matryoshka model's vectors and is refused elsewhere.
+        size_t dims = 0;
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+        if (this->auto_embedding_engine) {
+            json derr = openai_compat::resolve_dimensions(request, this->auto_embedding_engine->min_dimensions(),
+                                                          this->auto_embedding_engine->embedding_dim(), dims);
+            if (!derr.is_null()) {
+                send_response(derr);
+                return;
+            }
+        }
+#endif
+
         json response;
         // -1 means the backend did not report a count; see the usage field below.
         int64_t prompt_tokens = -1;
@@ -1375,18 +1430,19 @@ void RestHandler::handle_embeddings(const json& request,
                         flat.size(), inputs.size(),
                         this->auto_embedding_engine->embedding_dim());
                     for (size_t i = 0; i < inputs.size(); ++i) {
+                        std::vector<float> v(flat.begin() + static_cast<std::ptrdiff_t>(i * dim),
+                                             flat.begin() + static_cast<std::ptrdiff_t>((i + 1) * dim));
+                        if (dims) v = llm_conventions::truncate_renormalize(v, dims);
                         embedding_data.push_back({
                             {"object", "embedding"},
-                            {"embedding", std::vector<float>(
-                                 flat.begin() + static_cast<std::ptrdiff_t>(i * dim),
-                                 flat.begin() + static_cast<std::ptrdiff_t>((i + 1) * dim))},
+                            {"embedding", std::move(v)},
                             {"index", i}
                         });
                     }
                     // One line, not one per input with the text echoed back. The
                     // old print put the full text of every request on the console.
                     header_print("OFLM", "embedded " + std::to_string(inputs.size()) +
-                                         " input(s), " + std::to_string(dim) + " dims");
+                                         " input(s), " + std::to_string(dims ? dims : dim) + " dims");
                 }
             } catch (const TaskPromptUnavailable& e) {
                 // The model has prompts but none serves this task -- README.md:288's
@@ -1443,6 +1499,53 @@ void RestHandler::handle_embeddings(const json& request,
     }
     catch (const std::exception& e) {
         send_response(exception_error("handle_embeddings", e));
+    }
+}
+
+///@brief Handle POST /v1/rerank (SERVER-RERANK): score each document against the query, best first
+void RestHandler::handle_rerank(const json& request,
+                                std::function<void(const json&)> send_response,
+                                StreamResponseCallback send_streaming_response) {
+    (void)send_streaming_response;
+    try {
+        openai_compat::RerankRequest rr;
+        if (json err = openai_compat::rerank_request(request, rr); !err.is_null()) {
+            send_response(err);
+            return;
+        }
+#ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+        if (!this->auto_rerank_engine) {
+            send_response(openai_compat::invalid_param(
+                "model", "no reranker is loaded: start oflm serve with --rerankmodel TAG.", "model_not_found"));
+            return;
+        }
+        const std::string loaded = this->auto_rerank_engine->get_current_model();
+        if (!rr.model.empty() && rr.model != loaded) {
+            send_response(openai_compat::invalid_param(
+                "model", "this server has '" + loaded + "' loaded as its reranker, not '" + rr.model + "'.",
+                "model_not_found"));
+            return;
+        }
+        int64_t tokens = -1;
+        std::vector<double> scores;
+        if (!rr.documents.empty())
+            scores = this->auto_rerank_engine->rerank(rr.query, rr.documents, rr.instruction, &tokens);
+        json results = json::array();
+        for (size_t i : openai_compat::rerank_order(scores, rr.top_n)) {
+            json r = {{"index", i}, {"relevance_score", scores[i]}};
+            if (rr.return_documents) r["document"] = {{"text", rr.documents[i]}};
+            results.push_back(r);
+        }
+        header_print("OFLM", "reranked " + std::to_string(rr.documents.size()) + " document(s)");
+        send_response(json{{"object", "list"}, {"model", loaded}, {"results", results},
+                           {"usage", {{"prompt_tokens", tokens < 0 ? 0 : tokens},
+                                      {"total_tokens", tokens < 0 ? 0 : tokens}}}});
+#else
+        send_response(openai_compat::invalid_param("model", "rerankers are not supported in this build",
+                                                   "model_not_found"));
+#endif
+    } catch (const std::exception& e) {
+        send_response(exception_error("handle_rerank", e));
     }
 }
 

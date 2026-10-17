@@ -4287,3 +4287,32 @@ step. No kernel and no hardware is involved in any of it, which is the point of 
 **Result 2026-10-12 (the mismatched tape).** The throw criterion is now tested: a tape from a
 block of another `t_real`, and a tape with an oversized per-token array, both throw. Both
 replayed silently under the first version's at-least-this-big size checks.
+
+### OPEN-HIDDEN-STATE: the engine returns the last token's final-norm hidden state
+**Applies to:** openflowlm-next (`src/open_qwen36/core.{hpp,cpp}`, `src/open_qwen36/cli.cpp`)
+**Test category:** manual (needs the NPU, the `Qwen3-Embedding-0.6B-NPU2` kernel set and the
+embedder's GGUF)
+
+An embedder or a reranker built on a decoder LLM reads the model's last hidden state, not its
+logits. `Core::prefill_hidden(ids)` shall reset the state, run `ids` from position 0, run the
+kernel set's tail up to the step that writes `logits` (the final norm, which writes `hn`), and
+return `hn` of the last token widened from bf16 to f32. It dispatches no lm_head. A `Core` opened
+with `CoreConfig::lm_head = false` never packs, loads or runs the head at all, which is what lets
+a GGUF whose vocabulary the head's 64-row bands do not fit load: Qwen3-Embedding's tied 151669-row
+`token_embd` against a 151680-row head plan is refused at pack time otherwise. Asking that `Core`
+for logits throws.
+
+Prefill is sequential (one `step()` per token): no GGUF kernel set carries the block route today.
+
+**Procedure (manual):**
+1. Export the set: `python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/qwen3-embedding-0.6b.json` (WSL).
+2. CPU references: `ref_qwen3.py embed fp32` (transformers on the official safetensors, fp32,
+   last-token `last_hidden_state`) and `ref_qwen3.py embed gguf:<file>` (the GGUF's matmuls as the
+   q4_1 pool holds them: Q8_0 requantized by `std_perm_gguf`'s rule, scales narrowed to bf16 as
+   `gemv_q4` reads them, norms in bf16, the embedding rows exact). The scripts live in the item's run
+   directory; the fixed prompts are 10 id lists of 5 to 500 tokens ending in the end-of-text id
+   151643, plus the model card's four texts.
+3. `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --no-lm-head --hidden <prefix>
+   --prompts-file <prompts> --twice`: every prompt's vector has cosine >= 0.999 against the
+   reference through the same weights (step 2's GGUF one), and the second run of each prompt is
+   bit-identical to the first.

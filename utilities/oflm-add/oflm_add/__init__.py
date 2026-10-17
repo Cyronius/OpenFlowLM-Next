@@ -84,6 +84,8 @@ EMBEDDING_FAMILIES = {"embed-gemma"}
 # list and npue_design_family come from the official model_list.json entry
 # (matched by name); the engine routes by the exact registered tag.
 NPU_EMBED_FAMILIES = {"bge", "nomic", "minilm", "gte"}
+# Decoder-LLM embedders and rerankers, served by --embeddingmodel / --rerankmodel, never as chat; value: the label.
+LLM_EMBED_FAMILIES = {"qwen3-embedding": "embeddings", "qwen3-reranker": "rerank"}
 NPU_EMBED_FILES = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
@@ -182,6 +184,8 @@ FAMILY_ALIASES = [
     ("qwen3.5-moe", "qwen3.6-moe"),
     ("qwen3.8", "qwen3.5"),      # Qwen3.8-Distilled-*: the Qwen3.5 engine, not Qwen3
     ("qwen3.5", "qwen3.5"),
+    ("qwen3-embedding", "qwen3-embedding"),
+    ("qwen3-reranker", "qwen3-reranker"),
     ("qwen3", "qwen3"),
     ("qwen2.5vl", "qwen2.5vl"),
     ("qwen2.5", "qwen2"),
@@ -2025,10 +2029,15 @@ def main():
             # reads model.gguf and dequantizes); it needs no f32-scale GGUF-direct
             # open_kernels manifest. Just confirm the family is recognized.
             pass
-        elif family not in GGUF_CAPABLE_FAMILIES:
+        elif family not in GGUF_CAPABLE_FAMILIES and family not in LLM_EMBED_FAMILIES:
             gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
                          + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
                          + "); installing the safetensors weights instead")
+        elif family in LLM_EMBED_FAMILIES and not args.open_kernels:
+            raise SystemExit(
+                f"{dir_name}: a {family} model runs on an open kernel set that no official entry ships "
+                "yet. Pass --open-kernels <dir>, the set exported from "
+                "open_kernels/recipes/specs/qwen3-embedding-0.6b.json (and --no-xclbin).")
         else:
             if args.open_kernels:
                 mj = Path(args.open_kernels) / "manifest.json"
@@ -2133,7 +2142,8 @@ def main():
         # the quant repo: a quant of a finetune of a base tries each level in
         # order until every file resolves.
         aux_missing = [f for f in missing if f != "model.gguf"]
-        if not (target / "config.json").is_file():
+        # An embedder's README names its pre-training base, whose config.json has the chat vocabulary (151936).
+        if not (target / "config.json").is_file() and family not in LLM_EMBED_FAMILIES:
             aux_missing.append("config.json")
         if not (target / "chat_template.jinja").is_file():
             aux_missing.append("chat_template.jinja")
@@ -2198,6 +2208,8 @@ def main():
         size_value = estimate_size(target / "config.json")
     entry = build_entry(base_entry, dir_name, files, size_value)
     entry.setdefault("details", {})["family"] = family
+    if family in LLM_EMBED_FAMILIES:
+        entry["label"] = [LLM_EMBED_FAMILIES[family]]
     if gguf_mode:
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
         entry.setdefault("flm_min_version", "0.9.45")

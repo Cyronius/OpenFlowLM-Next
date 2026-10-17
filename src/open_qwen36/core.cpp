@@ -82,6 +82,8 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
+bool writes_logits(const Step& s) { return std::find(s.args.begin(), s.args.end(), "logits") != s.args.end(); }
+
 std::string fmt_idx(const uint32_t* idx) {
     std::string s;
     for (int i = 0; i < 8; ++i) s += (i ? "," : "") + std::to_string(idx[i]);
@@ -338,10 +340,12 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_s) wanted[k] = true;
         for (const auto& [rows, k] : types_[l]->gemm_block.attn_block.kernels_pv) wanted[k] = true;
     }
-    for (const auto& s : w_->tail) wanted[s.kernel] = true;
+    for (const auto& s : w_->tail)
+        if (cfg_.lm_head || !writes_logits(s)) wanted[s.kernel] = true;
     for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
-    logits_host_.assign(w_->vocab, 0.f);
+    if (cfg_.lm_head) logits_host_.assign(w_->vocab, 0.f);
+    else log("hidden states only: the lm_head is not packed or loaded");
 
     // 0167/#32: the GEMM-route block size every loaded layer type agrees on.
     // Disagreement (a mixed dense_local/dense manifest where only one carries
@@ -709,6 +713,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     // ---- the globals: the lm_head pool and the final norm's weight from the file, the ptab
     // computed, everything else zero (xres, zero, xresf, hn, logits)
     for (const auto& [name, bytes] : w_->globals) {
+        if (!cfg_.lm_head && (name == "lmpool" || name == "logits")) continue;
         if (name == "lmpool") {
             xrt::bo lm = xrt::ext::bo(*dev_, bytes);
             pools::pack_lmhead(*w_, *file_, lm.map<uint8_t*>());
@@ -741,7 +746,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
     pos_ = 0;
-    log("weights resident: " + std::to_string(nl_) + " pools + lm_head, " +
+    log("weights resident: " + std::to_string(nl_) + " pools" + (cfg_.lm_head ? " + lm_head, " : ", ") +
         std::to_string(static_cast<int>(ms_since(t0) / 1000)) + " s");
 }
 
@@ -1744,6 +1749,29 @@ void Core::arm_route_records() {
 
 void Core::step(int token, bool want_logits) { step_impl(token, nullptr, want_logits, nullptr); }
 
+std::vector<float> Core::prefill_hidden(const std::vector<int>& ids) {
+    if (ids.empty()) throw std::runtime_error("open_qwen36: prefill_hidden of an empty prompt");
+    if (ids.size() > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: a " + std::to_string(ids.size()) + "-token prompt is longer than the context capacity " +
+                                 std::to_string(cfg_.max_ctx));
+    reset();
+    for (int id : ids) step(id, false);
+    size_t ran = 0;
+    for (const Step& s : w_->tail) {
+        if (writes_logits(s)) break;
+        run(kerns_.at(s.kernel), s.args, 0);
+        ++ran;
+    }
+    auto hn = globals_.find("hn");
+    if (ran == 0 || hn == globals_.end())
+        throw std::runtime_error("open_qwen36: this kernel set's tail has no final norm ahead of the head (no hn)");
+    read_back(hn->second, w_->hidden * 2, 0);
+    const uint16_t* p = hn->second.map<const uint16_t*>();
+    std::vector<float> out(w_->hidden);
+    for (size_t i = 0; i < w_->hidden; ++i) out[i] = bf16_to_f32(p[i]);
+    return out;
+}
+
 void Core::embedding_row(size_t token, float* out) const {
     file_->embed_row(w_->embed_tensor, token, w_->hidden, out);
     if (w_->embed_scale != 1.0)
@@ -1779,6 +1807,8 @@ void Core::write_record(size_t row, const double pos[3]) {
 void Core::step_impl(int token, const float* x, bool want_logits, const int64_t* mpos,
                      const float* deepstack, int n_deepstack) {
     if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
+    if (want_logits && !cfg_.lm_head)
+        throw std::runtime_error("open_qwen36: logits asked of an engine opened for hidden states only");
     if (static_cast<size_t>(pos_) >= cfg_.max_ctx)
         throw std::runtime_error("open_qwen36: position " + std::to_string(pos_) + " reached the context capacity " +
                                  std::to_string(cfg_.max_ctx));
@@ -2198,6 +2228,7 @@ void Core::gemm(const Step& s, const float* x, size_t T, size_t K, size_t N, int
 }
 
 void Core::tail_logits(const float* row) {
+    if (!cfg_.lm_head) throw std::runtime_error("open_qwen36: logits asked of an engine opened for hidden states only");
     auto t1 = std::chrono::steady_clock::now();
     xrt::bo& xres1 = buffer("xres", 0);
     std::memcpy(xres1.map<uint8_t*>(), row, w_->hidden * 4);

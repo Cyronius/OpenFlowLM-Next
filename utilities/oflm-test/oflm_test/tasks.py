@@ -422,6 +422,8 @@ E7 Batch Reference
         # is served by `oflm serve <llm> --embed 1 --embeddingmodel <tag>`.
         "bge-base:en-v1.5", "bge-small:en-v1.5", "bge-large:en-v1.5",
         "all-minilm:l6-v2", "nomic-embed-text:v1.5", "gte-multilingual:base",
+        # a decoder LLM on the open kernels (OpenLlmEmbedding), served by --embeddingmodel
+        "qwen3-embedding:0.6b",
     ]
     DEFAULT_EMBED_MODEL = "embed-gemma:300m"
 

@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include "AutoEmbeddingModel/open_gemma_embedding.hpp"
 #include "AutoEmbeddingModel/npue_embedding.hpp"
+#include "AutoEmbeddingModel/open_llm_embedding.hpp"
 
 
 /// Which backend serves which tag.
@@ -27,7 +28,7 @@
 /// exactly this situation; a silent substitution is the one thing it forbids.
 ///
 /// Adding a model is one line here plus an entry in model_list.json.
-enum class EmbeddingBackend { OpenGemma, Npue };
+enum class EmbeddingBackend { OpenGemma, Npue, OpenLlmEmbed, OpenLlmRerank };
 
 inline const std::unordered_map<std::string, EmbeddingBackend>&
 embedding_backend_registry() {
@@ -44,6 +45,9 @@ embedding_backend_registry() {
         {"all-minilm:l6-v2",        EmbeddingBackend::Npue},
         {"nomic-embed-text:v1.5",   EmbeddingBackend::Npue},
         {"gte-multilingual:base",   EmbeddingBackend::Npue},
+        // Decoder LLMs on the open kernels (open_qwen36), read from GGUF (SERVER-EMBED-QWEN3, SERVER-RERANK).
+        {"qwen3-embedding:0.6b",    EmbeddingBackend::OpenLlmEmbed},
+        {"qwen3-reranker:0.6b",     EmbeddingBackend::OpenLlmRerank},
     };
     return reg;
 }
@@ -78,6 +82,12 @@ get_auto_embedding_model(const std::string& model_tag,
         return std::make_pair(
             tag, std::unique_ptr<AutoEmbeddingModel>(
                      new NpueEmbedding(npu_device_inst, tag)));
+    }
+    if (it->second == EmbeddingBackend::OpenLlmEmbed || it->second == EmbeddingBackend::OpenLlmRerank) {
+        const auto mode = it->second == EmbeddingBackend::OpenLlmRerank ? OpenLlmEmbedding::Mode::Rerank
+                                                                         : OpenLlmEmbedding::Mode::Embed;
+        return std::make_pair(
+            tag, std::unique_ptr<AutoEmbeddingModel>(new OpenLlmEmbedding(npu_device_inst, tag, mode)));
     }
     return std::make_pair(
         tag, std::unique_ptr<AutoEmbeddingModel>(
