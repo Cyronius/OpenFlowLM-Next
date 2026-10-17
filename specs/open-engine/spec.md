@@ -1474,6 +1474,102 @@ tensor of a linear and a full layer with its source after the converter's expect
 `ALL MATCH` (each quantized projection >= 0.99) is the bar. Run on the reconverted 27B on
 2026-10-01: ALL MATCH; on the published one, 8 mismatches, all value-indexed.
 
+### OPEN-GGUF-Q4NX-VIEW: a qwen35 GGUF is read as the q4nx container its kernel set's plan was written for
+**Applies to:** openflowlm-next (`src/open_qwen36/gguf_view.{hpp,cpp}`, `weight_file.hpp`, `pools.cpp`,
+`core.cpp`, `open_kernels/model/gguf_q4nx.py`, `open_kernels/recipes/pack.py`, `utilities/oflm-add`)
+**Verification:** test
+**External tests:** `src/open_qwen36/gguf_pack_test.cpp` (ctest `GGUF-PACK`)
+**Plan:** `plans/archive/qwen35-gguf-view.md`
+
+When a model directory holds `model.gguf` and no `model.q4nx`, and the kernel set's manifest has no
+nested `gguf` section, the engine shall read a GGUF whose architecture has a view (today `qwen35`)
+through `GgufQ4nxView`, with the kernel set's own packing plan: 5120-byte q4_1 chunks with bf16
+scales and the 8704-byte q8 head. No f32-scale kernel twins, no second manifest. The view serves
+every tensor the qwen35 plan, the block route's host stages and the fp64 replica read, under the
+container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj` from `attn_gate`,
+`ssm_out_proj` from `ssm_out`, the alpha / beta `.bf16` copies from `ssm_alpha` / `ssm_beta`,
+`post_attention_layernorm` from `post_attention_norm`, ...) and in the container's layouts:
+
+- **llama.cpp's conversions undone.** Value heads come back in grouped order when the file tiles
+  them (OPEN-CONVERT-QWEN35-VHEADS's rule: qkv's value rows, z's rows, out_proj's columns, alpha /
+  beta's rows, `ssm_a`, `ssm_dt.bias`, conv1d's value channels). The full layers' `attn_q`, stored
+  `[q_h | gate_h]` per head, splits into all q rows then all gate rows. conv1d goes back to
+  `[taps, channels]`. `ssm_a` (llama.cpp's `-exp(A_log)`) and `ssm_dt.bias` are what the container
+  stores, so they pass unchanged, as do the `1 + w` norms.
+- **Quantized matmuls.** Q4_1 and Q4_0 become 5120-byte chunks with the codes exact and d / m
+  narrowed fp16 -> bf16 by round-to-nearest-even, Q4_0's min written `-8d`: the one rounding the
+  f32-scale kernels do on the way in (`plans/gguf-scale-width.md`). Q8_0 stays q8 (8704-byte
+  chunks, codes exact, scale narrowed the same way); the plan streams it at q8 where the derived
+  quant map says so and `requant_q4_1_chunks` re-quantizes it otherwise. Every other type is
+  re-quantized from its exact values by `requant_q4_1`'s law (m toward -inf, d toward +inf).
+- **The head is the q8 head.** A Q8_0 head is exact; any other is re-quantized per 32 values with
+  s = max|v| / 127 rounded toward +inf in bf16 and code = floor(v / s + 1/2) in [-127, 127], so
+  every value lands within s/2. Rows are padded to a multiple of 256 with zeros (the spec's vocab).
+- **Small tensors** as the container stores them: norms, conv1d and the alpha / beta copies bf16
+  (round to nearest even), `ssm_a` / `ssm_dt.bias` f32 exact. The embedding row is the GGUF's own
+  exact value.
+- **The config** is checked against the GGUF's metadata (`derive_config`, OPEN-GGUF-QWEN35-SPEC),
+  not against a wrapper's `config.json`.
+
+**Acceptance criteria:**
+- The C++ view and the NumPy view give byte-identical tensors on the synthetic qwen35 GGUF both
+  tests build from the same LCG (FNV-1a `0xe255b1cf09155467` over 22 view tensors): Q4_1, Q4_0,
+  Q8_0, F16, Q4_K, Q6_K and F32 sources, 4 value heads over 2 key heads.
+- Independently of either view: qkv's value rows, z's rows, out_proj's columns, alpha's rows,
+  `ssm_a` and conv1d's value channels come back in grouped order (the tiling rule written as a
+  reshape); q_proj's rows are all q then all gate; a re-quantized tensor is within d/2 of its
+  source; the q8 head within s/2 with its padded rows zero.
+- `oflm-add` treats a `qwen35` manifest at 5120-byte chunks as GGUF-capable without a nested
+  section, and a `qwen36moe` one or a 6144-byte one as not; `qwen35` maps to family `qwen3.5`; a
+  qwen3.5 GGUF install is text only (`vlm: false`, no `vision` label).
+
+**Verification (manual), a real file:** `src/open_qwen36/out/gguf_pack_test.exe --pack <manifest.json>
+<model.gguf> <dir> 0 3`, then `python open_kernels/model/gguf_q4nx_check.py <manifest.json>
+<model.gguf> <dir> 0 3`: the engine's pools, consts, lm_head pool and final norm against
+recipes/pack.py over the NumPy view, byte for byte.
+
+**Result 2026-10-17 (openbmb/MiniCPM-V-4.7-1B-gguf, `MiniCPM-V-4_7-1B-Q4_1.gguf`): PASS.** Layer 0
+(linear) and layer 3 (full) pools and consts, the 271 MB lm_head pool (from the file's Q6_K head)
+and the final norm are byte-identical between the two packers.
+
+### OPEN-GGUF-QWEN35-SPEC: the spec a qwen35 GGUF derives
+**Applies to:** openflowlm-next (`open_kernels/recipes/spec.py` `_qwen35_gguf`, `load.py`
+`spec_from_gguf` / `spec_from_model_dir`, `src/open_qwen36/gguf_view.cpp` `derive_config`)
+**Verification:** test
+
+A qwen35 GGUF's spec shall come from the GGUF itself: its shape from the metadata
+(`_qwen36moe_gguf`'s reads), trailing MTP blocks (`nextn_predict_layers`) left out, `vocab` the
+head's rows rounded up to a multiple of 256, `real_vocab` the tokenizer's ids (`tokenizer.json`'s
+when the model directory has one, else the GGUF's tokens without llama.cpp's `[PAD<n>]` entries),
+the norm epsilon the shortest decimal of its f32, and the per-role weight format from the tensor
+types (a role whose tensors are Q8_0 streams at q8 where the family's mixed core fits, every other
+role is q4_1). A model directory with `model.gguf` and no `model.q4nx` derives this way for an
+architecture with a view, whatever its `config.json` says: MiniCPM-V's (`minicpmv4_7`) describes
+the VLM wrapper, not the tower the weights are for. The engine's `derive_config` writes the fields
+the recipe's `hf_config_check` names with the same values.
+
+The 256-row pad keeps the family's head kernel: 248320 for every Qwen3.5 / 3.6 vocabulary, whether
+the GGUF carries Qwen's padded 248320 rows or a fine-tune's 248094 or 248144.
+
+**The spec hash covers `real_vocab`.** MiniCPM-V-4.7-1B (248094 ids) derives the Qwen3.5-0.8B q4_1
+spec in every field but `real_vocab`: the same builds and kernels, a different hash, so `oflm-add`
+would not link it to the 0.8B set. It has a spec file of its own
+(`recipes/specs/minicpm-v-4.7-1b.json`) and a separate, byte-identical export. Leaving `real_vocab`
+out of the kernel-match hash would let such fine-tunes link to the family set without an export,
+and changes linking for every family; that is the maintainer's decision, not taken here.
+
+**Acceptance criteria:**
+- MiniCPM-V-4.7-1B's metadata gives family qwen35, 24 layers, hidden 1024, FFN 3584, 8 / 2 heads at
+  256, rotary 64, 16 / 16 DeltaNet heads of 128, vocab 248320, real vocab 248094, epsilon 1e-6,
+  q4_1 everywhere, and the hash of `recipes/specs/minicpm-v-4.7-1b.json`.
+- That spec and the 0.8B q4_1 one differ in `real_vocab` alone, build the same kernels, and hash
+  differently.
+- 248094 and 248144 rows pad to 248320, 248321 to 248576; trailing `[PAD<n>]` tokens are not
+  vocabulary; one MTP block out of 25 leaves 24 layers; a Q8_0 `ssm_out` gives `{"linear_out": "q8"}`
+  at hidden 1024; expert metadata is refused.
+- `derive_config` (gguf_pack_test) and the recipe (test_qwen35_gguf_spec.py) give the same
+  `hf_config_check` values on the same synthetic metadata.
+
 ### OPEN-FAMILY-PHI3: Phi-3 / Phi-4-mini on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`,
 `designs/attn/attn.h`, `recipes/pack.py`, `model/replica_dense.py`, `model/dense_probe.py`,

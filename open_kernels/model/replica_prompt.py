@@ -63,7 +63,11 @@ def main() -> int:
     ids = prompt_ids(tk, a.message, a.think)
     print(f"prompt: {len(ids)} ids: {','.join(map(str, ids))}", flush=True)
 
-    q = Q4NX(md / "model.q4nx")
+    if (md / "model.q4nx").is_file() or not (md / "model.gguf").is_file():
+        q = Q4NX(md / "model.q4nx")
+    else:
+        from gguf_q4nx import GgufAsQ4nx      # OPEN-GGUF-Q4NX-VIEW: the weights the engine packs
+        q = GgufAsQ4nx(md / "model.gguf")
     q.native_q8 = lambda n: False            # the q4_1 the packer writes, as make_decode's default for this size
     q.hidden = spec.hidden
     plain = q.matmul_w

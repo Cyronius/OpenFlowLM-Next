@@ -53,6 +53,15 @@ extending to MoE, or changing the pack ops.
   file from the cache before downloading, so `oflm pull` and the app's
   auto-download never re-fetch a model the user already has.
 
+## New families: the q4nx view, no f32 twins (2026-10-17)
+
+The memory rule (no f32 in device memory) retires the f32-scale layout for new families.
+The qwen35 family reads a GGUF through `GgufQ4nxView` (`gguf_view.cpp`): the kernel set's own
+5120-byte plan, the GGUF served under the container's names and layouts. The engine picks it
+when `model.gguf` is present, there is no `model.q4nx`, the manifest has no nested `gguf`
+section and the GGUF's architecture has a view. Details, checks and the MiniCPM-V example:
+`../open-qwen35-gguf/SKILL.md`. The dense families keep the f32 path below unchanged.
+
 ## Integrated into main (2026-10-07, `feat/gguf-direct`)
 
 The branch merged into current main (commit `b3e8f1f`). Main had moved a lot
