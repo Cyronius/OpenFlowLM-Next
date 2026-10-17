@@ -162,6 +162,9 @@ def repo_has_q4nx(tree, cache=None):
 # src/open_qwen36/gguf_view.cpp): their kernel set's own 5120-byte plan serves the GGUF, so the
 # manifest needs no nested `gguf` section. Such a model is text-only on the open engine.
 GGUF_VIEW_RECIPES = {"qwen35"}
+# The same, by GGUF general.architecture: the view repacks the head into the family's q8 head
+# whatever its type, so llama.cpp's Q6_K output.weight over a Q4_1 body is not a mismatch.
+GGUF_VIEW_ARCHS = {"qwen35"}
 
 
 def manifest_supports_gguf(path):
@@ -1689,13 +1692,15 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
     # The output projection is routinely a coarser quant than the body
     # (Q8_0 over Q4_*); anything else must be the claimed family.
-    quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
-               if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
+    arch = kv.get("general.architecture", "?")
+    head_free = str(arch).strip().lower() in GGUF_VIEW_ARCHS
+    quants = {GGML_TYPE_NAMES[t] for name, t, _ in tensors
+               if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")
+               and not (head_free and name == "output.weight")}
     others = quants - {claimed_family, "Q8_0"}
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
                        f"{claimed_family}; refusing rather than packing the wrong layout")
-    arch = kv.get("general.architecture", "?")
     return True, f"{len(tensors)} tensors ({arch}), quant {sorted(quants)}"
 
 

@@ -1525,6 +1525,10 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
 - `oflm-add` treats a `qwen35` manifest at 5120-byte chunks as GGUF-capable without a nested
   section, and a `qwen36moe` one or a 6144-byte one as not; `qwen35` maps to family `qwen3.5`; a
   qwen3.5 GGUF install is text only (`vlm: false`, no `vision` label).
+- `oflm-add` accepts a `qwen35` GGUF whose `output.weight` is another quant than its body
+  (llama.cpp writes a Q6_K head over a Q4_1 or Q4_0 body), since the head is always repacked as
+  the q8 head; a body tensor of another quant is still refused, and so is such a head on an
+  architecture without a view.
 
 **Verification (manual), a real file:** `src/open_qwen36/out/gguf_pack_test.exe --pack <manifest.json>
 <model.gguf> <dir> 0 3`, then `python open_kernels/model/gguf_q4nx_check.py <manifest.json>

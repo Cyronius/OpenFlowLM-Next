@@ -511,6 +511,24 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     assert not ok and "Q4_0_4_4" in note
 
 
+def test_verify_choice_lets_a_view_arch_head_differ(tmp_path):
+    # Traces: OPEN-GGUF-Q4NX-VIEW. The view repacks the head as the q8 head whatever its type.
+    body = [("blk.0.ffn_up.weight", 3, [256, 32]), ("blk.0.attn_norm.weight", 0, [256])]
+    q6k_head = [("output.weight", 14, [256, 64])]
+    f = tmp_path / "q.gguf"
+    f.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen35"))], body + q6k_head))
+    ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
+    assert ok, note
+    # A Q6_K body tensor is still a mismatch, and so is a Q6_K head on an architecture without a view.
+    f.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen35"))],
+                              body + [("blk.1.ffn_down.weight", 14, [256, 64])]))
+    ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
+    assert not ok and "claims Q4_1" in note
+    f.write_bytes(_gguf_bytes([("general.architecture", (8, "llama"))], body + q6k_head))
+    ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
+    assert not ok and "claims Q4_1" in note
+
+
 def test_extract_tokenizer_from_gguf_round_trips(tmp_path):
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(_gguf_bytes(_llama_kv()))
