@@ -37,6 +37,8 @@ EXPECTED = {
     "qwen25-3b": "Qwen2.5-3B-Instruct-NPU2",
     "qwen3-4b": "Qwen3-4B-NPU2",
     "qwen3-8b": "Qwen3-8B-NPU2",
+    # Embedder and reranker share it (vocab 151669); "Qwen3-0.6B-NPU2" is the 151936-row chat model's name.
+    "qwen3-embedding-0.6b": "Qwen3-Embedding-0.6B-NPU2",
 }
 
 
