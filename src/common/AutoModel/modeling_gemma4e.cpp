@@ -22,6 +22,14 @@ void Gemma4e::load_model(std::string model_path, json model_info, int default_co
     this->open_text_ = static_cast<bool>(open_engine);
     if (open_engine) {
         this->lm_engine = std::move(open_engine);
+        // Google's config.json nests the text model under text_config, where top-level readers (the sampler's vocab_size) never look
+        auto& jc = this->lm_config->_json_config;
+        if (jc.contains("text_config") && jc["text_config"].is_object()) {
+            const nlohmann::json tc = jc["text_config"];
+            for (auto it = tc.begin(); it != tc.end(); ++it) {
+                if (!jc.contains(it.key())) jc[it.key()] = it.value();
+            }
+        }
     } else {
         this->q4nx = std::make_unique<Q4NX>(this->model_path);
         this->lm_engine = std::make_unique<gemma4e_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
