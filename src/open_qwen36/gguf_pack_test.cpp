@@ -677,6 +677,19 @@ int main(int argc, char** argv) {
         std::printf("%s q4nx view semantics (MTP-free block count, value-head untile, q | gate split)\n",
                     ok ? "ok  " : "FAIL");
         if (!ok) return 1;
+        // OPEN-GGUF-QWEN35-SPEC: tests/test_qwen35_gguf_spec.py asserts the same values from the recipe side
+        const nlohmann::json c = derive_config(v.gguf());
+        const nlohmann::json want_cfg = {
+            {"model_type", "qwen3_5_text"}, {"hidden_size", 256}, {"num_hidden_layers", 4}, {"vocab_size", 256},
+            {"intermediate_size", 256}, {"head_dim", 64}, {"num_attention_heads", 4}, {"num_key_value_heads", 2},
+            {"linear_num_value_heads", 4},
+            {"layer_types", {"linear_attention", "linear_attention", "linear_attention", "full_attention"}}};
+        bool cfg_ok = true;
+        for (auto it = want_cfg.begin(); it != want_cfg.end(); ++it)
+            cfg_ok = cfg_ok && c.contains(it.key()) && c[it.key()] == it.value();
+        std::printf("%s derive_config: the qwen35 fields the kernel set checks %s\n", cfg_ok ? "ok  " : "FAIL",
+                    c.dump().c_str());
+        if (!cfg_ok) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

@@ -68,11 +68,13 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
 GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
-# Families whose engine loads model.gguf (open_qwen36's dense recipe; the GGUF
-# manifest section + f32-scale kernel sets only ship for these). qwen3.5
-# (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
-# installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan"}
+# Families whose engine loads model.gguf: open_qwen36's dense recipe (the GGUF manifest
+# section + f32-scale kernel sets) and qwen3.5, whose engine reads the GGUF through a
+# q4nx view (GGUF_VIEW_RECIPES). qwen3.6-moe is NOT there yet -- a GGUF for it installs
+# as plain safetensors instead.
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan", "qwen3.5"}
+# Registry families read through the q4nx view: no vision path on the open engine.
+GGUF_VIEW_FAMILIES = {"qwen3.5"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -156,11 +158,22 @@ def repo_has_q4nx(tree, cache=None):
     )
 
 
+# Recipe families whose engine reads a GGUF through a q4nx view of it (OPEN-GGUF-Q4NX-VIEW,
+# src/open_qwen36/gguf_view.cpp): their kernel set's own 5120-byte plan serves the GGUF, so the
+# manifest needs no nested `gguf` section. Such a model is text-only on the open engine.
+GGUF_VIEW_RECIPES = {"qwen35"}
+
+
 def manifest_supports_gguf(path):
     try:
-        return "gguf" in json.loads(Path(path).read_text(encoding="utf-8"))
+        m = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+    return "gguf" in m or manifest_reads_gguf_view(m)
+
+
+def manifest_reads_gguf_view(m):
+    return m.get("family") in GGUF_VIEW_RECIPES and (m.get("layout") or {}).get("chunk_bytes") == 5120
 
 SYSTEM_LIST_CANDIDATES = [
     "/opt/openflowlm/share/oflm/model_list.json",
@@ -241,6 +254,7 @@ FAMILY_ALIASES = [
 # than link the wrong kernels.
 GGUF_ARCH_FAMILIES = {
     "gemma-embedding": "embed-gemma",
+    "qwen35": "qwen3.5",
     "qwen3": "qwen3",
     "qwen2": "qwen2",
     "llama": "llama3",
@@ -2064,7 +2078,9 @@ def main():
         print(f"official match : {src_tag or '(none)'}")
         print(f"xclbin source  : {xclbin_source or '(none)'}")
         if gguf_mode:
-            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, f32-scale pools)")
+            pools = ("read through the q4nx view, 5120-byte pools, text only" if family in GGUF_VIEW_FAMILIES
+                     else "f32-scale pools")
+            print(f"weights        : {gguf_name} -> model.gguf (GGUF-direct, {pools})")
             print(f"quant family   : {gguf_quant_of(gguf_name)} (tensor types verified against the GGUF header)")
             for n, why in sorted(gguf_refused.items()):
                 print(f"  skipped      : {n} ({why})")
@@ -2201,6 +2217,10 @@ def main():
     if gguf_mode:
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
         entry.setdefault("flm_min_version", "0.9.45")
+        if family in GGUF_VIEW_FAMILIES:
+            # the open engine reads the language model only; no mmproj is installed
+            entry["vlm"] = False
+            entry["label"] = [x for x in entry.get("label", []) if x != "vision"]
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official
         # entry, but blanks `url`; restore it so the .npue packer attributes the

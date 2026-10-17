@@ -74,6 +74,19 @@ def test_explicit_kernel_manifest_can_enable_gguf(tmp_path):
     assert not oflm_add.manifest_supports_gguf(manifest)
 
 
+def test_qwen35_manifest_reads_gguf_through_the_view(tmp_path):
+    # Traces: OPEN-GGUF-Q4NX-VIEW. A qwen35 set's own 5120-byte plan serves a GGUF; no nested section.
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"family": "qwen35", "layout": {"chunk_bytes": 5120}}), encoding="utf-8")
+    assert oflm_add.manifest_supports_gguf(manifest)
+    for other in ({"family": "qwen36moe", "layout": {"chunk_bytes": 5120}},
+                  {"family": "qwen35", "layout": {"chunk_bytes": 6144}},
+                  {"family": "qwen3", "layout": {"chunk_bytes": 5120}}):
+        manifest.write_text(json.dumps(other), encoding="utf-8")
+        assert not oflm_add.manifest_supports_gguf(manifest), other
+    assert "qwen3.5" in oflm_add.GGUF_CAPABLE_FAMILIES and "qwen3.5" in oflm_add.GGUF_VIEW_FAMILIES
+
+
 # ------------------------------------------------ stock-repo GGUF support
 # (bartowski/Meta-Llama-3.1-8B-Instruct-GGUF and friends ship ONLY the GGUFs:
 # no Q4_1, no tokenizer files, and a gated base repo.)
@@ -126,6 +139,7 @@ def test_gguf_arch_fallback_resolves_embed_family(tmp_path):
 
 def test_gguf_arch_map_covers_common_families(tmp_path):
     cases = {
+        "qwen35": "qwen3.5",
         "qwen3": "qwen3",
         "qwen2": "qwen2",
         "llama": "llama3",

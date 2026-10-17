@@ -172,7 +172,11 @@ def main() -> int:
             "lm_head": m["pack"]["lm_head"], "embed": m["pack"]["embed"], "norm": m["pack"]["norm"]}
     nl = min(a.layers, spec.num_layers)
     types = list(spec.layer_types[:nl])
-    q = Q4NX(md / "model.q4nx")
+    if (md / "model.q4nx").is_file() or not (md / "model.gguf").is_file():
+        q = Q4NX(md / "model.q4nx")
+    else:
+        from gguf_q4nx import GgufAsQ4nx      # a GGUF, served as the container the plan reads (OPEN-GGUF-Q4NX-VIEW)
+        q = GgufAsQ4nx(md / "model.gguf")
     # The reference reads what the NPU holds, tensor by tensor: a projection the plan
     # streams at q8 (`q8_perm`) as the container's own q8, every other q8 tensor through
     # the packer's q4_1 (OPEN-QUANT-Q8). So the comparison always measures the kernels.
