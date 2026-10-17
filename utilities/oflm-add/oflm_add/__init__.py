@@ -2039,8 +2039,9 @@ def main():
         elif family in LLM_EMBED_FAMILIES and not args.open_kernels:
             raise SystemExit(
                 f"{dir_name}: a {family} model runs on an open kernel set that no official entry ships "
-                "yet. Pass --open-kernels <dir>, the set exported from "
-                "open_kernels/recipes/specs/qwen3-embedding-0.6b.json (and --no-xclbin).")
+                "yet. Pass --open-kernels <dir>, the set exported from its spec in "
+                "open_kernels/recipes/specs/ (qwen3-embedding-0.6b.json serves both 0.6B models; "
+                "the 4B ones have one each), and --no-xclbin.")
         else:
             if args.open_kernels:
                 mj = Path(args.open_kernels) / "manifest.json"

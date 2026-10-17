@@ -100,3 +100,18 @@ both from the i1-Q4_1 files: every SERVER-EMBED-QWEN3 and SERVER-RERANK check ag
 holds except the embedder's "within 0.02 of fp32" bar, which the weights miss (0.026, as on the
 CPU). `oflm-test --embedding --model qwen3-embedding:0.6b` passes its ten checks (E8 skips: its
 bundled vectors are embeddinggemma's). Results are in the two requirements.
+
+## The 4B sizes (2026-10-17, in progress)
+
+Qwen3-Embedding-4B and Qwen3-Reranker-4B are the Qwen3-4B network (36 layers, hidden 2560, 32/8
+heads at 128, ff 9728), both with a tied head. Unlike the 0.6B pair they differ in vocabulary: the
+embedder's is 151665, the reranker's 151669, so each gets its own spec and kernel set
+(`qwen3-embedding-4b.json` -> `Qwen3-Embedding-4B-NPU2`, `qwen3-reranker-4b.json` ->
+`Qwen3-Reranker-4B-NPU2`). Each GGUF derives the same hash as its `config.json`. Sources:
+mradermacher's `i1-Q4_1` files again (every matmul Q4_1, `token_embd` Q6_K, pooling metadata right);
+Qwen's own 4B embedder GGUF is Q4_K_M, Q6_K, Q8_0 or F16, all requantized on load.
+
+Requirements: no new ones. SERVER-EMBED-QWEN3 and SERVER-RERANK gain the tags
+`qwen3-embedding:4b` and `qwen3-reranker:4b` (one line each in the tag table); OPEN-HIDDEN-STATE's
+procedure is run once per kernel set. The 4B CPU references skip SciFact (about 20 minutes per
+fp32 pass on this box) and keep the card, the ten fixed prompts and the reranker pairs.

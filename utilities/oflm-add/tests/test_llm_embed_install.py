@@ -73,6 +73,9 @@ def test_names_derive_the_embedding_families_not_the_chat_one():
     assert oflm_add.derive_family({}, "Qwen3-Reranker-0.6B-i1-GGUF") == "qwen3-reranker"
     assert oflm_add.derive_family({}, "Qwen3-0.6B-GGUF") == "qwen3"
     assert oflm_add.derive_tag("Qwen3-Embedding-0.6B-GGUF") == "qwen3-embedding:0.6b"
+    assert oflm_add.derive_family({}, "Qwen3-Embedding-4B-i1-GGUF") == "qwen3-embedding"
+    assert oflm_add.derive_family({}, "Qwen3-Reranker-4B-i1-GGUF") == "qwen3-reranker"
+    assert oflm_add.derive_tag("Qwen3-Embedding-4B-GGUF") == "qwen3-embedding:4b"
 
 
 def test_without_open_kernels_the_install_says_what_to_pass(tmp_path, monkeypatch):
@@ -119,6 +122,8 @@ def test_the_embedder_takes_no_config_from_its_pretraining_base(tmp_path, monkey
 @pytest.mark.parametrize("name, gguf, tag, label", [
     ("Qwen3-Embedding-0.6B-GGUF", "Qwen3-Embedding-0.6B-Q8_0.gguf", ("qwen3-embedding", "0.6b"), "embeddings"),
     ("Qwen3-Reranker-0.6B-Q8_0-GGUF", "qwen3-reranker-0.6b-q8_0.gguf", ("qwen3-reranker", "0.6b"), "rerank"),
+    ("Qwen3-Embedding-4B-i1-GGUF", "Qwen3-Embedding-4B.i1-Q4_1.gguf", ("qwen3-embedding", "4b"), "embeddings"),
+    ("Qwen3-Reranker-4B-i1-GGUF", "Qwen3-Reranker-4B.i1-Q4_1.gguf", ("qwen3-reranker", "4b"), "rerank"),
 ])
 def test_installs_with_its_label_and_kernels(tmp_path, monkeypatch, name, gguf, tag, label):
     if not SYSTEM_LIST.is_file():

@@ -39,6 +39,9 @@ EXPECTED = {
     "qwen3-8b": "Qwen3-8B-NPU2",
     # Embedder and reranker share it (vocab 151669); "Qwen3-0.6B-NPU2" is the 151936-row chat model's name.
     "qwen3-embedding-0.6b": "Qwen3-Embedding-0.6B-NPU2",
+    # At 4B the two differ: the embedder's vocabulary is 151665, the reranker's 151669.
+    "qwen3-embedding-4b": "Qwen3-Embedding-4B-NPU2",
+    "qwen3-reranker-4b": "Qwen3-Reranker-4B-NPU2",
 }
 
 
