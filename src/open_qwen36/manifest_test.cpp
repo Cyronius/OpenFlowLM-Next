@@ -819,8 +819,16 @@ int main(int argc, char** argv) {
             check(true, "gemma4: a matching config is accepted");
             json gh = cfg; gh["global_head_dim"] = 256;
             refused(v, gh, "global_head_dim", "gemma4: a different global head width is refused by name");
+            check(g.reads_gguf_only(), "gemma4: the set packs GGUF-direct, so find_kernels declines it for a .q4nx model");
         } catch (const std::exception& e) {
             check(false, std::string("gemma4 fixture: ") + e.what());
+        }
+    }
+    for (int i = 1; i < argc && i < 7; ++i) {
+        try {
+            check(!Manifest::load(argv[i]).reads_gguf_only(), std::string("a .q4nx model can feed ") + argv[i]);
+        } catch (const std::exception& e) {
+            check(false, std::string(argv[i]) + ": " + e.what());
         }
     }
 

@@ -275,6 +275,8 @@ struct Manifest {
     bool select_prefill_route(const std::string& name);
     /// Every file (relative to the kernel dir) the manifest names.
     std::vector<std::string> files() const;
+    /// This view packs GGUF-direct (std_perm_gguf), which no .q4nx can feed (Gemma 4's only view).
+    bool reads_gguf_only() const;
 };
 
 }  // namespace open_qwen36

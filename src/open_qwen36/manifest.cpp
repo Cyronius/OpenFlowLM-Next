@@ -713,6 +713,18 @@ std::vector<std::string> Manifest::files() const {
     return f;
 }
 
+bool Manifest::reads_gguf_only() const {
+    auto direct = [](const std::vector<PackOp>& ops) {
+        for (const PackOp& p : ops)
+            if (p.op == "std_perm_gguf") return true;
+        return false;
+    };
+    if (direct(lmhead_ops)) return true;
+    for (const auto& [name, t] : layer_types)
+        if (direct(t.pool) || direct(t.consts)) return true;
+    return false;
+}
+
 void Manifest::check_model(const json& config, const std::string& where) const {
     if (!config.is_object()) fail(where, "config.json is not an object");
     auto lacks = [&](const std::string& key) { fail(where, "config.json lacks '" + key + "'"); };

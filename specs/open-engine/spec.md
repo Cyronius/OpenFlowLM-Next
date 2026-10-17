@@ -1075,11 +1075,12 @@ engine -- the open one has no vision path.
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B (text) on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`)
-**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`) and manual (the hardware passes below)
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `utilities/oflm-add`)
+**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
 
-Google's Gemma 4 E-series GGUF (`gemma-4-E4B_q4_0-it.gguf`, QAT Q4_0) shall run as text on the open
-kernels through the dense recipe, the model loaded straight from the GGUF. Four layer kinds --
+Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
+run as text on the open kernels through the dense recipe, the model loaded straight from the GGUF and
+served by `oflm serve` from an `oflm-add` install. Four layer kinds --
 sliding or global, each with its own KV cache or sharing one -- are four `dx` builds:
 
 - **Global heads are 512 wide** and rotate only pairs `(i, i + 256)` for `i < 64`, at
@@ -1101,6 +1102,10 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 - The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
 - Text only: the adapter refuses images and audio on the open engine and names
   `OFLM_GEMMA4_ENGINE=closed`.
+- The kernel set lives under the official model's name (`Gemma4-E4B-IT-NPU2`), where the official
+  `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
+  engine declines it for a model directory without a `model.gguf` (or with a `model.q4nx` beside it),
+  and the official container stays on the closed engine.
 
 **Acceptance criteria (unit):**
 - The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
@@ -1123,6 +1128,8 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   on a shared kind. Every other family keeps the attention defaults, so its build line does not
   change.
 - `attention_k_eq_v` (the 12B), the MoE block and bidirectional attention are refused by name.
+- The E4B manifest reads GGUF-only (`Manifest::reads_gguf_only`, `manifest_test`); none of the other
+  fixtures' manifests does.
 
 **Verification (manual):**
 1. Replica against transformers: `python open_kernels/model/gemma4_transformers_check.py <model.gguf>`
@@ -1134,8 +1141,14 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    (and the two `_shared` sets) under `OPEN_KERNELS_UNVALIDATED=1` links, and `utilities/core_sizes.py`
    reports every core within its 16384 B of program memory.
 3. Slice: `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --layers 6 --ids <prompt>
-   --dump-logits` against `replica_gemma4.py --layers 6` on the same ids, then the full model.
-4. `oflm-add` install, `oflm serve`, `oflm-test --llm --model <tag>`, `oflm-test --tools --model <tag>`.
+   --dump-logits` against `replica_gemma4.py --logits-at 6,...` on the same ids (the head re-quantized
+   as the engine does: `head(..., as_npu=True)`), then a slice through both shared kinds (E4B 30
+   layers, E2B 20) and the full model. Pass: corr >= 0.999 and the same argmax.
+4. `oflm-add` install (the GGUF beside Google's tokenizer files and generation_config.json),
+   `oflm serve`, `oflm-test --llm --model <tag>`, `oflm-test --tools --model <tag>`.
+5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
+   `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
+   "not using ... it packs GGUF-direct" and does not start the open engine.
 
 **Result 2026-10-16 (replica):** the four-layer slice (layers 0, 5, 24, 29; 13 tokens) agrees with
 fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
@@ -1147,7 +1160,8 @@ soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368
 record and the full rotation); with `ATTN_INTFP` (bit-identical integer routines) and one shared RMS helper
 for the q / k / v norms, the fullest attention core is 14,496 B (global) and 14,576 B (sliding) of 16,384.
 The shared kinds have no k / v work and sit near 13.2 KB. MLIR of every shipped dense spec's dx / dx_attn
-build is unchanged and every (kernel source, flags) pair preprocesses identically (`utilities/mlir_equiv.py`).
+build is unchanged and every (kernel source, flags) pair preprocesses identically (re-proven after the
+merge below, with the tools that survived it).
 
 **Result 2026-10-16 (NPU, E4B, `open_qwen36_cli`, one 21-token chat prompt):** against the replica with
 its head read through the engine's q4_1 re-quantization of the Q6_K `token_embd`: logits corr 0.999998
@@ -1156,11 +1170,31 @@ the greedy answer is "The capital of France is Paris." then `<turn|>`. Against t
 6-layer corr is 0.997: that gap is the head's re-quantization (the weights rule's Q6_K -> q4_1), not the
 layers.
 
+**Result 2026-10-16 (`oflm serve`, E4B, installed by oflm-add as `gemma4-it-open:e4b`):** the server
+loads the GGUF on the open kernels and answers "What is the capital of France?" with "The capital of
+France is Paris." (finish_reason stop). `oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context
+retention check included. `oflm-test --tools --gen-lim 256`, non-stream half only (the stream half was
+trimmed to fit 15 minutes: the prefill is token at a time, ~45 s per tool prompt): 7 of 8 checks pass
+(a basic and an inferred call, restraint, two parallel calls, the loop's lookup, the tool result's tail
+reproduced, a nullable schema). The loop's final answer at temperature 0.3 stopped after "$60.0 - $6."
+without the $54 total; the same request answered greedily gives "$54.00" with finish_reason stop
+(its working line reads "$64 - $6 = $54.00", a slip on the way to the right total). The engine is not
+the cause: over that loop's 346-token prompt (Google's template, rendered by transformers) E4B's
+last-position logits match the replica to corr 0.999986, same top 5 in order.
+
+**Result 2026-10-16 (NPU, E2B, `open_qwen36_cli`, the same 21-token prompt):** against the replica with
+the engine's q4_1 head: logits corr 0.999998 after 6 layers, 0.999991 after 20 (both KV-shared kinds at
+one kv head, the 12288-wide FFN), 0.999988 for all 35, same top 5 in order each time; the greedy answer
+is "The capital of France is Paris." then `<turn|>`. Program memory: the fullest core is 14,512 B
+(global) and 14,352 B (sliding) of 16,384.
+
 **Result 2026-10-16 (after merging OPEN-ATTN-ONE-KV-HEAD and adding E2B's recipe):** every shipped spec's
 attention flags are unchanged; the MLIR of all 73 shipped kernel sets matches the base commit's and E4B's
 6 match the pre-merge tree's; every attention translation unit preprocesses identically at every spec's
 own flags, 176 against the base and 196 (with E4B's two kinds) against the pre-merge tree
 (`utilities/attn_flags.py`, `utilities/mlir_equiv.py`, `ALL_SPECS=1 utilities/attn_pp_identical.sh`).
+E4B re-exported from the merged tree with `--check` against the set that passed on the NPU: all 12
+kernel files match (instruction streams byte-identical, xclbins apart from build stamps).
 
 ### OPEN-GGUF-BF16-POOL: a GGUF packs into the bf16-scale pool
 **Applies to:** openflowlm-next (`src/open_qwen36/pools.cpp`)
