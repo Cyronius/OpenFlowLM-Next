@@ -181,8 +181,6 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             const uint32_t ty = rd_u32(q);
             t.type = static_cast<Type>(ty);
             t.offset = rd_u64(q);
-            const uint64_t nb = gguf_type_bytes(ty, t.nvalues());
-            if (nb && t.offset + nb > map_size_) fail("tensor " + name + " runs past EOF in " + path);
             tensors_.emplace(name, std::move(t));
         }
         // Alignment is not stored in the header for either version: GGUF v2 and
@@ -207,6 +205,13 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
                  std::to_string(align) + ")");
         data_base_ = static_cast<size_t>(q - map_);
         data_base_ += static_cast<size_t>((align - data_base_ % align) % align);
+        // Offsets count from the data section, so the end-of-file check has to wait for data_base_.
+        const uint64_t data_bytes = data_base_ <= map_size_ ? map_size_ - data_base_ : 0;
+        for (const auto& [name, t] : tensors_) {
+            const uint64_t nb = gguf_type_bytes(static_cast<uint32_t>(t.type), t.nvalues());
+            if (nb && (t.offset > data_bytes || nb > data_bytes - t.offset))
+                fail("tensor " + name + " runs past EOF in " + path);
+        }
     } catch (...) {
 #ifdef _WIN32
         if (map_) UnmapViewOfFile(map_);

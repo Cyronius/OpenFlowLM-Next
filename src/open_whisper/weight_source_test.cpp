@@ -112,6 +112,17 @@ int unit(const fs::path &testdata) {
                "has shape", "a checkpoint whose tensors have other shapes is refused");
   expect_throw([&] { ow::open_weight_file((tiny / "kquants.gguf").string(), WeightKind::Gguf, s); },
                "stt.whisper", "a GGUF without the stt.whisper metadata is refused");
+  for (const auto &c : {std::make_pair("model-F16.gguf", WeightKind::Gguf),
+                        std::make_pair("model.safetensors", WeightKind::Stock)}) {
+    const fs::path cut = fs::temp_directory_path() / (std::string("ow_weight_source_test_cut_") + c.first);
+    fs::copy_file(tiny / c.first, cut, fs::copy_options::overwrite_existing);
+    fs::resize_file(cut, fs::file_size(cut) - 64);
+    const WeightKind kind = c.second;
+    expect_throw([&] { ow::open_weight_file(cut.string(), kind, s); }, "past EOF",
+                 std::string(c.first) + " cut short by 64 bytes is refused, not read past its end");
+    std::error_code ec;  // Q4nxFile keeps its mapping when its constructor throws, so this delete can fail
+    fs::remove(cut, ec);
+  }
   {
     const auto src = ow::open_weight_file((tiny / "model-F16.gguf").string(), WeightKind::Gguf, s);
     expect_throw([&] { src->bf16("enc.conv1.bias"); }, "expected BF16", "an F32 tensor is not handed out as bf16");
