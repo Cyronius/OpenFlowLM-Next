@@ -55,16 +55,17 @@ place"). oflm-add copies the GGUF to `model.gguf`; on a tight disk, replace the 
 ## Equivalence evidence for the shared design files
 
 Three checks, each against a pristine tree (`git archive <rev> open_kernels utilities | tar -x -C <dir>`),
-all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` is a worked example):
+all in WSL with the mlir-aie env, the new side a snapshot of the working tree taken the same way:
 
 - `python utilities/attn_flags.py` in both trees (copy the new script into the old one): every spec's
   attention flags, one `<spec>@<build>` line per Gemma 4 kind. Identical lines = identical build lines.
 - `python utilities/mlir_equiv.py --root <tree>/open_kernels --out <dir>` for both, then `cmp` each
   `<spec>.<build>.mlir`: identical MLIR.
 - `ALL_SPECS=1 OLD_DIR=<pristine>/open_kernels bash utilities/attn_pp_identical.sh`: every attention TU
-  preprocesses to the same tokens at every spec's flags. The worktree's copy has CRLF line endings
-  (autocrlf), which WSL bash refuses: run an LF copy inside a snapshot of the tree, not the worktree file.
-  It writes ~3.5 GB of preprocessed `.i` files under `<tree>/.claude/tmp/ppcheck`; delete them after.
+  preprocesses to the same tokens at every spec's flags; a TU that fails to preprocess is an ERROR and
+  the run exits 1. The worktree's copy has CRLF line endings (autocrlf), which WSL bash refuses: snapshot
+  with `git -c core.autocrlf=false archive`, which writes LF, and run the snapshot's copy. It writes
+  ~3.5 GB of preprocessed `.i` files under `<tree>/.claude/tmp/ppcheck`; delete them after.
 - Where a kernel set that passed on the NPU exists, re-export with `--check <that dir>` (E4B: 12 of 12
   files match). `--no-build --check` re-runs only the comparison on the existing build dirs.
 
@@ -80,9 +81,9 @@ all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` i
 - Its GGUF lists `feed_forward_length` per layer; the engine's GGUF reader skips arrays, so
   `derive_config` takes the FFN width from layer 0's `ffn_up` tensor.
 - Result 2026-10-16: logits corr 0.999998 / 0.999991 / 0.999988 at 6 / 20 / 35 layers against the
-  replica with the q4_1 head, same top 5; greedy "The capital of France is Paris." (`npu_e2b.sh` pattern:
+  replica with the q4_1 head, same top 5; greedy "The capital of France is Paris." The slice run:
   `open_qwen36_cli --model <dir> --kernels <set> --layers N --ids ... --dump-logits <prefix>`, then
-  `model/compare_gemma4.py <prefix>_t0.bin <replica.npz> --key npu_logits_lN`).
+  `model/compare_gemma4.py <prefix>_t0.bin <replica.npz> --key npu_logits_lN`.
 
 ## The official container must not pick up these kernels
 
@@ -106,11 +107,16 @@ for either reason.
   = `<root>` and OFLM_CONFIG_PATH = `<root>\model_list.json`. Start it with PowerShell `Start-Process
   -PassThru` writing the PID to a file, not through `$(...)`: the server inherits the pipe and the
   substitution waits for it to exit. Stop it by that PID.
-- Prefill is token at a time (no block-prefill route for Gemma 4 yet): a 270-token tool prompt takes
-  most of a minute on E4B, so a full `oflm-test --tools` (both modes) runs past 15 minutes; run the
-  non-stream and stream halves separately.
-- Results 2026-10-16: E4B `oflm-test --llm` 5 of 5, `--tools` 14 of the 15 checks reached (one
-  sampled loop answer stopped before its total; the same request greedily answers right, and the
-  346-token prompt behind it matches the replica to corr 0.999986). E2B `oflm-test --llm` 5 of 5.
+- Prefill is token at a time (no block-prefill route for Gemma 4 yet), so a full `oflm-test --tools`
+  (both modes) on E4B runs past 15 minutes; run the non-stream and stream halves separately. No speed
+  has been measured (nothing ran under `dibs run --measure`).
+- Results 2026-10-16: E4B `oflm-test --llm` 5 of 5, `--tools` 14 of the 15 checks reached. E2B
+  `oflm-test --llm` 5 of 5.
+- Garbled arithmetic in an answer ("$64 - $6", an answer that stops mid-sum) is the sampler, not the
+  kernels: `Gemma4e::load_model` sets frequency and presence penalties of 1.0 over the last 64 tokens,
+  which push down digits already written. Replay with `"frequency_penalty": 0, "presence_penalty": 0`
+  in the request before suspecting the engine; the failing tool-loop request then answers right.
+- Images and audio: the open path refuses them, and `OFLM_GEMMA4_ENGINE=closed` cannot load a GGUF
+  install. They need a curated `gemma4-it` tag (FLM's `.q4nx` container).
 - Never rewrite a shell script while a bash instance is still running it: bash reads scripts as it
   goes, and a half-read old instance ran the new text, restarted a server and overwrote its logs.

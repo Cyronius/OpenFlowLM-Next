@@ -1076,7 +1076,7 @@ engine -- the open one has no vision path.
 
 ### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B (text) on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `utilities/oflm-add`)
-**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
+**Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
 
 Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
 run as text on the open kernels through the dense recipe, the model loaded straight from the GGUF and
@@ -1100,8 +1100,9 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 - **The logits are soft-capped** at 30 on the host after the tied head (token_embd, Q6_K
   re-quantized to q4_1).
 - The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
-- Text only: the adapter refuses images and audio on the open engine and names
-  `OFLM_GEMMA4_ENGINE=closed`.
+- Text only: the adapter refuses images and audio on the open engine and points at the curated
+  `gemma4-it` tags, whose `.q4nx` containers run them on the closed engine. `OFLM_GEMMA4_ENGINE=closed`
+  is no way round it: an install holding only `model.gguf` has nothing the closed engine can read.
 - The kernel set lives under the official model's name (`Gemma4-E4B-IT-NPU2`), where the official
   `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
   engine declines it for a model directory without a `model.gguf` (or with a `model.q4nx` beside it),
@@ -1144,8 +1145,12 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    --dump-logits` against `replica_gemma4.py --logits-at 6,...` on the same ids (the head re-quantized
    as the engine does: `head(..., as_npu=True)`), then a slice through both shared kinds (E4B 30
    layers, E2B 20) and the full model. Pass: corr >= 0.999 and the same argmax.
-4. `oflm-add` install (the GGUF beside Google's tokenizer files and generation_config.json),
-   `oflm serve`, `oflm-test --llm --model <tag>`, `oflm-test --tools --model <tag>`.
+4. `oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf` (or a local directory holding the GGUF beside
+   Google's tokenizer files and generation_config.json; on a shared box add `--config`, `--models-root`
+   and `--xclbin-dir` pointing at a scratch root), `oflm serve`, `oflm-test --llm --model <tag>`,
+   `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") comes from the
+   sampler's default frequency and presence penalties: replay the request with both at 0 before
+   suspecting the engine.
 5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
    "not using ... it packs GGUF-direct" and does not start the open engine.
@@ -1170,28 +1175,45 @@ the greedy answer is "The capital of France is Paris." then `<turn|>`. Against t
 6-layer corr is 0.997: that gap is the head's re-quantization (the weights rule's Q6_K -> q4_1), not the
 layers.
 
-**Result 2026-10-16 (`oflm serve`, E4B, installed by oflm-add as `gemma4-it-open:e4b`):** the server
-loads the GGUF on the open kernels and answers "What is the capital of France?" with "The capital of
-France is Paris." (finish_reason stop). `oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context
-retention check included. `oflm-test --tools --gen-lim 256`, run as two 15-minute halves (the prefill
-is token at a time, ~45 s per tool prompt). Non-stream: 7 of 8 checks pass (a basic and an inferred
-call, restraint, two parallel calls, the loop's lookup, the tool result's tail reproduced, a nullable
-schema). Stream: the 7 checks it reached pass, the loop's $54 total included; the time limit cut it
-during the last level (the nullable schema). The non-stream loop's final answer at temperature 0.3 stopped after "$60.0 - $6."
-without the $54 total; the same request answered greedily gives "$54.00" with finish_reason stop
-(its working line reads "$64 - $6 = $54.00", a slip on the way to the right total). The engine is not
-the cause: over that loop's 346-token prompt (Google's template, rendered by transformers) E4B's
-last-position logits match the replica to corr 0.999986, same top 5 in order.
+**Result 2026-10-16 (`oflm serve`, E4B, a local-directory `oflm-add` install, tag `gemma4-it-open:e4b`
+given with `--tag`):** the server loads the GGUF on the open kernels and answers "What is the capital of
+France?" with "The capital of France is Paris." (finish_reason stop). `oflm-test --llm --gen-lim 256`:
+5 of 5 pass, the context retention check included. `oflm-test --tools --gen-lim 256`, run as two
+15-minute halves because the prefill is one token at a time. Non-stream: 7 of 8 checks pass (a basic and
+an inferred call, restraint, two parallel calls, the loop's lookup, the tool result's tail reproduced, a
+nullable schema). Stream: the 7 checks it reached pass, the time limit cutting it during the last level
+(the nullable schema); its loop level passed only because the checker found "54" in "$54.48", an answer
+with garbled working that ran to the token limit. The miss: the non-stream loop's final answer at
+temperature 0.3 stopped after "$60.0 - $6."; greedily it reaches "$54.00" through "$64 - $6".
+
+The cause is the server's Gemma 4 sampler defaults, not the kernels: frequency and presence penalty 1.0
+each over the last 64 sampled tokens (`modeling_gemma4e.cpp`, the closed engine's too), which push down
+every digit the answer has already written. The same request with both penalties set to 0 answers
+"$60.00 - $6.00 = $54.00" greedily, and "$54.00" with clean working in two samples at 0.3, finish_reason
+stop each time. Over that loop's prompt (346 tokens as transformers renders it) the 42 layers match the
+replica with the engine's q4_1 head to corr 0.999986, same top 5 in order; against the file's exact Q6_K
+head the logits differ more (corr 0.9988, top 5 reordered), the cost of the weights rule's head
+re-quantization.
 
 **Result 2026-10-16 (NPU, E2B, `open_qwen36_cli`, the same 21-token prompt):** against the replica with
 the engine's q4_1 head: logits corr 0.999998 after 6 layers, 0.999991 after 20 (both KV-shared kinds at
 one kv head, the 12288-wide FFN), 0.999988 for all 35, same top 5 in order each time; the greedy answer
-is "The capital of France is Paris." then `<turn|>`. Program memory: the fullest core is 14,512 B
-(global) and 14,352 B (sliding) of 16,384.
+is "The capital of France is Paris." then `<turn|>`. Against the exact Q6_K head the 6-layer corr is
+0.9974 (logits up to 4.1 apart, top 5 reordered): the head's re-quantization costs E2B the same as E4B.
+Program memory: the fullest core is 14,512 B (global) and 14,352 B (sliding) of 16,384.
 
-**Result 2026-10-16 (`oflm serve`, E2B, installed by oflm-add as `gemma4-it-open:e2b`):** the server
-loads the GGUF on the open kernels and answers "The capital of France is Paris." (finish_reason stop);
-`oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context retention check included.
+**Result 2026-10-16 (`oflm serve`, E2B, a local-directory `oflm-add` install, tag `gemma4-it-open:e2b`
+given with `--tag`):** the server loads the GGUF on the open kernels and answers "The capital of France
+is Paris." (finish_reason stop); `oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context retention
+check included.
+
+**Result 2026-10-16 (the hub install, E2B):** `oflm-add google/gemma-4-E2B-it-qat-q4_0-gguf` into a
+scratch root (its system kernel root a scratch copy holding the E2B set under `Gemma4-E2B-IT-NPU2`)
+downloads the GGUF, takes tokenizer, config and chat template from the first base its README names
+(`google/gemma-4-E2B-it-qat-q4_0-unquantized`), merges bos 2 / eos [1, 106, 50] into
+tokenizer_config.json, registers `gemma-e:2b` text only, links the official xclbins and finds the open
+set by its spec hash; `oflm serve gemma-e:2b` runs it on the open kernels and answers "The capital of
+France is Paris." (finish_reason stop).
 
 **Result 2026-10-16 (the official container keeps the closed engine):** `oflm serve` on a stand-in
 directory holding the E4B kernel set, a `model.gguf` and a `model.q4nx` prints "not using ...
@@ -1218,7 +1240,10 @@ toward -inf, scale toward +inf). So a new GGUF family needs no `*_f32` kernel tw
 out of device memory.
 
 **Acceptance criteria:** for a Q4_1 and a Q4_0 tensor, the 5120-byte pool's code planes equal the
-6144-byte pool's byte for byte and every bf16 scale and min is the RNE narrowing of the f32 one.
+6144-byte pool's byte for byte and every bf16 scale and min is the RNE narrowing of the f32 one. For a
+Q8_0 tensor re-quantized into the 5120-byte pool, every block's bf16 min is its lowest value rounded
+toward -inf, its bf16 scale the smallest bf16 at or above (highest - min) / 15, and every code decodes
+to within half a scale step of its value.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`)
@@ -2125,8 +2150,12 @@ identical xclbin.
 
 **Result 2026-10-16:** 73 kernel sets over the 15 shipped specs give identical MLIR, and every
 attention translation unit preprocesses identically at every shipped spec's flags (the logs
-are kept with the Gemma 3 1B bring-up). The one-kv-head kernels compile with Peano at Gemma 3
-1B's flags; on hardware they are OPEN-FAMILY-GEMMA3's 1B result.
+are kept with the Gemma 3 1B bring-up, branch feat/gemma3-1b; the same check after this
+requirement met Gemma 4's attention changes is OPEN-FAMILY-GEMMA4's merge result). The
+one-kv-head kernels compile with Peano at Gemma 3 1B's flags. On hardware: Gemma 4 E2B, one kv
+head in every layer, matches its fp64 reference at logits corr 0.999998 / 0.999991 / 0.999988
+after 6 / 20 / 35 layers (OPEN-FAMILY-GEMMA4); Gemma 3 1B's NPU result is OPEN-FAMILY-GEMMA3's,
+recorded on feat/gemma3-1b.
 
 ### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
