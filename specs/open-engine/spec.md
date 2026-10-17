@@ -1569,6 +1569,8 @@ entry (`vlm: false`, no `vision` label); `oflm serve` logs `Qwen3.5 on the open 
 Paris, ..." and `oflm-test --llm --model minicpm-v-4.7:1b --gen-lim 1500` passes 5 of 5 (both
 two-round conversations, streamed and not, and context retention). Logs:
 `.claude/plans/qwen35-gguf-run/` 15-24.
+After the row check: the 24-layer prompt re-run on the rebuilt CLI gives the same corr 0.999967,
+argmax and top-4 (`38-prompt-full24-npu-after-review.log`).
 
 ### OPEN-GGUF-QWEN35-SPEC: the spec a qwen35 GGUF derives
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py` `_qwen35_gguf`, `load.py`
