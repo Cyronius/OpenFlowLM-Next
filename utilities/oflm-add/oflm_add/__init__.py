@@ -2262,7 +2262,11 @@ def main():
 
     print()
     print(f"Done: {dir_name} installed to {target}")
-    print(f"Run:  oflm run {tag}   (or: oflm serve {tag})")
+    if family in LLM_EMBED_FAMILIES:
+        flag = "--rerankmodel" if LLM_EMBED_FAMILIES[family] == "rerank" else "--embed 1 --embeddingmodel"
+        print(f"Run:  oflm serve {flag} {tag}")
+    else:
+        print(f"Run:  oflm run {tag}   (or: oflm serve {tag})")
     print()
     print("OpenFlowLM discovers this model's registry entry and kernels")
     print("automatically; no OFLM_CONFIG_PATH/OFLM_XCLBIN_PATH exports needed.")

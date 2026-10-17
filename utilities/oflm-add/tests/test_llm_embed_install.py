@@ -125,7 +125,7 @@ def test_the_embedder_takes_no_config_from_its_pretraining_base(tmp_path, monkey
     ("Qwen3-Embedding-4B-i1-GGUF", "Qwen3-Embedding-4B.i1-Q4_1.gguf", ("qwen3-embedding", "4b"), "embeddings"),
     ("Qwen3-Reranker-4B-i1-GGUF", "Qwen3-Reranker-4B.i1-Q4_1.gguf", ("qwen3-reranker", "4b"), "rerank"),
 ])
-def test_installs_with_its_label_and_kernels(tmp_path, monkeypatch, name, gguf, tag, label):
+def test_installs_with_its_label_and_kernels(tmp_path, monkeypatch, capsys, name, gguf, tag, label):
     if not SYSTEM_LIST.is_file():
         pytest.skip("no src/model_list.json in this checkout")
     repo = _repo(tmp_path, name, gguf)
@@ -142,3 +142,6 @@ def test_installs_with_its_label_and_kernels(tmp_path, monkeypatch, name, gguf, 
     assert entry["label"] == [label]
     assert entry["details"]["family"] == tag[0] and entry["details"]["weights"] == "gguf"
     assert (target / "open_kernels").resolve() == kernels.resolve()
+    # the closing hint names the server flag that loads it, not `oflm run` (it is not a chat model)
+    flag = "--rerankmodel" if label == "rerank" else "--embed 1 --embeddingmodel"
+    assert f"Run:  oflm serve {flag} {':'.join(tag)}" in capsys.readouterr().out
