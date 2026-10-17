@@ -15,7 +15,13 @@ Qwen3_5VL::Qwen3_5VL(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_in
 
 void Qwen3_5VL::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
-    
+    {
+        // A VLM wrapper's config.json (MiniCPM-V's, beside its GGUF) keeps vocab_size in text_config.
+        auto& jc = this->lm_config->_json_config;
+        if (this->lm_config->get("vocab_size") == 0 && jc.contains("text_config") && jc["text_config"].is_object())
+            jc["vocab_size"] = jc["text_config"].value("vocab_size", 0u);
+    }
+
     // The engine: the open kernels when installed for this model, the closed
     // qwen3_5vl_npu DLL otherwise. See AutoModel::_shared_select_open_engine.
     auto open_engine = this->_shared_select_open_engine("OFLM_QWEN35_ENGINE", "Qwen3.5");

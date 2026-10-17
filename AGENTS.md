@@ -37,6 +37,11 @@ Activate the ironvenv/bin/activate; use source utilities/mlir-aie/utils/env_setu
     <location>.agents/skills/open-granite-kernels/SKILL.md</location>
   </skill>
   <skill>
+    <name>open-qwen35-gguf</name>
+    <description>Run a Qwen3.5-family GGUF (llama.cpp arch qwen35: Qwen3.5 / 3.6 / 3.8 dense, MiniCPM-V-4.7) on the open kernels straight from the file, install it with oflm-add, and check the engine packs it the way the NumPy packer does.</description>
+    <location>.agents/skills/open-qwen35-gguf/SKILL.md</location>
+  </skill>
+  <skill>
     <name>open-wide-deltanet-ab</name>
     <description>Build and validate the separate open banked alpha/beta dispatch at H5120/H2560, including xn streaming and the fused glue DMA constraint.</description>
     <location>.agents/skills/open-wide-deltanet-ab/SKILL.md</location>

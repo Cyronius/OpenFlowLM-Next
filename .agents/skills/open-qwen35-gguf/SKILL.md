@@ -48,15 +48,27 @@ python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/m
 ## Install and serve
 
 ```
-python utilities/oflm-add/oflm-add.py openbmb/MiniCPM-V-4.7-1B-gguf --tag minicpm-v-4.7:1b
+python utilities/oflm-add/oflm-add.py openbmb/MiniCPM-V-4.7-1B-gguf --tag minicpm-v-4.7:1b \
+    --open-kernels <xclbins>/MiniCPM-V-4.7-1B-gguf/open_kernels
 ```
 
 oflm-add picks the Q4_1 file, takes family `qwen3.5` from the GGUF architecture, fetches the
 tokenizer and `config.json` from the base repo, writes a text-only entry (`vlm: false`), and
-links the kernel set whose spec hash matches (or `--open-kernels <dir>`). The engine checks the
-kernel set against the GGUF's metadata, not the base repo's `config.json` (MiniCPM-V's is a VLM
-wrapper, `minicpmv4_7`). Then `oflm serve minicpm-v-4.7:1b` and
-`oflm-test --llm --model minicpm-v-4.7:1b`.
+links the kernel set. Traps:
+
+- The GGUF gate checks the kernel set of the *official match* (`qwen3.5:0.8b` ->
+  `Qwen3.5-0.8B-NPU2`), not the set whose spec hash matches. Without that set installed, or
+  without `--open-kernels`, the install falls back to the base repo's safetensors (for MiniCPM-V,
+  the VLM wrapper's). Pass `--open-kernels` for a fine-tune with its own set.
+- llama.cpp writes the head as Q6_K over a Q4_1 / Q4_0 body; for a qwen35 GGUF oflm-add leaves the
+  head out of its quant-name check (the engine repacks it as the q8 head anyway). A body tensor of
+  another quant is still refused: MiniCPM-V's Q4_K_M file mixes Q6_K into qkv / v / down, so
+  oflm-add refuses it even though the engine reads it.
+- MiniCPM-V's `config.json` keeps `vocab_size` under `text_config`; the Qwen3.5 adapter
+  (`modeling_qwen3_5vl.cpp`) republishes it at the top level for the sampler. The engine itself
+  checks the kernel set against the GGUF's metadata, not that file.
+
+Then `oflm serve minicpm-v-4.7:1b` and `oflm-test --llm --model minicpm-v-4.7:1b`.
 
 ## Checks
 

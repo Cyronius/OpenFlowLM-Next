@@ -1448,6 +1448,9 @@ byte-identical at all 300. Over all 64 layers with `--max-tokens 8` the 8 greedy
 the same, and the last prompt position and every decode step have equal argmax and top-5
 (corr >= 0.999971). Not run for the 27B: `oflm-test --llm` through `oflm serve`, which cannot
 load it -- the 27B is not in `src/model_list.json`.
+
+**Result 2026-10-17 (MiniCPM-V-4.7-1B, text, read straight from its Q4_1 GGUF): PASS.** The
+0.8B shape at q4_1 everywhere, through the q4nx view; the numbers are under OPEN-GGUF-Q4NX-VIEW.
 ### OPEN-CONVERT-QWEN35-VHEADS: a GGUF's tiled value heads come back in grouped order
 **Applies to:** openflowlm-next (`utilities/q4nx-build/q4nx/models/qwen35.py`)
 **Verification:** test
@@ -1476,7 +1479,8 @@ tensor of a linear and a full layer with its source after the converter's expect
 
 ### OPEN-GGUF-Q4NX-VIEW: a qwen35 GGUF is read as the q4nx container its kernel set's plan was written for
 **Applies to:** openflowlm-next (`src/open_qwen36/gguf_view.{hpp,cpp}`, `weight_file.hpp`, `pools.cpp`,
-`core.cpp`, `open_kernels/model/gguf_q4nx.py`, `open_kernels/recipes/pack.py`, `utilities/oflm-add`)
+`core.cpp`, `src/common/AutoModel/modeling_qwen3_5vl.cpp`, `open_kernels/model/gguf_q4nx.py`,
+`open_kernels/recipes/pack.py`, `utilities/oflm-add`)
 **Verification:** test
 **External tests:** `src/open_qwen36/gguf_pack_test.cpp` (ctest `GGUF-PACK`)
 **Plan:** `plans/archive/qwen35-gguf-view.md`
@@ -1511,7 +1515,9 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
   (round to nearest even), `ssm_a` / `ssm_dt.bias` f32 exact. The embedding row is the GGUF's own
   exact value.
 - **The config** is checked against the GGUF's metadata (`derive_config`, OPEN-GGUF-QWEN35-SPEC),
-  not against a wrapper's `config.json`.
+  not against a wrapper's `config.json`. Serving reads one number from that file, the sampler's
+  vocabulary width: the Qwen3.5 adapter (`modeling_qwen3_5vl.cpp`) takes `text_config.vocab_size`
+  when the top level has none, as the omni adapter does for its thinker.
 
 **Acceptance criteria:**
 - The C++ view and the NumPy view give byte-identical tensors on the synthetic qwen35 GGUF both
@@ -1538,6 +1544,17 @@ recipes/pack.py over the NumPy view, byte for byte.
 **Result 2026-10-17 (openbmb/MiniCPM-V-4.7-1B-gguf, `MiniCPM-V-4_7-1B-Q4_1.gguf`): PASS.** Layer 0
 (linear) and layer 3 (full) pools and consts, the 271 MB lm_head pool (from the file's Q6_K head)
 and the final norm are byte-identical between the two packers.
+
+**Result 2026-10-17, on the NPU (same file, its own export `MiniCPM-V-4.7-1B-gguf`, 41 kernels,
+`lx` fullest core 15 712 of 16 384 B): PASS.** OPEN-FAMILY-QWEN35's procedure. Slice (8 layers,
+3 greedy tokens from `[248045]`) against the fp64 replica reading the same view: logits corr
+0.999998 / 0.999982 / 0.999986, argmax and top-5 identical at all three positions, residual corr
+>= 0.999978 in every layer. All 24 layers through the engine CLI on a 23-token chat prompt
+against `replica_prompt.py`: corr 0.999967, same argmax (`An`), top-4 identical (slots 5 and 6
+swap on a 0.03-logit tie). Block prefill against sequential over a 473-token prompt, every
+position: argmax 469/473 (the misses are top-2 swaps), worst corr 0.99954, and the same 8 greedy
+tokens after it. `chat.py`: a coherent two-sentence answer ending in `<|im_end|>`, request 2
+reproduced request 1. Logs: `.claude/plans/qwen35-gguf-run/` 15-20.
 
 ### OPEN-GGUF-QWEN35-SPEC: the spec a qwen35 GGUF derives
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py` `_qwen35_gguf`, `load.py`

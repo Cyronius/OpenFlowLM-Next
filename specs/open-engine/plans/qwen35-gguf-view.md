@@ -36,6 +36,16 @@ and every existing link stay as they are. Leaving `real_vocab` out of the kernel
 let shape-identical fine-tunes link without a new export, but it changes linking for every family,
 so it is the maintainer's call.
 
+## Found at install and serve time
+
+- `oflm-add`'s quant-name check refused the Q4_1 file over its Q6_K head (llama.cpp's default);
+  for a view architecture the head is now outside that check.
+- The Qwen3.5 adapter sized its sampler from `config.json`'s top-level `vocab_size`, which a VLM
+  wrapper's config (MiniCPM-V's) keeps under `text_config`; the adapter now reads the nested value
+  when the top level has none, as the omni adapter does.
+- The kernel set is named after the directory `oflm-add` installs the model as
+  (`MiniCPM-V-4.7-1B-gguf`); `extra` is not in the spec hash.
+
 ## Not in this plan
 
 Vision (the mmproj GGUF and MiniCPM-V's own tower), the MoE line (`qwen35moe`: expert tensors),
