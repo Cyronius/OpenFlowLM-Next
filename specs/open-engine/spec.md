@@ -4316,3 +4316,12 @@ Prefill is sequential (one `step()` per token): no GGUF kernel set carries the b
    --prompts-file <prompts> --twice`: every prompt's vector has cosine >= 0.999 against the
    reference through the same weights (step 2's GGUF one), and the second run of each prompt is
    bit-identical to the first.
+
+**Result 2026-10-17.** PASS on both embedder files tried. Against the same weights on the CPU,
+all 14 prompts (the ten fixed ones and the card's four texts) have cosine >= 0.99997 for
+mradermacher's i1-Q4_1 file and >= 0.99996 for Qwen's Q8_0 file (requantized to q4_1 on load), and
+the card's 2x2 similarity matrix is within 0.0013 of the CPU's. All 18 prompts run twice (the
+embedder's 14 and the reranker's 4) gave bit-identical vectors. The weights sit much further from
+fp32 than the engine sits from the weights: against transformers fp32 the i1-Q4_1 vectors have
+cosine 0.964 to 0.985 (Q8_0 requantized: 0.910 to 0.953), which is the GGUF's own quantization
+error and the same on the CPU.

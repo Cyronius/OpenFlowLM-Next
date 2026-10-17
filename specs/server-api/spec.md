@@ -525,6 +525,15 @@ under `prompt_name: query`, two documents under `document`) gives a 2x2 similari
 0.02 of the CPU reference's (transformers, fp32, the official safetensors); `oflm-test --embedding
 --model qwen3-embedding:0.6b` passes.
 
+**Result 2026-10-17** (mradermacher's i1-Q4_1 file, served beside the reranker). The served matrix
+is [[0.7766, 0.1675], [0.1430, 0.6158]] against fp32's [[0.7646, 0.1414], [0.1355, 0.6000]]: max
+difference 0.026, so the 0.02 bar is not met. The miss is the 4-bit weights, not the server: the same
+GGUF run on the CPU is itself 0.026 from fp32, and the served matrix is within 0.0013 of it. Every
+other check held: 1024 dimensions, unit length, `dimensions: 256` is the renormalized prefix,
+`dimensions: 8`, a clustering task and the reranker's tag are refused with 400. `oflm-test
+--embedding --model qwen3-embedding:0.6b`: 10 PASS, E8 SKIP (its bundled vectors are
+embeddinggemma's).
+
 ### SERVER-RERANK: `/v1/rerank` scores and orders documents against a query
 **Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/server/server.cpp`, `src/server/openai_compat.hpp`, `src/include/AutoEmbeddingModel/`)
 **Verification:** test (the body, prompt, score and order: `src/server/openai_compat_test.cpp`
@@ -559,3 +568,9 @@ endpoint holds the NPU lock like `/v1/embeddings`.
 **Verification (manual):** the card's example -- "What is the capital of China?" against its two
 documents -- ranks the Beijing document first, and every score is within 0.02 of the CPU
 reference's (transformers, fp32, the official safetensors).
+
+**Result 2026-10-17: PASS** (mradermacher's i1-Q4_1 file). The Beijing document ranks first at
+0.99931 (fp32 0.99950), the gravity document scores 0.0000036 (fp32 0.0000050), and "Explain
+gravity" with `top_n: 1` keeps the gravity document at 0.99850 (fp32 0.99936). A body with no
+`query`, a numeric document and another model's tag are each refused with 400 naming the field or
+the loaded model.

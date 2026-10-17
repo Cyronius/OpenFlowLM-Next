@@ -70,3 +70,33 @@ model card's similarity matrix by up to 0.13 against 0.03 for the i1-Q4_1 file (
 `oflm-add` had refused the i1 files for their Q6_K `token_embd`; it now accepts them.
 Several community files carry wrong metadata (`add_eos_token` false, no pooling type) and are
 not usable: PeterAM4's and Mungert's.
+
+## Results, 2026-10-17 (risk 2: how far the 4-bit weights sit from fp32)
+
+The engine reproduces each file: NPU vectors against the same weights on the CPU have cosine
+>= 0.99996 on every prompt (OPEN-HIDDEN-STATE). What separates the served model from fp32 is the
+file. On a 50-query, 200-passage SciFact subset (passages cut to 128 tokens), with the fp32
+transformers model as the yardstick:
+
+- i1-Q4_1, served exactly: passage cosine to fp32 mean 0.979 (min 0.971); nDCG@10 0.881 against
+  fp32's 0.891; top-10 overlap with fp32 0.89; same top-1 on 92% of queries.
+- Qwen's Q8_0, requantized to plain q4_1 on load: cosine mean 0.944 (min 0.929); nDCG@10 0.901;
+  top-10 overlap 0.82; same top-1 on 88%.
+
+The two nDCG figures straddle fp32's by about 0.01 each way, which 50 queries cannot separate; by
+every measure of closeness to fp32 the i1 file is ahead, hence the default. The card's similarity
+matrix moves by 0.026 with i1-Q4_1, so the task's "within 0.02 of fp32" bar is missed by the
+weights themselves (the CPU gives the same 0.026). Meeting it needs more than 4 bits on the
+matmuls: a Q8_0 GGUF read as 8-bit (the engine has a q8 GEMV for the q4nx container, not yet for
+GGUF), or a better requantizer than min/max for Q8_0 sources. Neither is done here.
+
+The reranker is barely moved: on the card's four pairs every i1 score is within 0.001 of fp32's,
+and the relevant document wins each query by a logit margin of more than 6.
+
+## Server smoke, 2026-10-17
+
+`oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b`,
+both from the i1-Q4_1 files: every SERVER-EMBED-QWEN3 and SERVER-RERANK check against a live server
+holds except the embedder's "within 0.02 of fp32" bar, which the weights miss (0.026, as on the
+CPU). `oflm-test --embedding --model qwen3-embedding:0.6b` passes its ten checks (E8 skips: its
+bundled vectors are embeddinggemma's). Results are in the two requirements.
