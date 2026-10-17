@@ -1,3 +1,8 @@
+---
+name: open-tts-kokoro
+description: Install, serve, check and extend Kokoro-82M text to speech on the host CPU (src/open_tts, misaki's English G2P in C++, POST /v1/audio/speech). Use when installing Kokoro, adding a voice or a language, debugging speech that sounds wrong, touching the phonemizer, or porting another TTS model onto the same ops.
+---
+
 # Skill: open-tts-kokoro
 
 Kokoro-82M text to speech on the host CPU (`src/open_tts`), served as `POST /v1/audio/speech`.

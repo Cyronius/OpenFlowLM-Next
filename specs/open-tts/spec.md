@@ -244,6 +244,12 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
   that people change" does not). Unknown words: 34 (7.2% of the words), exactly misaki's count,
   all names (Siobhan, Nguyen, Saoirse, Kilimanjaro, Xiaomi, Tchaikovsky...) and tech terms
   (Kubernetes, Redis, nginx, softmax, tokenizer, PostgreSQL, pytest).
+- **Round trip through the open Whisper engine** (`round-trip-wer.log`,
+  `round-trip-wer-normalized.log`; feat/whisper-gguf's oflm, whisper-large-v3-turbo Q8_0 GGUF on
+  the NPU): three sentences spoken by the engine with af_heart and with bm_george, and by PyTorch,
+  each transcribed back. All 47 words come back in all three sets; the only differences are
+  numerals ("5 o'clock", "3 million"), so the word error rate is 0 of 47 with numbers read as
+  words and 2 of 47 counting the digits as errors, the same for the PyTorch audio.
 - **Chunking** (`chunks-long-paragraph.log`): the corpus as one 2702-character paragraph splits
   into 8 chunks of 179 to 510 phonemes, each ending at a full stop.
 
