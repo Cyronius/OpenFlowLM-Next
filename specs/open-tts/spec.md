@@ -261,6 +261,13 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
   sentences in both voices the server's WAV is byte-identical to `kokoro_cli`'s, so the Whisper
   result above holds for the served audio. `test_speech_api.py` 19 of 19 pass; `oflm-test --tts`
   passes S1-S5 and S7 (S6 skipped: no Whisper on that server).
+- **Speed** (`measure-rtf.log`, `dibs run --measure`, CLEAN before and after; two earlier runs were
+  NOISY and are not used): `kokoro_cli`, best of 3, OpenMP's default threads (24 logical cores, Ryzen AI 9 HX PRO 370). Two
+  sentences, 13.8 s of audio: 2.60 s with f16 weights (real-time factor 0.19), 2.68 s with f32 (0.19).
+  One short sentence, 3.1 s of audio: 0.72 s (0.23). The 16-bit weights cost no speed.
+- **Linux** (`linux-gcc-open_tts.log`): the engine and both unit tests build with g++ 13 (WSL) under the
+  flags CMake gives non-MSVC builds, the tests pass, and a sentence matches the Windows audio in
+  length and to 0.11 dB log-mel.
 - **Odd input** (`odd-inputs-synthesis.log`, and 84 lines of emoji, CJK, control characters, long
   numbers, URLs and random Unicode through `--g2p-lines`): no crash; text with nothing English in
   it yields no phonemes, which the server answers with a 400 (SERVER-SPEECH-PARAMS).
