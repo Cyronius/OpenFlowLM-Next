@@ -279,8 +279,7 @@ inline uint64_t attn_stream_rows(uint64_t valid, const AttnGeometry& g) {
     return valid ? valid : 1;
 }
 
-/// The four per-dispatch words set apart: the fill streams `valid` cached rows from `start`, the
-/// new row drains to row `drain`, the record is ptab row `record` (OPEN-VISION-GEMMA3's image block).
+/// The four words set apart: `valid` rows from `start`, the drain row, the record row (OPEN-VISION-GEMMA3).
 inline void attn_apply_rows(uint32_t* iw, const std::vector<AttnPatch>& table, uint64_t start, uint64_t valid,
                             uint64_t drain, uint64_t record, const AttnGeometry& g = AttnGeometry{}) {
     const uint64_t nf = attn_stream_rows(valid, g);

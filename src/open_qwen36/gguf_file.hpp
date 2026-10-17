@@ -78,8 +78,7 @@ public:
     std::string kv_str(const std::string& key) const;
     uint64_t kv_u64(const std::string& key) const;
     double kv_f64(const std::string& key) const;
-    /// An array key's element count (0 when absent); kv_str has its values comma-joined when it
-    /// is numeric and at most 64 long, and "" otherwise.
+    /// An array key's element count (0 when absent); kv_str joins a short numeric one's values with commas.
     uint64_t kv_array_len(const std::string& key) const {
         const auto it = arr_len_.find(key);
         return it == arr_len_.end() ? 0 : it->second;

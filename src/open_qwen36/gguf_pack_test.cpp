@@ -266,8 +266,7 @@ struct Tensor {
     std::vector<uint8_t> bytes;
 };
 
-/// A GGUF holding `ts` (architecture "gemma3"), every tensor 32-aligned in the data section; `n_tokens` > 0
-/// adds a tokenizer.ggml.tokens array of that many (empty) tokens.
+/// A GGUF holding `ts` (architecture "gemma3"), 32-aligned; `n_tokens` adds a tokenizer.ggml.tokens array.
 std::string write_gguf_tensors(const fs::path& dir, const std::string& fname, const std::vector<Tensor>& ts,
                                uint64_t n_tokens = 0) {
     std::vector<uint8_t> f;

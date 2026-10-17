@@ -158,14 +158,10 @@ public:
     /// for every other VLM.
     void step_embed(const float* x, bool want_logits, const int64_t mpos[3],
                     const float* deepstack = nullptr, int n_deepstack = 0);
-    /// OPEN-VISION-GEMMA3: `n` rows of `hidden` floats (one image's soft tokens) at positions
-    /// [position(), position() + n), attending causally to what came before and both ways among
-    /// themselves, through the decode kernel layer by layer (bidir_block.hpp). Logits for the last row
-    /// only when asked. Needs a set whose every layer is one `attnpos` dispatch (the dense recipe).
+    /// OPEN-VISION-GEMMA3: one image's rows at [position(), + n), both ways among themselves (bidir_block.hpp).
     void step_bidir_block(const float* rows, size_t n, bool want_logits);
-    /// The same rows stepped one at a time, causally: the mask Gemma 3 does NOT use, for the A/B.
+    /// The same rows causally, the mask Gemma 3 does not use (the A/B).
     void step_rows(const float* rows, size_t n, bool want_logits);
-    /// Whether step_bidir_block can run this kernel set, and why not when it cannot.
     bool bidir_block_ok(std::string* why = nullptr) const;
     const std::vector<float>& logits() const { return logits_host_; }
 

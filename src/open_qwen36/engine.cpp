@@ -280,8 +280,7 @@ buffer<bf16> Engine::prefill(std::vector<int>& ids, void* payload) {
             return logits_view();
         });
     }
-    // Gemma 3's payload is the app's own bf16 images (modeling_gemma3_image.cpp), and each image
-    // attends both ways inside itself, so it takes its own path (OPEN-VISION-GEMMA3).
+    // Gemma 3's payload is raw bf16 images, and each attends both ways inside itself (OPEN-VISION-GEMMA3)
     if (core_->manifest().family == "gemma3") return prefill_gemma3(ids, *static_cast<const bytes*>(payload));
     // Images: the app has expanded each one into grid_h * grid_w / 4 image tokens and
     // hands the preprocessed patches for the whole prompt. The vision tower (host CPU)

@@ -575,9 +575,7 @@ void pv_avx2(const float* p, float inv, const float* v, int m, int HD, float* ou
 }
 #endif
 
-/// Full attention with no rotary embedding over a long sequence (Siglip's 4096 patches). The keys are
-/// laid [head][dim][key] so a tile of scores accumulates in registers over the head dim, and each
-/// query's output does too; the scalar path is attention()'s arithmetic.
+/// Full attention with no rotary over 4096 patches: keys laid [head][dim][key] so score tiles stay in registers.
 void attention_full(const VitConfig& cfg, const float* qkv, int n, float* o) {
     const int NH = cfg.heads, HD = cfg.head_dim, H = cfg.hidden;
     const size_t row = static_cast<size_t>(3) * H;
