@@ -266,14 +266,23 @@ struct Tensor {
     std::vector<uint8_t> bytes;
 };
 
-/// A GGUF holding `ts` (architecture "gemma3"), every tensor 32-aligned in the data section.
-std::string write_gguf_tensors(const fs::path& dir, const std::string& fname, const std::vector<Tensor>& ts) {
+/// A GGUF holding `ts` (architecture "gemma3"), every tensor 32-aligned in the data section; `n_tokens` > 0
+/// adds a tokenizer.ggml.tokens array of that many (empty) tokens.
+std::string write_gguf_tensors(const fs::path& dir, const std::string& fname, const std::vector<Tensor>& ts,
+                               uint64_t n_tokens = 0) {
     std::vector<uint8_t> f;
     f.insert(f.end(), {'G', 'G', 'U', 'F'});
     put_u32(f, 3);
     put_u64(f, ts.size());
-    put_u64(f, 1);
+    put_u64(f, n_tokens ? 2 : 1);
     put_kv_str(f, "general.architecture", "gemma3");
+    if (n_tokens) {
+        put_str(f, "tokenizer.ggml.tokens");
+        put_u32(f, 9);                                   // an array ...
+        put_u32(f, 8);                                   // ... of strings
+        put_u64(f, n_tokens);
+        for (uint64_t i = 0; i < n_tokens; ++i) put_str(f, "");
+    }
     const auto align32 = [](size_t n) { return (n + 31) / 32 * 32; };
     size_t rel = 0;
     std::vector<size_t> offs;
@@ -554,6 +563,17 @@ int main() {
         if (check_padded(v, pv, v128.values, 128, 512, "std_perm_gguf Q4_0 128x512 at the plan's own rows") ||
             check_padded(h, ph, k96.values, 96, 512, "std_perm_gguf head of 96 rows in a 128-row plan"))
             return 1;
+        // Traces: OPEN-VISION-GEMMA3 -- a head that holds the file's whole vocabulary, a band short of the plan
+        GgufFile gv(write_gguf_tensors(dir, "test-head-vocab.gguf", {{"output.weight", {512, 64}, 2, h64.bytes}}, 64));
+        GgufFile gw(write_gguf_tensors(dir, "test-head-vocab96.gguf", {{"output.weight", {512, 64}, 2, h64.bytes}}, 96));
+        std::vector<uint8_t> pt(static_cast<size_t>(h.nch) * 6144, 0xA5);
+        pools::apply(h, gv, 0, pt.data(), pt.size(), 6144);
+        if (check_padded(h, pt, h64.values, 64, 512, "std_perm_gguf head of the file's whole 64-token vocabulary in a 128-row plan"))
+            return 1;
+        const bool other = refused(h, gw);
+        std::printf("%s std_perm_gguf still refuses a band-short head that is not the file's whole vocabulary\n",
+                    other ? "ok   " : "FAIL");
+        if (!other) return 1;
     }
 
     // ---- an F16 head (Gemma 3's tied embedding) whose blocks are exactly q4_1 re-quantizes back exactly

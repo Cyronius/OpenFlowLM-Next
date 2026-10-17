@@ -237,6 +237,10 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
+        // a multimodal checkpoint's config (Gemma 3 4B) keeps the language model's own keys in text_config
+        if (j.contains("text_config") && j["text_config"].is_object())
+            for (const auto& [key, value] : j["text_config"].items())
+                if (!j.contains(key)) j[key] = value;
         if (gguf_) {
             const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
             for (const auto& [key, value] : derived.items())
@@ -308,6 +312,15 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     }
     if (!gguf_ && !file_) {
         file_ = std::make_unique<Q4nxFile>((md / "model.q4nx").string());
+    }
+    real_vocab_ = w_->real_vocab;
+    if (gguf_) {
+        // ids past a head the converter trimmed (Gemma 3 4B: 262144 of the plan's 262208 rows) are no output
+        const TensorMeta& head = file_->meta("lm_head.weight");
+        if (!head.shape.empty() && head.shape[0] < real_vocab_) {
+            log("the GGUF's head has " + std::to_string(head.shape[0]) + " rows; ids from there on are never sampled");
+            real_vocab_ = head.shape[0];
+        }
     }
     int total = static_cast<int>(w_->layers.size());
     nl_ = cfg_.num_layers > 0 && cfg_.num_layers < total ? cfg_.num_layers : total;

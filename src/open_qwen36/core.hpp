@@ -285,7 +285,7 @@ public:
     const Manifest& weights() const { return w_ ? *w_ : man_; }
     bool is_gguf() const { return gguf_; }
     size_t vocab() const { return weights().vocab; }
-    size_t real_vocab() const { return weights().real_vocab; }
+    size_t real_vocab() const { return real_vocab_; }
 
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
@@ -314,6 +314,7 @@ private:
     Manifest man_;
     const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
     bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    size_t real_vocab_ = 0;                    ///< the manifest's, clamped to a GGUF head's own rows
     std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer

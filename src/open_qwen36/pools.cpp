@@ -553,9 +553,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const uint64_t out_dim = op.nch / (op.in_dim / 256) * 32;
         const uint64_t file_rows = t.dims.size() == 2 ? t.dims[1] : 0;
         const uint64_t src_dim = op.src_dim ? op.src_dim : op.in_dim;
-        // a head holds the real vocabulary, which the plan rounds up to whole 64-row bands
+        // a head holds the real vocabulary (the plan rounds up to 64-row bands) or the file's own, padding trimmed
         const bool short_head = !op.src_rows && op.tensor == "lm_head.weight" && file_rows < out_dim &&
-                                out_dim - file_rows < 64;
+                                (out_dim - file_rows < 64 || file_rows == g.kv_array_len("tokenizer.ggml.tokens"));
         const uint64_t src_rows = op.src_rows ? op.src_rows : short_head ? file_rows : out_dim;
         if (src_dim > op.in_dim || src_rows > out_dim || src_dim % 32)
             fail("std_perm_gguf " + name + ": a " + std::to_string(src_rows) + " x " + std::to_string(src_dim) +
