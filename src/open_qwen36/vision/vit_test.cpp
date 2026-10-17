@@ -184,10 +184,7 @@ static int deepstack_test(const std::string& md, const std::string& fx, int head
     return g_failed == 0 ? 0 : 1;
 }
 
-/// OPEN-VISION-GEMMA3: the Siglip tower and Gemma 3's projector, read from an mmproj GGUF,
-/// against transformers on the same weights and pixels.
-///   python open_kernels/model/replica_siglip.py --fixture FX [--mmproj FILE --hf DIR]
-///   vit_test --siglip FX/mmproj.gguf FX      (a real mmproj: vit_test --siglip FILE FX)
+// OPEN-VISION-GEMMA3: fixtures from open_kernels/model/gemma3_vision_ref.py (tiny | tower)
 static int siglip_test(const std::string& mmproj, const std::string& fx, const std::string& dump = "") {
     using namespace open_qwen36::vision;
     const VitConfig cfg = VitConfig::siglip_from_gguf(mmproj);

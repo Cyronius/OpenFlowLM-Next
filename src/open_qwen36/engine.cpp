@@ -158,7 +158,7 @@ void Engine::ensure_siglip() {
     const fs::path mm = fs::path(cfg_.model_dir) / "mmproj.gguf";
     if (!fs::is_regular_file(mm))
         throw std::runtime_error("open_qwen36: " + cfg_.model_dir + " has no mmproj.gguf, the vision tower an image needs "
-                                 "on the open engine (oflm-add installs the model's mmproj there); "
+                                 "on the open engine (only a GGUF install from oflm-add carries one); "
                                  "OFLM_GEMMA_ENGINE=closed runs this model on the closed engine instead");
     auto t0 = std::chrono::steady_clock::now();
     vcfg_ = vision::VitConfig::siglip_from_gguf(mm.string());

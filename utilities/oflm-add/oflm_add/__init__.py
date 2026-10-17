@@ -75,8 +75,7 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "gemma3-text", "granite", "hunyuan"}
 # The official list files Gemma 3 1B (no vision tower) as gemma3-text; its GGUF says gemma3.
 TEXT_ONLY_FAMILY = {"gemma3": "gemma3-text"}
-# A vision tower GGUF (llama.cpp's mmproj) beside the model installs as mmproj.gguf for the families
-# whose open engine reads one (OPEN-VISION-GEMMA3); it keeps its matrices as shipped, 16-bit or f32.
+# families whose open engine reads llama.cpp's mmproj, installed as shipped (OPEN-VISION-GEMMA3)
 MMPROJ_FAMILIES = {"gemma3"}
 MMPROJ_PREFERENCE = ["F16", "BF16", "F32"]
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
@@ -2269,8 +2268,7 @@ def main():
             missing = [f for f in required if not (target / f).is_file()]
     normalize_tokenizer_config(target, repo, get_base_chain(), modelscope)
     if (target / "mmproj.gguf").is_file() and not template_reads_images(target):
-        # A base repo's own template reads images from content parts; the server passes them as
-        # message['images'], which the official entry's template reads (modeling_gemma3.cpp).
+        # the server passes images as message['images'], which only the official entry's template reads
         rid = official_repo_id(system_registry, base_entry)
         got = None
         if rid and not modelscope:

@@ -670,6 +670,35 @@ int main() {
         if (!ok) return 1;
     }
 
+    // ---- a short numeric array reads as its joined values, and is refused as a number
+    {
+        std::vector<uint8_t> f;
+        f.insert(f.end(), {'G', 'G', 'U', 'F'});
+        put_u32(f, 3);
+        put_u64(f, 0);
+        put_u64(f, 2);
+        put_kv_str(f, "general.architecture", "gemma3");
+        put_str(f, "gemma3.attention.head_count_kv");
+        put_u32(f, 9);
+        put_u32(f, 4);                                   // UINT32 elements
+        put_u64(f, 3);
+        for (uint32_t v : {8u, 0u, 8u}) put_u32(f, v);
+        while (f.size() % 32) f.push_back(0);
+        const fs::path p = dir / "test-array.gguf";
+        {
+            std::ofstream of(p, std::ios::binary);
+            of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
+        }
+        GgufFile ga(p.string());
+        const std::string k = "gemma3.attention.head_count_kv";
+        bool u_refused = false, f_refused = false;
+        try { (void)ga.kv_u64(k); } catch (const std::exception&) { u_refused = true; }
+        try { (void)ga.kv_f64(k); } catch (const std::exception&) { f_refused = true; }
+        const bool ok = ga.kv_str(k) == "8,0,8" && ga.kv_array_len(k) == 3 && u_refused && f_refused;
+        std::printf("%s a per-layer array is not read as a number\n", ok ? "ok   " : "FAIL");
+        if (!ok) return 1;
+    }
+
     std::printf("GGUF-PACK OK\n");
     return 0;
 }

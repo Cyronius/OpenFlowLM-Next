@@ -13,9 +13,7 @@ Gemma3::Gemma3(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "G
 void Gemma3::load_model(std::string model_path, json model_info, int default_context_length, bool enable_preemption) {
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
-    // The engine: the open kernels when installed for this model, the closed
-    // gemma_npu DLL otherwise (AutoModel::_shared_select_open_engine). The open
-    // engine takes images when the model has an mmproj.gguf (OPEN-VISION-GEMMA3).
+    // open kernels when installed (images too, given an mmproj.gguf: OPEN-VISION-GEMMA3), else gemma_npu
     auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA_ENGINE", "Gemma 3");
     if (open_engine) {
         this->lm_engine = std::move(open_engine);

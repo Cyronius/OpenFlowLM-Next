@@ -347,6 +347,8 @@ std::string GgufFile::kv_str(const std::string& key) const {
 }
 
 uint64_t GgufFile::kv_u64(const std::string& key) const {
+    // a per-layer array would otherwise read as its first element
+    if (arr_len_.count(key)) fail("metadata " + key + " is an array, not a number");
     try {
         return std::stoull(kv_str(key));
     } catch (const std::logic_error&) {
@@ -355,6 +357,7 @@ uint64_t GgufFile::kv_u64(const std::string& key) const {
 }
 
 double GgufFile::kv_f64(const std::string& key) const {
+    if (arr_len_.count(key)) fail("metadata " + key + " is an array, not a number");
     try {
         return std::stod(kv_str(key));
     } catch (const std::logic_error&) {
