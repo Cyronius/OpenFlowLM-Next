@@ -308,8 +308,7 @@ float pool_value(const uint8_t* d, size_t r, size_t k) {
     return ((p & 1) ? byte >> 4 : byte & 0xF) * df + mf;
 }
 
-/// OPEN-PACK-PAD: a source smaller than its pool reads back exactly where it exists and as
-/// exact zeros everywhere else -- the pad columns' scales, mins and codes are all zero.
+/// OPEN-PACK-PAD: the source reads back exactly, and every pad value is +0.
 int check_padded(const PackOp& op, const std::vector<uint8_t>& pool, const std::vector<float>& want,
                  size_t src_rows, size_t src_cols, const char* what) {
     const size_t per_band = op.in_dim / 128;
@@ -516,8 +515,48 @@ int main() {
         if (!q4nx_refused) return 1;
     }
 
-    // ---- an F16 source (Gemma 3's tied embedding as its head) re-quantizes into the pool; data
-    // that IS q4_1 at fp16 scales comes back exactly, padded columns as zeros
+    // ---- without src_rows the file holds the plan's rows exactly; only a head may fall short, by under a band
+    {
+        const Blocks k96 = make_blocks(96, 512, "Q4_0", rng), v128 = make_blocks(128, 512, "Q4_0", rng);
+        const Blocks h64 = make_blocks(64, 512, "Q4_0", rng);
+        GgufFile gr(write_gguf_tensors(dir, "test-rows.gguf",
+                                       {{"blk.0.attn_k.weight", {512, 96}, 2, k96.bytes},
+                                        {"blk.0.attn_v.weight", {512, 128}, 2, v128.bytes},
+                                        {"output.weight", {512, 96}, 2, k96.bytes}}));
+        GgufFile gh(write_gguf_tensors(dir, "test-head64.gguf", {{"output.weight", {512, 64}, 2, h64.bytes}}));
+        const auto plan = [](const std::string& tensor, uint64_t rows) {
+            PackOp p;
+            p.op = "std_perm_gguf";
+            p.tensor = tensor;
+            p.in_dim = 512;
+            p.nch = rows * 512 / 8192;
+            return p;
+        };
+        const auto refused = [](const PackOp& p, const GgufFile& gf) {
+            std::vector<uint8_t> pool(static_cast<size_t>(p.nch) * 6144);
+            try {
+                pools::apply(p, gf, 0, pool.data(), pool.size(), 6144);
+            } catch (const std::exception& e) {
+                return std::string(e.what()).find("the file holds") != std::string::npos;
+            }
+            return false;
+        };
+        const bool ok = refused(plan("model.layers.0.self_attn.k_proj.weight", 128), gr) &&
+                        refused(plan("model.layers.0.self_attn.v_proj.weight", 64), gr) &&
+                        refused(plan("lm_head.weight", 128), gh);
+        std::printf("%s std_perm_gguf refuses a file with fewer or more rows than the plan, and a head a band short\n",
+                    ok ? "ok   " : "FAIL");
+        if (!ok) return 1;
+        const PackOp v = plan("model.layers.0.self_attn.v_proj.weight", 128), h = plan("lm_head.weight", 128);
+        std::vector<uint8_t> pv(static_cast<size_t>(v.nch) * 6144, 0xA5), ph(static_cast<size_t>(h.nch) * 6144, 0xA5);
+        pools::apply(v, gr, 0, pv.data(), pv.size(), 6144);
+        pools::apply(h, gr, 0, ph.data(), ph.size(), 6144);
+        if (check_padded(v, pv, v128.values, 128, 512, "std_perm_gguf Q4_0 128x512 at the plan's own rows") ||
+            check_padded(h, ph, k96.values, 96, 512, "std_perm_gguf head of 96 rows in a 128-row plan"))
+            return 1;
+    }
+
+    // ---- an F16 head (Gemma 3's tied embedding) whose blocks are exactly q4_1 re-quantizes back exactly
     {
         const unsigned rows = 64, cols = 288;
         std::vector<float> vals(static_cast<size_t>(rows) * cols);
@@ -590,9 +629,7 @@ int main() {
         if (!(ok && refused)) return 1;
     }
 
-    // ---- the sandwich norms: a GGUF with post_attention_norm stores HF's post_attention_layernorm
-    // there and its pre_feedforward_layernorm as ffn_norm; a llama GGUF's ffn_norm is HF's
-    // post_attention_layernorm
+    // ---- sandwich norms: a Gemma GGUF's ffn_norm is HF's pre-FFN norm, a llama GGUF's its post-attention one
     {
         auto norm_t = [](const std::string& name, float v) {
             std::vector<uint8_t> b(8 * 4);
