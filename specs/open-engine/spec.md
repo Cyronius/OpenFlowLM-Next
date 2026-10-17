@@ -2435,6 +2435,25 @@ with the 1B set installed under `xclbins/Gemma3-1B-NPU2/open_kernels`: the load 
 to load (its `config.json` says `gemma3_text_only`, which the set does not serve); with it, the
 closed engine loads and answers. On hardware the padding itself is OPEN-FAMILY-GEMMA3's 1B result.
 
+### OPEN-GGUF-TWIN-PER-CALL: the f32-scale twin streams and reads the same chunks per call
+**Applies to:** openflowlm-next (`open_kernels/designs/dense/dx.py`, `designs/dense/gen_kernels.py`)
+**Verification:** manual (below)
+
+A dense layer's GGUF-direct twin (`dx_f32`, f32-scale chunks of 6 KB) shall compile its GEMV
+entries with the chunks per call its own recipe derives, not the q4nx view's. The export writes
+the GEMV wrappers once, from the q4nx view, and builds both twins from them; where the larger
+f32 chunks leave room for only one per call and the q4nx chunks for two, the twin streamed one
+chunk per weight element while its GEMV walked two. The specs where the two views disagree are
+Gemma 3 4B, K2 Horizon 3.7B and Qwen2.5 3B. The wrappers default to the q4nx count and the f32
+build overrides it with `-DGEMV_PER_CALL`, so every build whose views agree compiles the same
+source text it did before.
+
+**Verification (manual):** export the 4B's `dx` and `dx_f32` with `--check` against a set built
+before the change (`dx` must come back stamps-only, `dx_f32` must differ), the 1B's against round
+1's set (both stamps-only), the dense MLIR of every spec before and after
+(`utilities/mlir_equiv.py`), then one prompt through the 4B GGUF on the NPU against the fp64
+replica.
+
 ### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
 `open_kernels/designs/layer_x/xcommon.py`)
@@ -3169,14 +3188,22 @@ in order, with natural drains. Cost: `(2 (L - 1) + 1) N` single-layer dispatches
    `vit_test --siglip <mmproj> FX`: the real tower against transformers in fp32 on the app's bf16 pixels.
 2. `gemma3_vision_ref.py logits` (transformers, bf16) and `replica_gemma3_image.py --mask bidir` /
    `--mask causal` (fp64, from the GGUF the way the engine packs it, the image rows injected) on the
-   same prompt ids (`<start_of_image>`, 256 soft tokens, `<end_of_image>`, a question).
-3. `open_qwen36_cli --model <dir with model.gguf + config.json> --kernels <4B set> --ids-file IDS
+   same prompt ids (`<start_of_image>`, 256 soft tokens, `<end_of_image>`, a question). An independent
+   check of the replica: llama.cpp's `llama-server` on the same GGUF and mmproj (it decodes an image
+   batch non-causally), its top-20 log-probs at the first answer position against the replica's.
+   transformers in bf16 runs the unquantized QAT checkpoint, not the Q4_0 file, and is the furthest of
+   the three from the other two; it checks the tower and the mask, not the logits.
+3. The schedule alone, on a model whose GGUF route is already proven: the 1B with 64 rows of its own
+   token embeddings injected as a block past its 512-row window (`--embeds`, rows zero-padded to the
+   kernel set's width), both ways and `--causal-image`, against the 1B replica both ways and causal.
+4. `open_qwen36_cli --model <dir with model.gguf + config.json> --kernels <4B set> --ids-file IDS
    --embeds FX/ref.bin --prefill-logits --dump-logits OUT/y` against the replica's `ref_logits_p*.bin`,
    with and without `--causal-image`: the both-ways run must match the both-ways replica much more
    closely than the causal one does. Then `--image FX/pixels.bin --mmproj <file>` for the tower in the
    loop.
-4. `oflm-add <gguf repo> --tag gemma3:4b`, `oflm serve gemma3:4b`, one image request, then
-   `oflm-test --vision --model gemma3:4b`.
+5. `oflm-add <gguf repo> --tag gemma3:4b`, `oflm serve gemma3:4b`, one image request, then
+   `oflm-test --vision --model gemma3:4b`; and one image request with `mmproj.gguf` moved aside,
+   which must be refused by name.
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)

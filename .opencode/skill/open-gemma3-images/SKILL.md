@@ -20,6 +20,14 @@ description: Run images through Gemma 3 4B (gemma3:4b, MedGemma, TranslateGemma)
 
 ## The traps
 
+- **NaN in every layer of the 4B GGUF = the per-call bug** (OPEN-GGUF-TWIN-PER-CALL). The f32-scale
+  `dx_f32` fits one 6 KB chunk per call where the q4nx `dx` fits two, and the shared generated GEMV
+  wrappers used to say two. A kernel set exported before that fix is wrong for the 4B (and for K2
+  Horizon 3.7B and Qwen2.5 3B): re-export `dx_f32`. Dump layer 0's act scratch (`--layers 1
+  --dump-act 0:0:135168:<file>`): a sane `xn` and a `q` of 1e30 is this.
+- **Test the image schedule on the 1B first.** Its GGUF route is proven, so 64 injected rows past its
+  512-row window, both ways and causal against the 1B replica, isolate the schedule from the 4B's
+  kernels (rows zero-padded to the set's 1280 width).
 - **fc1 / fc2 names.** Google's and the older ggml-org mmprojs name SigLIP's first MLP matrix
   `ffn_down` (it maps 1152 -> 4304); the newer ggml-org, unsloth and mradermacher files name it
   `ffn_up`. The loader decides by shape. Reading by name gives a tower that runs and is wrong.

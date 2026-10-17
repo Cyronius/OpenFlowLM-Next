@@ -19,6 +19,11 @@ Gemma 3 needs.
   against the kernel set's 262208 rows (the HF vocabulary's 64 padding rows were trimmed by the
   converter); the packer refused it. A head may now also fall short when it holds exactly the
   GGUF's own vocabulary, and the engine clamps `real_vocab` to the head's rows.
+- **New (found on hardware):** `OPEN-GGUF-TWIN-PER-CALL`. The 4B GGUF came out NaN in every
+  layer: its f32-scale `dx_f32` streams one 6 KB chunk per weight element but was compiled with
+  the q4nx view's two. The dense GEMV wrappers now take the f32 build's own count by `-D`.
+- **oflm-add:** a GGUF whose embedding is a coarser quant than its body (unsloth's Q6_K
+  `token_embd` over Q4_1) installs; the body still has to be the quant the name claims.
 
 ## The mask (the gate)
 
