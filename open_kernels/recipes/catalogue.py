@@ -131,8 +131,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
     Template("gemv_q4", "designs/gemv_q4/gemv_q4.h",
              {"K": values(1024, 1536, 2048, 3072, 3584, 3840, 4096, 2560, 5120, 6144, 8192, 9216, 9728, 10240,
                           10752, 11264, 12288, 14336, 15360),
-                                                 # 1536: Gemma 4 E2B (OPEN-FAMILY-GEMMA4, 2026-10-16: its slices
-                                                 # and whole model against the fp64 replica on the NPU);
+                                                 # 1536: Gemma 4 E2B (OPEN-FAMILY-GEMMA4, 2026-10-16);
                                                  # 2048 / 4096: the 27B layers; 2560 / 9728: Qwen3-4B;
                                                  # 14336: Llama 3.1 8B; 10240: Gemma 3 4B; 12288: Qwen3-8B;
                                                  # 6144: Qwen3-1.7B; 1024 / 3072: Qwen3-0.6B;
@@ -193,13 +192,10 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                   "(128, 16, 8) -- a GQA group of 2 at head dim 128 -- through silently, "
                   "because each value came from a different model. A new tuple needs a family "
                   "procedure run at exactly that configuration"),
-    # Gemma 4's attention is attn.h with ATTN_SCALE_ONE, ATTN_VNORM and ATTN_ROPE_PAIR = HD/2 (q/k norm, no
-    # gate, no bias), and a KV-shared kind is dx.py without its k / v work -- a different kernel from every
-    # `attn` point above even where the head geometry matches, so it is validated on its own.
+    # Gemma 4's knobs (ATTN_SCALE_ONE, ATTN_VNORM, ATTN_ROPE_PAIR) make a different kernel even at an `attn` point's shape
     Template("attn_gemma4", "designs/attn/attn.h",
              combos=(combination(
-                 # (head_dim, num_heads, num_kv_heads, rotary_dim, kv_shared). E4B's four kinds entered
-                 # 2026-10-16: the 6- and 30-layer slices and the whole model against the fp64 replica
+                 # E4B's four kinds, 2026-10-16: the 6- and 30-layer slices and the whole model against the fp64 replica
                  (256, 8, 2, 256, False), (512, 8, 2, 128, False), (256, 8, 2, 256, True), (512, 8, 2, 128, True),
                  # E2B's four at one kv head, the same day: its 6- and 20-layer slices and the whole model
                  (256, 8, 1, 256, False), (512, 8, 1, 128, False), (256, 8, 1, 256, True), (512, 8, 1, 128, True),

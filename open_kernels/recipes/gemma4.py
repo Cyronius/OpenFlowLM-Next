@@ -40,8 +40,7 @@ OWN = {DENSE_LOCAL_SHARED: DENSE_LOCAL, DENSE_SHARED: DENSE}          # a shared
 PART = {DENSE_LOCAL: "local", DENSE: "global", DENSE_LOCAL_SHARED: "local_shared", DENSE_SHARED: "global_shared"}
 KERNEL = {DENSE_LOCAL: "dx_local", DENSE: "dx", DENSE_LOCAL_SHARED: "dx_local_shared", DENSE_SHARED: "dx_shared"}
 
-# GGUF tensor names, llama.cpp's gemma4 (read off google/gemma-4-E4B-it-qat-q4_0-gguf). The plan names
-# them directly: a GGUF-only family has no other naming to translate from.
+# llama.cpp's gemma4 tensor names, used directly: a GGUF-only family has no other naming to translate from
 BLK = "blk.{l}."
 T_Q, T_K, T_V, T_O = BLK + "attn_q.weight", BLK + "attn_k.weight", BLK + "attn_v.weight", BLK + "attn_output.weight"
 T_UP, T_GATE, T_DOWN = BLK + "ffn_up.weight", BLK + "ffn_gate.weight", BLK + "ffn_down.weight"

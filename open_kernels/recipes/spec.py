@@ -18,8 +18,7 @@ from typing import Any, Mapping
 
 LINEAR, FULL, DENSE, DENSE_LOCAL = "linear_attention", "full_attention", "dense", "dense_local"
 SHORT_CONV = "short_conv"                             # LFM2: a short depthwise causal conv INSTEAD of attention
-# Gemma 4's KV-shared layers: no K / V of their own, they attend over the cache of the last
-# earlier layer of the same kind (recipes/gemma4.py kv_sources)
+# Gemma 4's KV-shared layers have no K / V of their own: they read an earlier layer's cache (gemma4.py kv_sources)
 DENSE_SHARED, DENSE_LOCAL_SHARED = "dense_shared", "dense_local_shared"
 LAYER_TYPES = (LINEAR, FULL, DENSE, DENSE_LOCAL, SHORT_CONV, DENSE_SHARED, DENSE_LOCAL_SHARED)   # dense_local: a dense layer with sliding-window attention
 # Adding a member here is free: `layer_types` is one field and no shipped spec uses the new
@@ -94,8 +93,7 @@ class ModelSpec:
     # carrying only the roles that differ from it (`{"attn": "q8"}`). QUANT_ROLES above.
     quant: str | dict = DEFAULT_QUANT
     extra: dict = field(default_factory=dict)   # informational (model name, source)
-    # Gemma 4's E-series (family "gemma4"). Each serialises only when it is not its default
-    # (to_dict), so adding them moved no shipped spec's hash.
+    # Gemma 4's fields serialise only when not at their default (to_dict), so no shipped spec's hash moved
     global_head_dim: int = 0          # the full-attention layers' head width; 0 = head_dim
     global_rotary_dim: int = 0        # rotated dims of a full-attention head (proportional RoPE); 0 = rotary_dim
     intermediate_shared: int = 0      # the KV-shared layers' FFN width (E2B doubles it); 0 = intermediate

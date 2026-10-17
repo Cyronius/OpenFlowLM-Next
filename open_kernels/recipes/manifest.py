@@ -83,8 +83,7 @@ def manifest(spec: ModelSpec, max_ctx: int = 4096, key: str | None = None) -> di
     if hasattr(F, "host_stages"):
         m.update(F.host_stages(spec))       # Gemma 4: kv_source, ple, layer_scalar, logit_softcap
     if getattr(F, "GGUF_ONLY", False):
-        # a family with no other weight file: its one view, already GGUF-direct, is also the
-        # view the engine swaps in for model.gguf
+        # a GGUF-only family's one view is already GGUF-direct, so it is also the view swapped in for model.gguf
         import copy
         m["gguf"] = copy.deepcopy(m)
     elif gguf:

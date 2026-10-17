@@ -1155,6 +1155,11 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
    "not using ... it packs GGUF-direct" and does not start the open engine.
 
+Steps 3 and 4 are also the regression checks for two load fixes with no unit test (the GGUF config
+derivation and the adapter sit in XRT-linked code): on E2B, step 3 stops at load unless `derive_config`
+takes the FFN width from layer 0's tensor (its GGUF lists one width per layer); in step 4 the server
+crashes on the first token unless the adapter lifts `text_config` (the sampler gets vocabulary 0).
+
 **Result 2026-10-16 (replica):** the four-layer slice (layers 0, 5, 24, 29; 13 tokens) agrees with
 fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
 same argmax. E2B (layers 0, 4, 15, 19: one kv head, the 12288-wide FFN in the shared pair): 1.2e-6 at

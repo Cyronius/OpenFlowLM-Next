@@ -35,8 +35,7 @@ def main() -> int:
     ids = [int(x) for x in a.ids.split(",")]
     layers = [int(x) for x in a.layers.split(",")]
     kinds = [G.kinds[l] for l in layers]
-    # the stitched model shares the way the real one does: the trailing layers whose real index is a
-    # shared one take the last earlier stitched layer of their kind
+    # stitched layers that are KV-shared in the real model read the last earlier stitched layer of their kind
     first_real_shared = G.n_layers - len(G.sources)
     nsh = sum(1 for l in layers if l >= first_real_shared)
     first = len(layers) - nsh

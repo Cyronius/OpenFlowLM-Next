@@ -1148,8 +1148,7 @@ def build_entry(base_entry, dir_name, files, size):
         entry["size"] = size
     entry["vlm"] = any(f.startswith("vision") for f in files)
     if "model.gguf" in files and entry.get("details", {}).get("family") != "whisper-v3":
-        # a GGUF install carries the language model only (Gemma 4's towers stay closed): no
-        # image or audio input, and no label that says otherwise
+        # a GGUF install is the language model only (Gemma 4's towers stay closed): no image or audio input
         entry["vlm"] = entry["asr"] = False
         if isinstance(entry.get("label"), list):
             entry["label"] = [x for x in entry["label"] if x not in ("vision", "audio", "chat-transcription")]
@@ -1682,9 +1681,7 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     if bad:
         return False, (f"tensors use {'/'.join(bad)}, which the NPU packers do not ingest "
                        "(have F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q4_K/Q6_K); convert with q4nx-build")
-    # The embeddings and the output projection are routinely a coarser quant than the body
-    # (Q8_0 or Q6_K over Q4_*: Google's Gemma 4 QAT files) and the host or the head's
-    # re-quantizer reads them; every other tensor must be the claimed family.
+    # embeddings and the head may use another quant (Gemma 4 QAT: Q6_K), since the host or the head's re-quantizer reads them
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
     coarse_ok = ("token_embd.weight", "output.weight", "per_layer_token_embd.weight")
