@@ -1151,9 +1151,9 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 4. `oflm-add google/gemma-4-E4B-it-qat-q4_0-gguf` (or a local directory holding the GGUF beside
    Google's tokenizer files and generation_config.json; on a shared box add `--config`, `--models-root`
    and `--xclbin-dir` pointing at a scratch root), `oflm serve`, `oflm-test --llm --model <tag>`,
-   `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") comes from the
-   sampler's default frequency and presence penalties: replay the request with both at 0 before
-   suspecting the engine. An image request to the install comes back as 400 "Invalid request", the
+   `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") most likely
+   comes from the sampler's default frequency and presence penalties: replay the request with both at
+   0 before suspecting the engine. An image request to the install comes back as 400 "Invalid request", the
    server log names the `gemma4-it` tags, and a text request after it still answers.
 5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
