@@ -81,6 +81,11 @@ Then `oflm serve minicpm-v-4.7:1b` and `oflm-test --llm --model minicpm-v-4.7:1b
 - Slice vs fp64: `open_kernels/model/make_decode.py --model-dir <dir with model.gguf>` reads the
   GGUF through the NumPy view, so the reference and the NPU see the same weights.
 
+Validated 2026-10-17 on MiniCPM-V-4.7-1B Q4_1 (OPEN-GGUF-Q4NX-VIEW's results): slice and full
+model against fp64, block prefill against sequential, `oflm serve`, `oflm-test --llm` 5/5. The
+export takes about 35 minutes with `-j 4` on a busy box; `lx` uses 15 712 of 16 384 B of program
+memory at h1024.
+
 ## Not covered yet
 
 Vision (the mmproj GGUF), `qwen35moe` (expert tensors), Q5_K, and the release export list (the

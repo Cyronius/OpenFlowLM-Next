@@ -1,6 +1,6 @@
 # Plan: Qwen3.5-family GGUFs on the open kernels, through a q4nx view
 
-**Status:** implemented on `feat/qwen35-gguf` (2026-10-17); validated on MiniCPM-V-4.7-1B.
+**Status:** implemented on `feat/qwen35-gguf` (2026-10-17); validated on MiniCPM-V-4.7-1B on the NPU and through `oflm serve` / `oflm-test --llm`; archived.
 **Spec impact:** two new requirements, `OPEN-GGUF-Q4NX-VIEW` and `OPEN-GGUF-QWEN35-SPEC`, and a
 Result line under `OPEN-FAMILY-QWEN35`. No existing requirement changes: the dense families' f32
 GGUF path (#180) and every q4nx container behave as before.

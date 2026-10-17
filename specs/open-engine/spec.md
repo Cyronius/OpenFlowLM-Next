@@ -1554,7 +1554,13 @@ against `replica_prompt.py`: corr 0.999967, same argmax (`An`), top-4 identical 
 swap on a 0.03-logit tie). Block prefill against sequential over a 473-token prompt, every
 position: argmax 469/473 (the misses are top-2 swaps), worst corr 0.99954, and the same 8 greedy
 tokens after it. `chat.py`: a coherent two-sentence answer ending in `<|im_end|>`, request 2
-reproduced request 1. Logs: `.claude/plans/qwen35-gguf-run/` 15-20.
+reproduced request 1. Through the app: `oflm-add openbmb/MiniCPM-V-4.7-1B-gguf --tag
+minicpm-v-4.7:1b --open-kernels <set>` installs the Q4_1 file as `model.gguf` with a text-only
+entry (`vlm: false`, no `vision` label); `oflm serve` logs `Qwen3.5 on the open kernels` and
+`config checked against the GGUF metadata (q4nx view)`, answers "The capital of France is
+Paris, ..." and `oflm-test --llm --model minicpm-v-4.7:1b --gen-lim 1500` passes 5 of 5 (both
+two-round conversations, streamed and not, and context retention). Logs:
+`.claude/plans/qwen35-gguf-run/` 15-24.
 
 ### OPEN-GGUF-QWEN35-SPEC: the spec a qwen35 GGUF derives
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py` `_qwen35_gguf`, `load.py`
