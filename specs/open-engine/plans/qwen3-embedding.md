@@ -115,3 +115,15 @@ Requirements: no new ones. SERVER-EMBED-QWEN3 and SERVER-RERANK gain the tags
 `qwen3-embedding:4b` and `qwen3-reranker:4b` (one line each in the tag table); OPEN-HIDDEN-STATE's
 procedure is run once per kernel set. The 4B CPU references skip SciFact (about 20 minutes per
 fp32 pass on this box) and keep the card, the ten fixed prompts and the reranker pairs.
+
+The two specs build the same kernels. They differ only in `vocab` / `real_vocab`; both round the
+head to 151680 rows, the 42 kernel sets (designs, build dirs, env) are identical, the generated
+kernel sources are identical, and the MLIR of every design that reads the spec (`dx.py`, its f32
+twin, `dx_attn.py`) is byte-identical under both. So the reranker's set was written by
+`export_qwen36_kernels.py --no-build` from the embedder export's build dirs, in 14 s instead of
+about 80 minutes. A plain export rebuilds it whenever wanted.
+
+The fp32 references reproduce both cards: the embedder's similarity matrix to 1e-6, the
+reranker's logit differences (6.32 and -14.42 for the first query) to within 0.12 of the printed
+6.44 and -14.38. The i1-Q4_1 weights are closer to fp32 at 4B than at 0.6B: on the CPU the card
+matrix moves by 0.0196, inside the 0.02 bar; NPU cosine to fp32 is 0.979 to 0.989.

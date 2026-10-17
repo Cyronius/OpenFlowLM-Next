@@ -48,6 +48,8 @@ embedding_backend_registry() {
         // Decoder LLMs on the open kernels (open_qwen36), read from GGUF (SERVER-EMBED-QWEN3, SERVER-RERANK).
         {"qwen3-embedding:0.6b",    EmbeddingBackend::OpenLlmEmbed},
         {"qwen3-reranker:0.6b",     EmbeddingBackend::OpenLlmRerank},
+        {"qwen3-embedding:4b",      EmbeddingBackend::OpenLlmEmbed},
+        {"qwen3-reranker:4b",       EmbeddingBackend::OpenLlmRerank},
     };
     return reg;
 }

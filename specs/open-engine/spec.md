@@ -4328,3 +4328,8 @@ error and the same on the CPU.
 
 Past the fixed prompts, with the KV sized 8192 as the server sizes it: prompts of 2048 and 6000
 tokens have cosine 0.99998 against the same weights on the CPU (i1-Q4_1 file).
+
+**Result 2026-10-17, 4B.** PASS for Qwen3-Embedding-4B (mradermacher's i1-Q4_1 file, the
+`Qwen3-Embedding-4B-NPU2` set): the same 14 prompts have cosine >= 0.99998 against the same weights
+on the CPU, and each ran twice bit-identically. Against transformers fp32 the vectors have cosine
+0.979 to 0.989.
