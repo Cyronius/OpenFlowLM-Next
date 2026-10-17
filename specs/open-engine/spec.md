@@ -4306,22 +4306,26 @@ Prefill is sequential (one `step()` per token): no GGUF kernel set carries the b
 
 **Procedure (manual):**
 1. Export the set: `python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/qwen3-embedding-0.6b.json` (WSL).
-2. CPU references: `ref_qwen3.py embed fp32` (transformers on the official safetensors, fp32,
-   last-token `last_hidden_state`) and `ref_qwen3.py embed gguf:<file>` (the GGUF's matmuls as the
-   q4_1 pool holds them: Q8_0 requantized by `std_perm_gguf`'s rule, scales narrowed to bf16 as
-   `gemv_q4` reads them, norms in bf16, the embedding rows exact). The scripts live in the item's run
-   directory; the fixed prompts are 10 id lists of 5 to 500 tokens ending in the end-of-text id
-   151643, plus the model card's four texts.
-3. `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --no-lm-head --hidden <prefix>
-   --prompts-file <prompts> --twice`: every prompt's vector has cosine >= 0.999 against the
-   reference through the same weights (step 2's GGUF one), and the second run of each prompt is
-   bit-identical to the first.
+2. CPU references with `utilities/qwen3-embed-ref/qwen3_ref.py` (its README has the full
+   commands): `texts`, then `embed fp32` (transformers on the official safetensors, fp32,
+   last-token `last_hidden_state`) and `embed gguf:<file>` (the GGUF's matmuls as the q4_1 pool
+   holds them: Q8_0 requantized by `std_perm_gguf`'s rule, scales narrowed to bf16 as `gemv_q4`
+   reads them, norms in bf16, the embedding rows exact; unit-tested in its `tests/`). The fixed
+   prompts are 10 id lists of 5 to 500 tokens ending in the end-of-text id 151643, plus the model
+   card's four texts; `prompts <out>` writes them as the CLI's prompt files.
+3. `open_qwen36_cli --model <dir with model.gguf> --kernels <set> --no-lm-head --hidden <out>/embed/h
+   --prompts-file <out>/embed/prompts.txt --twice`, then `qwen3_ref.py npu-embed <out>/embed --same
+   <tag>`: every prompt's vector has cosine >= 0.999 against the reference through the same
+   weights (step 2's GGUF one), and the CLI reports the second run of each prompt bit-identical to
+   the first.
 
 **Result 2026-10-17.** PASS on both embedder files tried. Against the same weights on the CPU,
 all 14 prompts (the ten fixed ones and the card's four texts) have cosine >= 0.99997 for
 mradermacher's i1-Q4_1 file and >= 0.99996 for Qwen's Q8_0 file (requantized to q4_1 on load), and
 the card's 2x2 similarity matrix is within 0.0013 of the CPU's. All 18 prompts run twice (the
-embedder's 14 and the reranker's 4) gave bit-identical vectors. The weights sit much further from
+embedder's 14 and the reranker's 4) gave bit-identical vectors on Qwen's Q8_0 and ggml-org's Q8_0
+files; the same 18 on the default i1-Q4_1 files, rerun through
+`utilities/qwen3-embed-ref`, were bit-identical too (run log `64-npu-twice-i1q41.log`). The weights sit much further from
 fp32 than the engine sits from the weights: against transformers fp32 the i1-Q4_1 vectors have
 cosine 0.964 to 0.985 (Q8_0 requantized: 0.910 to 0.953), which is the GGUF's own quantization
 error and the same on the CPU.
