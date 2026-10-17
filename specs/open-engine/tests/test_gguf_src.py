@@ -1,6 +1,5 @@
 # Traces: OPEN-FAMILY-HUNYUAN (canonical spec: specs/open-engine/spec.md)
-"""model/gguf_src.py packs model.gguf the way pools.cpp std_perm_gguf does. make_decode.py builds the
-NPU pools AND the fp64 reference from it, so a slice cannot see it drift; these checks can."""
+"""gguf_src.py must pack as pools.cpp does: a slice builds both its pools and its reference from it, so only this sees drift."""
 from __future__ import annotations
 
 import struct

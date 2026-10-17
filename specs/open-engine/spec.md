@@ -1097,9 +1097,9 @@ The NTK-alpha RoPE scaling is folded into one static base by the spec builder
 (OPEN-SPEC-DERIVE), so the position tables need nothing new.
 
 **Hy-MT2-1.8B** (hidden 2048, ff 6144, 16 heads over 4 kv) runs straight from the
-official GGUF, installed as `model.gguf` (GGUF-direct; its Q8_0 file is requantized
-to q4_1 at load, nothing is converted offline). The GGUF ties the head: it has no
-`output.weight`, so the head is `token_embd.weight`, whose 120818 rows `std_perm_gguf`
+official GGUF, installed as `model.gguf` (GGUF-direct; its Q8_0 and Q4_K_M files are
+requantized to q4_1 at load, nothing is converted offline). The GGUF ties the head: it has
+no `output.weight`, so the head is `token_embd.weight`, whose 120818 rows `std_perm_gguf`
 packs into the 120832-row (1888-band) pool with the remaining rows zero. A plan
 narrower than the file, or 64 or more rows wider, is refused. `oflm serve` routes
 `details.family: hunyuan` to the `HunYuan` adapter, which runs on the open kernels
@@ -1150,11 +1150,11 @@ measured.
 
 **Result 2026-10-16 (Hy-MT2-1.8B, `Hy-MT2-1.8B-Q4_K_M.gguf`, the file oflm-add picks by
 default):** installed from `tencent/Hy-MT2-1.8B-GGUF` by `oflm-add --open-kernels` (192 Q4_K and
-33 Q6_K tensors, the tied head among the Q6_K, all requantized to q4_1 at load), served from the
-same kernel set; `oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES en->zh on the same 100
-sentences: 39.07, against 38.63 for the Q8_0 file on the NPU and 39.52 for llama.cpp on the Q8_0
-file; both paired 95% intervals include zero. No slice (the reader takes Q4_0 / Q4_1 / Q8_0
-only), no German.
+33 Q6_K tensors, the tied head among the Q6_K; the matrices and the head are requantized to q4_1
+at load, the embedding lookup reads exact rows), served from the same kernel set;
+`oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES en->zh on the same 100 sentences: 39.07,
+against 38.63 for the Q8_0 file on the NPU and 39.52 for llama.cpp on the Q8_0 file; both paired
+95% intervals include zero. No slice (the reader takes Q4_0 / Q4_1 / Q8_0 only), no German.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
