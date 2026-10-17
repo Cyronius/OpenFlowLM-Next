@@ -165,8 +165,7 @@ if G.PTAB_CS_OFF != 512:
 if G.SCALE_ONE:
     ATTN_FLAGS.append("-DATTN_SCALE_ONE=1")
 if G.VNORM:
-    # the v norm's extra 1/sqrt put the 512-wide core 288 B over program memory with compiler-rt's
-    # soft float; the bit-identical integer routines (scalar_fp.h) take ~2 KB of it back
+    # soft float put the 512-wide core over program memory; the bit-identical integer routines fit
     ATTN_FLAGS += ["-DATTN_VNORM=1", "-DATTN_INTFP=1"]
 if G.ROPE_PAIR != G.ROT // 2:
     ATTN_FLAGS.append(f"-DATTN_ROPE_PAIR={G.ROPE_PAIR}")
@@ -498,8 +497,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # a family that does not block, or has no bias, must present IRON the exact function it
     # presented before. The bias fifo is the worker's SECOND argument, before the drains.
     if SHARED:
-        # no k / v work and no cache row to write: every core, core 0 included, takes the
-        # shape the extra cores always had, without the k / v scratch
+        # no k / v work: every core, core 0 included, takes the extra cores' shape without the k / v scratch
         def make_attn_body(c):
             h0 = c * NHL
             if RB > 1:
@@ -639,8 +637,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
             pa_in.fill(abias_p, a_consts, bt(L.CD_BYTES, L.CD_VB, KVW * 2))
         pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, 0, L.KV_ROW))                   # the window: rows [0, nf) (attnpos)
         if SHARED:
-            # row pos of the source layer's cache, which that layer wrote earlier this token;
-            # at offset KV_ROW it is the patch the plain design's row drain gets (attnpos)
+            # this position's row, which the source layer wrote this token; at KV_ROW it takes the row drain's patch
             pa_in.fill(ain_p, a_kv, bt(L.KV_BYTES, L.KV_ROW, L.KV_ROW))
         # 4. o projection against og
         if stop >= 2:

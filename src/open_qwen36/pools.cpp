@@ -547,8 +547,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             fail(name + " is " + std::to_string(n) + " B, the plan needs " +
                  std::to_string(static_cast<uint64_t>(out_dim) * nb * blk));
         bounds(op, op.nch * ch, dst_bytes);
-        // The pool's chunk picks the scale planes: 6144 B holds them f32 (widened exactly), 5120 B
-        // bf16 (narrowed RNE, the same bits the kernel's own narrowing of the f32 plane gives).
+        // 5120 B chunks take bf16 scales narrowed RNE: the bits the kernel's own narrowing of an f32 plane gives
         const bool b16 = ch == Q4_CHUNK;
         if (!b16 && ch != 6144) fail("std_perm_gguf " + name + ": a " + std::to_string(ch) + " B pool chunk (5120 or 6144)");
         const size_t m_off = b16 ? 512 : 1024, c_off = b16 ? 1024 : 2048;
@@ -848,9 +847,7 @@ static int mrope_axis(size_t i, const std::vector<int>& section, bool interleave
 void build_ptab_record(const Manifest& m, const RowGlobal& g, size_t row, const double pos[3],
                        const std::vector<int>& section, bool interleaved, uint8_t* r) {
     // RoPE over the first rotary_dim dims of a head, half-split pairs (i, i + rot/2), the recipe's theta:
-    // [i32 pos | i32 nf | cos f32[rot/2] @cs_off | sin f32[rot/2] right after] (attn.h reads [cos | sin] at
-    // ATTN_PTAB_CS_OFF, 512 unless that straddles two fifo elements). The table's own rotary width is its
-    // inv_freq's (m.rotary_dim / 2 for every family but Gemma 4, whose two kinds rotate different widths).
+    // [i32 pos | i32 nf | cos f32[rot/2] @cs_off | sin f32[rot/2] right after], rot/2 = the table's own inv_freq count
     const size_t half = g.inv_freq.size();
     const size_t cs = static_cast<size_t>(g.cs_off);
     const size_t row_bytes = g.per_row ? static_cast<size_t>(g.per_row) : m.ptab_row;

@@ -786,8 +786,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Gemma 4 E4B (OPEN-FAMILY-GEMMA4): KV-shared layers, two attention kinds of different widths,
-    // the per-layer inputs and the soft cap
+    // Gemma 4 E4B (OPEN-FAMILY-GEMMA4): KV-shared layers, two attention widths, per-layer inputs, soft cap
     if (argc >= 8) {
         try {
             Manifest g = Manifest::load(argv[7]);
