@@ -3144,6 +3144,10 @@ in order, with natural drains. Cost: `(2 (L - 1) + 1) N` single-layer dispatches
   replaying the schedule on a model of the cache rows, every kept dispatch reads each other image row
   exactly once and the rows end in natural order (blocks of 1, 2, 3, 7 and 256 at positions 0, 5, 900,
   1100, global and 1024-row local layers); a 256-token layer is 511 dispatches and 255 row copies.
+- `tests/test_gemma3_images.py`: the replica's mask (`replica_gemma3_image.allowed`) is transformers' own
+  `create_masks_for_vision_model` on a prompt with two images, for the global and the sliding layers
+  (windows 1024 and 4); an image reads itself both ways, earlier images and text causally, never a later
+  image; `--mask causal` is plain causal.
 - `vit_test --siglip` (ctest `OPEN-VISION-GEMMA3-TOWER-up` / `-down`): a small random SigLIP and Gemma 3
   projector built by transformers and written as an mmproj GGUF in each naming convention
   (`open_kernels/model/gemma3_vision_ref.py tiny`): tower and projected rows at per-row cosine > 0.99999
