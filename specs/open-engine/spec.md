@@ -4325,3 +4325,6 @@ embedder's 14 and the reranker's 4) gave bit-identical vectors. The weights sit 
 fp32 than the engine sits from the weights: against transformers fp32 the i1-Q4_1 vectors have
 cosine 0.964 to 0.985 (Q8_0 requantized: 0.910 to 0.953), which is the GGUF's own quantization
 error and the same on the CPU.
+
+Past the fixed prompts, with the KV sized 8192 as the server sizes it: prompts of 2048 and 6000
+tokens have cosine 0.99998 against the same weights on the CPU (i1-Q4_1 file).
