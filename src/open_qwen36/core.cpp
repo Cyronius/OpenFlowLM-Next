@@ -192,8 +192,7 @@ nlohmann::json derive_config(const GgufFile& g) {
             g.kv_has(arch + ".embedding_length_per_layer_input") ? u("embedding_length_per_layer_input") : 0;
         c["final_logit_softcapping"] = g.kv_f64(arch + ".final_logit_softcapping");
         if (!c.contains("num_key_value_heads")) {
-            // a global layer's q is head_count heads of key_length; the k projection's rows give each kind's kv
-            // heads, and a global layer without attn_v takes v from k (attention_k_eq_v)
+            // a global layer's q is head_count x key_length wide; one without attn_v is K = V
             const uint64_t nh = u("attention.head_count"), hd = u("attention.key_length_swa"),
                            ghd = u("attention.key_length"), n = u("block_count");
             for (uint64_t l = 0; l < n; ++l) {
