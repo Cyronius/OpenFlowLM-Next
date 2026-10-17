@@ -161,6 +161,10 @@ for either reason.
   has been measured (nothing ran under `dibs run --measure`).
 - Results 2026-10-16: E4B `oflm-test --llm` 5 of 5, `--tools` 14 of the 15 checks reached. E2B
   `oflm-test --llm` 5 of 5.
+- The 12B (2026-10-17, tag `gemma4-it-open:12b`): `oflm-test --llm --gen-lim 256` does not fit 15 minutes
+  (three checks reached, all pass); `--gen-lim 128` passes 5 of 5 in about 10. `--tools` non-stream: L1 to
+  L4 pass, the loop (L5) cut by the budget after its lookup call. Session script:
+  `C:\models\gemma4-12b\scripts\serve_session2.sh` (probe, image refusal, probe, the oflm-test runs).
 - Garbled arithmetic in an answer ("$64 - $6", an answer that stops mid-sum) points at the sampler
   first: `Gemma4e::load_model` sets frequency and presence penalties of 1.0 over the last 64 tokens,
   which push down digits already written. Replay with `"frequency_penalty": 0, "presence_penalty": 0`

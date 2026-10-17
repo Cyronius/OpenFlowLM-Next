@@ -1223,6 +1223,15 @@ hung on the first global layer's second token (ERT state 8, no standby in the ev
 patch strode the global kind's 2048-byte position table by the layout's 4096, so position 1 read record
 2, whose row count the stream did not carry.
 
+**Result 2026-10-17 (serve, 12B):** `oflm-add` of a local directory (the GGUF beside google/gemma-4-12B-it's
+text files, `--open-kernels` the exported set) registers `gemma4-it-open:12b` text only, with no vision or
+audio label. `oflm serve` runs it on the open kernels and answers "The capital of France is Paris."
+(finish_reason stop) before and after an image request, which gets HTTP 400 while the server log names
+the text-only reason. `oflm-test --llm --gen-lim 128` passes 5 of 5, context retention included; at
+`--gen-lim 256` the 15-minute budget reached three checks, all passing. `oflm-test --tools`, non-stream
+only for the same budget: L1 to L4 pass (a basic and an inferred call, restraint, two parallel calls); the
+tool loop (L5) had made its lookup call when the budget ran out.
+
 **Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
 soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split
 record and the full rotation); with `ATTN_INTFP` (bit-identical integer routines) and one shared RMS helper
