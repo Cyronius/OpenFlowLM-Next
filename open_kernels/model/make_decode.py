@@ -30,6 +30,7 @@ masquerade as a numerical one -- it is printed when it happens.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -193,13 +194,18 @@ def main() -> int:
     if q8_pat:
         print(f"  {len(q8_pat)} projection(s) streamed at q8: {sorted(spec.q8_roles)}")
     q.hidden = spec.hidden
-    # granite: <|start_of_role|>, the token every turn of its template opens
-    # with -- NOT config.json's bos_token_id, which is 100283 = '</documents>'
-    # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
-    tok0 = a.token if a.token is not None else {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
-                                                "llama3": 128000, "gemma3": 2, "hunyuan": 127958,
-                                                "granite": 100264, "phi3": 200021,
-                                                "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
+    if a.token is not None:
+        tok0 = a.token
+    elif spec.family == "hunyuan":      # the sizes' vocabularies differ: bos is 127958 on the 7B, 120000 on the 1.8B
+        tok0 = json.loads((md / "config.json").read_text(encoding="utf-8"))["bos_token_id"]
+    else:
+        # granite: <|start_of_role|>, the token every turn of its template opens
+        # with -- NOT config.json's bos_token_id, which is 100283 = '</documents>'
+        # and disagrees with tokenizer_config.json's own bos (<|end_of_text|>).
+        tok0 = {"qwen36moe": 248045, "qwen35": 248045, "qwen3": 151644,
+                "llama3": 128000, "gemma3": 2,
+                "granite": 100264, "phi3": 200021,
+                "qwen2": 151644}[spec.family]     # <|im_start|>, as Qwen3
     print(f"{md.name} ({spec.family}): {spec.num_layers} layers -> running {nl}: {types}")
 
     if not a.cfg_only:
