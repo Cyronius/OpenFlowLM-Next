@@ -33,9 +33,7 @@
 // Elements: the attention core's fifo element is ONE cache-row half, E_A = KVH * HD bf16
 // bytes (1 KB for the 27B, 2 KB for Qwen3-4B). So a q / k / v / gate element of fp32 heads
 // carries kHPE = KVH/2 heads, an og element kHPO = KVH heads, and a cache row is two elements
-// (K_t, V_t). With ONE kv head (ATTN_KVH 1) a row half cannot hold an fp32 head, so the
-// element is the whole cache row [K_t | V_t] = HD * 4 bytes: one head per q / k / v element,
-// one element per cached row. meta = two elements: [qn bf16[HD] @0 | kn @HD*2 | sinks bf16[NH] @4*HD, only
+// (K_t, V_t). meta = two elements: [qn bf16[HD] @0 | kn @HD*2 | sinks bf16[NH] @4*HD, only
 // with ATTN_SINK] (per layer) and the position
 // record [int32 pos @0 | int32 nf @4 | cos f32[ROT/2] @512 | sin f32[ROT/2] @512 + 2*ROT]
 // (ptab row pos; nf = the number of cache rows streamed). pb (int32[4]) = [pos, nf, rows seen]:
@@ -150,7 +148,8 @@ static constexpr unsigned kQW = kNH * kHD;   // q, stored PRE-SPLIT: [hi bf16[QW
 #define ATTN_QT float
 #endif
 #if ATTN_KVH == 1
-static constexpr unsigned kEA = kHD * 4;      // one fifo element: a whole KV cache row, one fp32 head
+// one kv head: half a cache row cannot hold an fp32 head, so the element is the whole row [K_t | V_t]
+static constexpr unsigned kEA = kHD * 4;
 static constexpr unsigned kHPE = 1;
 static constexpr unsigned kHPO = 2;
 static_assert(kHD % kV == 0 && kRot % kV == 0 && kRot <= kHD && kNH % kHPO == 0,
@@ -293,9 +292,9 @@ static inline void attn_meta_impl(const uint8_t *__restrict m0, const uint8_t *_
 #endif
   // cos[ROT/2] then sin[ROT/2], one contiguous 4 * ROT block at record offset 512. On a
   // family whose element is narrower than the record that block sits in a later element,
-  // which the design hands over as m2 (the recipe checks it does not straddle two) -- except
-  // with one kv head, where the block runs from m1 into m2.
+  // which the design hands over as m2 (the recipe checks it does not straddle two).
 #if ATTN_PTAB_SPLIT && ATTN_KVH == 1
+  // one kv head: the block runs from m1 into m2
   static_assert(kEA % 128 == 0 && 512 + 4 * kRot <= 2 * kEA, "attn.h: the record is two elements");
   for (unsigned j = 0; j < kRot; j += kV) {
     const unsigned o = 512 + 4 * j;    // a 32-lane vector never crosses the element boundary

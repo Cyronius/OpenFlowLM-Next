@@ -122,9 +122,7 @@ def qkv_bias(spec: ModelSpec) -> bool:
 
 
 def attn_elem(spec: ModelSpec) -> int:
-    """The attention core's fifo element: half a KV cache row (KVH * HD bf16). With ONE kv
-    head that is too narrow for an fp32 head, so the element is the whole row [K_t | V_t]
-    (attn.h's ATTN_KVH 1)."""
+    """The attention fifo element: half a KV cache row, or the whole row at one kv head (attn.h ATTN_KVH 1)."""
     if spec.num_kv_heads == 1:
         return spec.head_dim * 4
     return spec.num_kv_heads * spec.head_dim * 2
@@ -144,8 +142,7 @@ def _ptab_check(spec: ModelSpec, e_a: int) -> None:
     read cos / sin at a fixed offset into the one element it acquired. At 2 kv heads and
     head dim 128 the element is 512 B and the record 1024, which would have desynchronised
     the whole stream by an element. attn.h's ATTN_PTAB_SPLIT covers the case; these are its
-    limits. With one kv head cos / sin may run across the record's two elements, which
-    attn.h reads vector by vector."""
+    limits."""
     row = _ptab_row(spec)
     if row % e_a:
         raise OpRangeError(f"dense: a {row}-byte position record is not a whole number of "
@@ -153,6 +150,7 @@ def _ptab_check(spec: ModelSpec, e_a: int) -> None:
     if row // e_a > 2:
         raise OpRangeError(f"dense: a {row}-byte position record spans {row // e_a} "
                            f"{e_a}-byte elements; attn.h handles one or two")
+    # one kv head: cos / sin may cross into the second element, which attn.h reads vector by vector
     if spec.num_kv_heads != 1 and 512 // e_a != (512 + 4 * spec.rotary_dim - 1) // e_a:
         raise OpRangeError(f"dense: cos / sin straddle two {e_a}-byte attention elements "
                            f"(record offsets 512 to {512 + 4 * spec.rotary_dim})")

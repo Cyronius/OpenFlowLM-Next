@@ -33,6 +33,8 @@ PY
 )"
 fi
 PEANO=${PEANO//\\//}; HDR=${HDR//\\//}
+"$PEANO/bin/clang++" --version > /dev/null 2>&1 || { echo "cannot run '$PEANO/bin/clang++': activate the mlir-aie environment or set PEANO"; exit 2; }
+[ -d "$HDR" ] || { echo "no AIE headers at '$HDR': activate the mlir-aie environment or set HDR"; exit 2; }
 OUT=$W/.claude/tmp/ppcheck
 rm -rf "$OUT"; mkdir -p "$OUT/old/attn" "$OUT/old/include"
 if [ -n "$OLD_DIR" ]; then
@@ -61,6 +63,8 @@ Q36RB1="-DATTN_NH=16 -DATTN_KVH=2 -DATTN_HD=256 -DATTN_ROT=64 -DATTN_GATE=1 -DAT
 
 SETS=("gemma3-4b|$G3" "qwen3-4b|$Q3" "qwen35-9b|$Q35" "qwen36-rb1|$Q36RB1")
 if [ -n "$ALL_SPECS" ]; then
+  # a spec whose flags cannot be computed fails the run rather than dropping out of it
+  flag_lines=$(${PYTHON:-python} "$W/utilities/attn_flags.py") || { echo "attn_flags.py failed (see above)"; exit 2; }
   declare -A SEEN
   while IFS= read -r l; do
     tag=${l%%|*}
@@ -70,13 +74,18 @@ if [ -n "$ALL_SPECS" ]; then
     [ -n "${SEEN[${l#*|}]}" ] && { echo "same flags as ${SEEN[${l#*|}]}: $tag"; continue; }
     SEEN[${l#*|}]=$tag
     SETS+=("spec-$l")
-  done < <(${PYTHON:-python} "$W/utilities/attn_flags.py")
+  done <<< "$flag_lines"
 fi
 
 one() {   # one TU at one flag set: preprocess both trees, compare token streams
   local tag=$1 tu=$2 flags=$3
-  "$CLANG" -E -P $(base "$OUT/old/include") -I"$OUT/old/attn" $flags "$OUT/old/attn/$tu.cc" -o "$OUT/$tag.$tu.old.i"
-  "$CLANG" -E -P $(base "$W/open_kernels/include") -I"$W/open_kernels/designs/attn" $flags "$W/open_kernels/designs/attn/$tu.cc" -o "$OUT/$tag.$tu.new.i"
+  # xargs' child shells do not inherit set -e: a failed preprocess must not compare two empty streams
+  if ! "$CLANG" -E -P $(base "$OUT/old/include") -I"$OUT/old/attn" $flags "$OUT/old/attn/$tu.cc" -o "$OUT/$tag.$tu.old.i" ||
+     ! "$CLANG" -E -P $(base "$W/open_kernels/include") -I"$W/open_kernels/designs/attn" $flags "$W/open_kernels/designs/attn/$tu.cc" -o "$OUT/$tag.$tu.new.i" ||
+     [ ! -s "$OUT/$tag.$tu.old.i" ] || [ ! -s "$OUT/$tag.$tu.new.i" ]; then
+    echo "ERROR      $tag  $tu  (the preprocessor failed)"
+    return 1
+  fi
   if cmp -s <(tr -s ' \t\r\n' '\n' < "$OUT/$tag.$tu.old.i") <(tr -s ' \t\r\n' '\n' < "$OUT/$tag.$tu.new.i"); then
     echo "identical  $tag  $tu"
   else
@@ -85,6 +94,8 @@ one() {   # one TU at one flag set: preprocess both trees, compare token streams
 }
 export -f one base
 export CLANG OUT W HDR
+set -o pipefail
+status=0
 for name in "${SETS[@]}"; do
   tag=${name%%|*}; flags=${name#*|}
   for tu in attn_meta attn_q attn_k attn_v attn_init attn_fin attn_fin_ng attn_step attn_step_new attn_stepb attn_stepb_new; do
@@ -92,7 +103,11 @@ for name in "${SETS[@]}"; do
     if [ $tu = attn_stepb_new ]; then case "$flags" in *ATTN_BLOCK_ONLY=1*) ;; *) continue;; esac; fi
     printf '%s\t%s\t%s\n' "$tag" "$tu" "$flags"
   done
-done | xargs -d '\n' -P "${JOBS:-8}" -n 1 bash -c 'IFS=$(printf "\t") read -r a b c <<< "$1"; one "$a" "$b" "$c"' _ | tee "$OUT/result.txt"
-n=$(wc -l < "$OUT/result.txt")
+done | xargs -d '\n' -P "${JOBS:-8}" -n 1 bash -c 'IFS=$(printf "\t") read -r a b c <<< "$1"; one "$a" "$b" "$c"' _ | tee "$OUT/result.txt" || status=1
+n=$(grep -c "^identical\|^DIFFERENT" "$OUT/result.txt" || true)
 echo "$n TUs compared against $REF"
+if [ $status != 0 ] || grep -q "^ERROR" "$OUT/result.txt"; then
+  echo "FAILED: $(grep -c "^ERROR" "$OUT/result.txt" || true) translation unit(s) did not preprocess"
+  exit 1
+fi
 ! grep -q "^DIFFERENT" "$OUT/result.txt"

@@ -1,10 +1,5 @@
 # Traces: OPEN-ATTN-ONE-KV-HEAD (canonical spec: specs/open-engine/spec.md)
-"""The attention stream's element accounting with ONE kv head (Gemma 3 1B, Gemma 4).
-
-A row half of the KV cache is KVH * HD bf16, which at one kv head cannot hold one fp32
-head; the element is the whole row instead, and everything the core acquires is counted
-in those elements. The shipped families (all with an even kv count) must not move.
-"""
+"""The attention stream's element accounting with ONE kv head (Gemma 3 1B, Gemma 4)."""
 from __future__ import annotations
 
 import dataclasses
@@ -62,9 +57,13 @@ def test_an_odd_kv_count_above_one_is_still_refused(monkeypatch):
         DR.recipe(spec)
 
 
-def test_the_block_prefill_route_is_left_out():
+@pytest.mark.parametrize("rot, ptab_elems", [(256, 2), (64, 1)])
+def test_the_block_prefill_route_is_left_out(rot, ptab_elems):
+    """At rotary dim 64 the position record is one element, so only the one-kv-head check refuses the route."""
     spec = ModelSpec.from_hf_config(ONE_KV)
-    assert DR.gemm_route(dataclasses.replace(spec, sliding_window=0, layer_types=("dense",) * spec.num_layers)) is None
+    spec = dataclasses.replace(spec, rotary_dim=rot, sliding_window=0, layer_types=("dense",) * spec.num_layers)
+    assert DR.geometry(spec).PTAB_ELEMS == ptab_elems
+    assert DR.gemm_route(spec) is None
 
 
 @pytest.mark.parametrize("name", sorted(FAMILIES))
