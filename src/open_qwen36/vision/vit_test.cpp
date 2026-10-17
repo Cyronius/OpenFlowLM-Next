@@ -188,7 +188,7 @@ static int deepstack_test(const std::string& md, const std::string& fx, int head
 /// against transformers on the same weights and pixels.
 ///   python open_kernels/model/replica_siglip.py --fixture FX [--mmproj FILE --hf DIR]
 ///   vit_test --siglip FX/mmproj.gguf FX      (a real mmproj: vit_test --siglip FILE FX)
-static int siglip_test(const std::string& mmproj, const std::string& fx) {
+static int siglip_test(const std::string& mmproj, const std::string& fx, const std::string& dump = "") {
     using namespace open_qwen36::vision;
     const VitConfig cfg = VitConfig::siglip_from_gguf(mmproj);
     std::printf("from the mmproj: %d blocks x %d, %d heads x %d, MLP %d, %d px / %d px patches, pool %d -> %d tokens x %d\n",
@@ -207,6 +207,11 @@ static int siglip_test(const std::string& mmproj, const std::string& fx) {
     std::vector<float> tower;
     const std::vector<float> y = siglip_forward(cfg, w, patches.data(), &tower);
     std::printf("forward in %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (!dump.empty()) {
+        std::ofstream f(dump, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(y.data()), static_cast<std::streamsize>(y.size() * 4));
+        std::printf("wrote the projected rows to %s\n", dump.c_str());
+    }
     auto compare = [&](const std::vector<float>& got, const std::string& path, size_t width, const char* label) {
         const std::vector<float> ref = read_f32(path);
         if (got.size() != ref.size() || got.size() % width) {
@@ -258,7 +263,7 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::string(argv[1]) == "--configs") return config_tests(argv[2]);
     if (argc >= 6 && std::string(argv[1]) == "--deepstack")
         return deepstack_test(argv[2], argv[3], std::atoi(argv[4]), parse_ints(argv[5]));
-    if (argc >= 4 && std::string(argv[1]) == "--siglip") return siglip_test(argv[2], argv[3]);
+    if (argc >= 4 && std::string(argv[1]) == "--siglip") return siglip_test(argv[2], argv[3], argc >= 5 ? argv[4] : "");
     const bool windowed = argc >= 4 && std::string(argv[1]) == "--windowed";
     if (argc < 3) {
         std::fprintf(stderr, "usage: vit_test <model_dir> <fixture_dir> | vit_test --windowed <model_dir> <fixture_dir>"
