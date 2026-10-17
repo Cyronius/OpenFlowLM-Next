@@ -37,6 +37,15 @@ Where it can go, given what the GGUF route has:
 - **The batched prefill route.** A GGUF kernel set carries none (its GEMMs read only the
   bf16-scale pool; `recipes/dense.py` emits no `gemm_block` for `q4_1_f32`). Bringing it back is
   kernel work (f32-scale GEMM twins). Not taken.
+  The maintainer's `upstream/feat/gemma3-block-prefill` (read 2026-10-17, review follow-up; not
+  on main) gives the q4nx 4B set that route: per layer, batched q/k/v, o and FFN GEMMs and one
+  `dxB` attention dispatch per token (`dxB_local` on the sliding layers). It does not change this
+  choice. The GGUF set still has no `gemm_block`, and the image block only uses each layer's
+  sequential `program` (`bidir_block_ok` checks that one, never the route), so the two do not
+  collide when it lands. Its shape suits the image block well later: if the q/k/v GEMM writes all
+  N image rows' K/V before the N `dxB` dispatches, each dispatch only needs its window patched to
+  the block's end. That is one batched pass per layer instead of two decode passes. It needs the
+  f32-scale GEMM twins first.
 - **Host attention for the image block.** The dense layer is ONE fused dispatch (`dx`: norms,
   projections, attention, FFN). Splitting attention out needs a new kernel program. Not taken.
 - **Taken: the decode kernel, run twice per image token, layer by layer.** No kernel change.

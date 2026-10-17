@@ -23,7 +23,7 @@ description: Run images through Gemma 3 4B (gemma3:4b, MedGemma, TranslateGemma)
 - **NaN in every layer of the 4B GGUF = the per-call bug** (OPEN-GGUF-TWIN-PER-CALL). The f32-scale
   `dx_f32` fits one 6 KB chunk per call where the q4nx `dx` fits two, and the shared generated GEMV
   wrappers used to say two. A kernel set exported before that fix is wrong for the 4B (and for K2
-  Horizon 3.7B and Qwen2.5 3B): re-export `dx_f32`. Dump layer 0's act scratch (`--layers 1
+  Horizon 3.7B and Qwen2.5 3B, whose fixed `dx_f32` has not yet been exported or run): re-export `dx_f32`. Dump layer 0's act scratch (`--layers 1
   --dump-act 0:0:135168:<file>`): a sane `xn` and a `q` of 1e30 is this.
 - **Test the image schedule on the 1B first.** Its GGUF route is proven, so 64 injected rows past its
   512-row window, both ways and causal against the 1B replica, isolate the schedule from the 4B's
@@ -34,7 +34,16 @@ description: Run images through Gemma 3 4B (gemma3:4b, MedGemma, TranslateGemma)
 - **Google's mmproj is not the QAT checkpoint's.** In `google/gemma-3-4b-it-qat-q4_0-gguf` the tower
   matches `google/gemma-3-4b-it-qat-q4_0-unquantized` but the projector differs (soft-embedding norm up
   to 0.008, projection up to 5e-4). ggml-org's `gemma-3-4b-it-qat-GGUF` mmproj matches it to f16
-  rounding. Compare a port against the checkpoint its file came from.
+  rounding. Compare a port against the checkpoint its file came from. So `vit_test --siglip` on
+  Google's file fails its projected rows (0.99998) against the QAT checkpoint; to check the port on
+  that file, build the projector in numpy from the file's own weights and compare the port's rows to
+  it: `python utilities/gemma3_projector_check.py <mmproj> FX/tower.bin <port's rows>`.
+- **Install with `--open-kernels`.** `oflm-add` cannot find a GGUF install's kernel set by spec hash
+  (the base repo's `config.json` has no `head_dim`, and the hash reads `model.q4nx`), and no Gemma 3
+  set ships yet. Export the 4B set and pass its `open_kernels` directory.
+- **MedGemma needs more than Google's terms.** `Atomic-Germ/medgemma-4b-it-NPU2` has no
+  `tokenizer_config.json` (404), so `oflm-add` gets no template that reads `message['images']`.
+  Accept the terms for the tokenizer and also supply that template, or the image never reaches the model.
 - **Google's own 4B GGUF does not load today.** Its head (the tied F16 embedding) has 262144 rows;
   the kernel set and the HF config say 262208 (64 padding rows the converter trimmed), so the
   config check derives vocab 262144 and the packer refuses the short head. ggml-org's QAT Q4_0 file

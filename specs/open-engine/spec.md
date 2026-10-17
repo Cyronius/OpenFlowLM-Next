@@ -2421,6 +2421,9 @@ padded (the host chain normalises by the buffer width).
   `text_config` supplies the language model's keys before the GGUF metadata does; and a vocabulary
   that is the file's own token count and embedding rows but short of the kernel set's passes the
   config check as the kernel set's (OPEN-VISION-GEMMA3).
+- A short numeric metadata array (`clip.vision.image_mean`) reads through `kv_str` as its values
+  joined by commas, and `kv_u64` / `kv_f64` refuse it by name rather than return its first element:
+  a per-layer `head_count_kv` is never taken as one number (`gguf_pack_test`).
 - An F16 source whose blocks are exactly q4_1 at fp16 scales re-quantizes back exactly, padded
   columns zero (Gemma 3's tied F16 embedding is the head).
 - `embed_row` zero-extends to a wider buffer and refuses a narrower one; `pack_norm` likewise.
@@ -2457,9 +2460,14 @@ replica.
 0's `q` at 1e30 from a sane `xn`). After it: the 4B's `dx` re-exports stamps-only and `dx_f32`
 differs (`insts.bin` byte-identical, the xclbin not); the 1B's `dx` and `dx_f32` match round 1's set
 stamps-only; the dense MLIR of all 13 dense specs (36 designs) is unchanged; and the 4B's text prompt
-matches the replica at correlation 0.999992 with the same top 5. K2 Horizon 3.7B and Qwen2.5 3B, the
-other two specs it reaches, were not run. Logs (`.claude/plans/gemma3-images-run/`):
-`30-probe-cli-model-l1.log`, `31-mlir-diff.log`, `32-export-check.log`, `16-npu-text.log`, `29-npu-cmp.log`.
+matches the replica at correlation 0.999992 with the same top 5. The MLIR diff cannot show the
+change (it is a compile define on the kernel C++), so it says nothing about the GEMV objects. For the
+nine specs whose two views agree the define equals the old one, so their source text, and therefore
+their objects, are unchanged by construction. **K2 Horizon 3.7B's and Qwen2.5 3B's `dx_f32` do
+change** (one chunk per call where the generated source said two, `46-per-call-by-spec.log`), and
+neither has been re-exported or run since; both are unvalidated. Logs
+(`.claude/plans/gemma3-images-run/`): `30-probe-cli-model-l1.log`, `31-mlir-diff.log`,
+`32-export-check.log`, `46-per-call-by-spec.log`, `16-npu-text.log`, `29-npu-cmp.log`.
 
 ### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
@@ -3212,9 +3220,13 @@ in order, with natural drains. Cost: `(2 (L - 1) + 1) N` single-layer dispatches
    `oflm-test --vision --model gemma3:4b`; and one image request with `mmproj.gguf` moved aside,
    which must be refused by name.
 
-**Result 2026-10-17 (the image path, one 896 px image and a 275-token prompt):** the host tower
-matches transformers fp32 at worst per-row cosine 0.9999984 (4096 tower rows) and 0.99999997 (256
-projected rows), on the CLI too. The both-ways replica is within 0.30 nats of llama.cpp on llama.cpp's
+**Result 2026-10-17 (the image path, one 896 px image and a 275-token prompt):** with ggml-org's
+QAT mmproj the host tower matches transformers fp32 at worst per-row cosine 0.9999984 (4096 tower
+rows) and 0.99999997 (256 projected rows), on the CLI too. Google's mmproj, the one `gemma3:4b` is
+served with, has the same tower but a projector that differs from the QAT checkpoint, so step 1 fails
+on its projected rows (0.99998324, `09-siglip-real-port.log`). The port is not the cause: a numpy
+projector built from Google's own mmproj weights matches the port's rows at 0.99999997 and reproduces
+the 0.99998324 against transformers (`44-google-projector-check.log`). The both-ways replica is within 0.30 nats of llama.cpp on llama.cpp's
 top 20 at the first answer position, the causal one 1.09; their top two are a near tie (0.22 nats)
 that they order differently. The schedule on the 1B, 64 rows past its window: correlation at least
 0.999992 against the both-ways replica at all 11 positions after the block, 0.90 against the causal
@@ -3231,7 +3243,12 @@ load logs `Gemma 3 on the open kernels` and the tower from `mmproj.gguf`; one im
 answer quotes the whole sentence but writes `nation’s` with a typographic apostrophe, which the
 check's pattern does not accept. With `mmproj.gguf` moved aside the image request is refused with
 the message naming the file and `OFLM_GEMMA_ENGINE=closed`; nothing reaches the closed DLL. Logs:
-`30-serve.log`, `30-chat.json`, `31-oflm-test-vision.log`, `36-noproj-serve.log`.
+`30-serve.log`, `30-chat.json`, `31-oflm-test-vision.log`, `36-noproj-serve.log`. Trimmed: the served
+install came from a local copy of the repo with `--open-kernels`. A second `oflm-add` from Hugging
+Face fetched `model.gguf`, `mmproj.gguf` and the template byte-identical to the served ones
+(`45-oflm-add-hf-download.log`), but it still needed `--open-kernels`: finding the set by spec hash
+does not work for a GGUF install (its `config.json` has no `head_dim`, and the hash reads
+`model.q4nx`), and no Gemma 3 kernel set ships, so today a clone exports its own.
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
