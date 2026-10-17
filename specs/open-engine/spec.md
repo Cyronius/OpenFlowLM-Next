@@ -1074,8 +1074,8 @@ engine -- the open one has no vision path.
 
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
-### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B (text) on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `utilities/oflm-add`)
+### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B / 12B (text) on the dense recipe
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `src/common/AutoModel/modeling_gemma4_12b.cpp`, `utilities/oflm-add`)
 **Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
 
 Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
@@ -1110,6 +1110,13 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
   engine declines it for a model directory without a `model.gguf` (or with a `model.q4nx` beside it),
   and the official container stays on the closed engine.
+- **The 12B** (Google's `gemma-4-12b-it-qat-q4_0.gguf`; transformers' `gemma4_unified`) has no
+  per-layer inputs and no KV sharing, so it is two kinds, sliding and global. Its global layers have
+  one kv head and no v projection (`attention_k_eq_v`): v is the raw k projection, taken before the k
+  norm and RoPE, then the weightless v norm, so the cache still holds two different tensors. The pack
+  plan streams `attn_k` into the v slot as well, and the attention kernel's v path does the rest. The
+  layer output scalar is applied on the host after every layer without the per-layer-input stage.
+  The `gemma4-12b` adapter selects the open engine the same way, text only.
 
 **Acceptance criteria (unit):**
 - The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
@@ -1131,7 +1138,15 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   kinds, whose 1024-byte fifo element cannot hold 512 + 1024 bytes), record elements, no k / v pool
   on a shared kind. Every other family keeps the attention defaults, so its build line does not
   change.
-- `attention_k_eq_v` (the 12B), the MoE block and bidirectional attention are refused by name.
+- The 12B: its GGUF (which lists `head_count_kv` per layer) and its `gemma4_unified` config derive the
+  same spec, `recipes/specs/gemma4-12b.json`: 48 layers, hidden 3840, ff 15360, 16 heads over 8 kv on
+  the sliding layers and over 1 on the global ones (5, 11, ..., 47), K = V, no per-layer input, no
+  shared layer. The global kind's v projection reads `attn_k` (the file has no `attn_v` for those
+  layers); the manifest has no `ple` stage but keeps `layer_scalar`; its config check names
+  `num_global_key_value_heads` and `attention_k_eq_v` and accepts the `gemma4_unified` model types,
+  while the E-series' checks and model types are unchanged.
+- The MoE block and bidirectional attention over text (`use_bidirectional_attention: "all"`) are
+  refused by name; `"vision"` (image tokens only) is accepted for text decode.
 - The E4B manifest reads GGUF-only (`Manifest::reads_gguf_only`, `manifest_test`); none of the other
   fixtures' manifests does.
 

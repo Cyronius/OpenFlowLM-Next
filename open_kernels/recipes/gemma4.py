@@ -1,5 +1,5 @@
-"""Gemma 4 E2B / E4B (text): Gemma 3's dense layer -- sandwich norms, GeGLU-tanh, sliding and global
-layers -- with five changes, every one a property of the family:
+"""Gemma 4 E2B / E4B / 12B (text): Gemma 3's dense layer -- sandwich norms, GeGLU-tanh, sliding and global
+layers -- with these changes, every one a property of the family:
 
 - global layers have 512-wide heads that rotate only their first quarter, each pair spanning the head
   (`proportional` RoPE: pairs (i, i + HD/2) for i < ROT/2, frequencies theta^(-2i/HD)); so a sliding and
@@ -10,7 +10,10 @@ layers -- with five changes, every one a property of the family:
   that layer's newest row included (`kv_sources`), so their dx build has no k / v projection at all;
 - E2B doubles the FFN width in those KV-shared layers;
 - each layer ends with a per-layer input gated into the residual and a per-layer scalar, and the logits are
-  soft-capped -- all three on the host, from the manifest's `ple`, `layer_scalar` and `logit_softcap`.
+  soft-capped -- all three on the host, from the manifest's `ple`, `layer_scalar` and `logit_softcap`;
+- the 12B has no KV sharing and no per-layer inputs (the scalar and the soft cap stay), and its global
+  layers have their own kv-head count (one) and no v projection: v is the raw k projection, before the k
+  norm and RoPE (`attention_k_eq_v`), so the pack plan streams `attn_k` into the v slot too.
 
 GGUF only (Google ships the QAT Q4_0 file; there is no q4nx container), so every pool is GGUF-direct. The
 pools are the bf16-scale 5120-byte chunk (`std_perm_gguf` narrows the fp16 block scales at pack time), not
@@ -30,7 +33,7 @@ from . import dense as D
 from .attnknobs import probe_env  # noqa: F401  (cache.py reads it off the family module)
 from .catalogue import OpRangeError, check_buffer_args, require
 from .qwen36moe import CHUNK, MB, q4_chunks, roundup
-from .spec import DENSE, DENSE_LOCAL, DENSE_LOCAL_SHARED, DENSE_SHARED, ModelSpec
+from .spec import DENSE, DENSE_LOCAL, DENSE_LOCAL_SHARED, DENSE_SHARED, ModelSpec, hf_model_types
 
 band_bytes = D.band_bytes    # noqa: F401  (dx.py: band_bytes(K, quant))
 chunk_bytes = D.chunk_bytes  # noqa: F401  (dx.py: chunk_bytes(quant))
@@ -62,9 +65,11 @@ def _kind_spec(spec: ModelSpec, kind: str) -> ModelSpec:
     glob = kind in (DENSE, DENSE_SHARED)
     hd = (spec.global_head_dim or spec.head_dim) if glob else spec.head_dim
     rot = (spec.global_rotary_dim or hd) if glob else spec.rotary_dim
+    kvh = (spec.global_kv_heads or spec.num_kv_heads) if glob else spec.num_kv_heads
     ff = (spec.intermediate_shared or spec.intermediate) if kind in OWN else spec.intermediate
-    return replace(spec, layer_types=(kind,), num_layers=1, head_dim=hd, rotary_dim=rot, intermediate=ff,
-                   global_head_dim=0, global_rotary_dim=0, intermediate_shared=0, extra={})
+    return replace(spec, layer_types=(kind,), num_layers=1, head_dim=hd, rotary_dim=rot, num_kv_heads=kvh,
+                   intermediate=ff, global_head_dim=0, global_rotary_dim=0, intermediate_shared=0,
+                   global_kv_heads=0, k_eq_v=False, extra={})
 
 
 def per_call_cap(spec: ModelSpec) -> int | None:
@@ -105,8 +110,6 @@ def _check(spec: ModelSpec) -> None:
     bad = sorted(set(spec.layer_types) - set(KINDS))
     if bad:
         raise OpRangeError(f"gemma4: layer types {bad}")
-    if not spec.ple_dim:
-        raise OpRangeError("gemma4: no per-layer input width; the E-series always has one")
     kv_sources(spec)
     pcs = {D.per_call(sub_spec(spec, k)) for k in kinds(spec)}
     if len(pcs) != 1:
@@ -165,7 +168,11 @@ def pack_plan(spec: ModelSpec) -> dict:
     types = {}
     for k in kinds(spec):
         plan = D.pack_plan(sub_spec(spec, k))["layer_types"][k]
-        types[k] = {"pool": [_gguf_op(o) for o in plan["pool"]], "consts": [_gguf_op(o) for o in plan["consts"]]}
+        pool = [_gguf_op(o) for o in plan["pool"]]
+        if spec.k_eq_v and k == DENSE:
+            # the file has no attn_v here: v is the raw k projection, which the v GEMV then recomputes
+            pool = [dict(o, tensor=T_K) if o["tensor"] == T_V else o for o in pool]
+        types[k] = {"pool": pool, "consts": [_gguf_op(o) for o in plan["consts"]]}
     return {
         "pool_bytes": pool_bytes(spec), "chunk_bytes": CHUNK,
         "layer_types": types,
@@ -225,15 +232,15 @@ def programs(spec: ModelSpec, max_ctx: int = 4096) -> dict:
 
 def host_stages(spec: ModelSpec) -> dict:
     """What the engine computes on the host around the dispatches (Core's gemma4 host stages)."""
-    return {
-        "kv_source": kv_sources(spec),
-        "ple": {"dim": spec.ple_dim, "embed": T_PLE_EMBED, "embed_scale": spec.ple_dim ** 0.5,
-                "model_proj": T_PLE_MODEL, "model_proj_scale": spec.hidden ** -0.5, "model_norm": T_PLE_MODEL_NORM,
-                "input_scale": 2.0 ** -0.5, "gate": T_PLE_GATE, "proj": T_PLE_PROJ, "norm": T_PLE_NORM,
-                "act": spec.activation, "eps": spec.norm_eps},
-        "layer_scalar": T_SCALAR,
-        "logit_softcap": spec.logit_softcap,
-    }
+    out = {"kv_source": kv_sources(spec)}
+    if spec.ple_dim:
+        out["ple"] = {"dim": spec.ple_dim, "embed": T_PLE_EMBED, "embed_scale": spec.ple_dim ** 0.5,
+                      "model_proj": T_PLE_MODEL, "model_proj_scale": spec.hidden ** -0.5,
+                      "model_norm": T_PLE_MODEL_NORM, "input_scale": 2.0 ** -0.5, "gate": T_PLE_GATE,
+                      "proj": T_PLE_PROJ, "norm": T_PLE_NORM, "act": spec.activation, "eps": spec.norm_eps}
+    out["layer_scalar"] = T_SCALAR
+    out["logit_softcap"] = spec.logit_softcap
+    return out
 
 
 def builds(spec: ModelSpec) -> dict[str, dict]:
@@ -260,11 +267,17 @@ def manifest_layout(spec: ModelSpec, max_ctx: int) -> dict:
 
 
 def hf_config_check(spec: ModelSpec) -> dict:
-    return {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
-            "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
-            "intermediate_size": spec.intermediate, "head_dim": spec.head_dim,
-            "global_head_dim": spec.global_head_dim or spec.head_dim, "sliding_window": spec.sliding_window,
-            "hidden_size_per_layer_input": spec.ple_dim, "final_logit_softcapping": spec.logit_softcap}
+    c = {"hidden_size": spec.hidden, "num_hidden_layers": spec.num_layers, "vocab_size": spec.vocab,
+         "num_attention_heads": spec.num_heads, "num_key_value_heads": spec.num_kv_heads,
+         "intermediate_size": spec.intermediate, "head_dim": spec.head_dim,
+         "global_head_dim": spec.global_head_dim or spec.head_dim, "sliding_window": spec.sliding_window,
+         "hidden_size_per_layer_input": spec.ple_dim, "final_logit_softcapping": spec.logit_softcap}
+    if spec.k_eq_v:
+        # the 12B's config is gemma4_unified; a GGUF read without one derives as gemma4
+        c["model_type"] = sorted(hf_model_types("gemma4") + hf_model_types("gemma4_unified"))
+        c["num_global_key_value_heads"] = spec.global_kv_heads or spec.num_kv_heads
+        c["attention_k_eq_v"] = True
+    return c
 
 
 GEN_KERNELS = D.GEN_KERNELS

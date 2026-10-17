@@ -8,6 +8,10 @@ rows), so nothing near the whole model is ever in fp32. Both sides see the same 
 the math.
 
     python gemma4_transformers_check.py <model.gguf> [--ids 2,105,...] [--layers 0,5,24,29]   (E2B: --layers 0,4,15,19)
+
+The 12B (`--layers 0,5,6,11`: two sliding and two global layers, no sharing) is built as its own class,
+Gemma4UnifiedForCausalLM (`gemma4_unified`, transformers 5.10+): no per-layer inputs, one kv head and
+`attention_k_eq_v` on the global layers.
 """
 from __future__ import annotations
 
@@ -48,19 +52,27 @@ def main() -> int:
     ffs = [int(f) for f in ff] if isinstance(ff, (list, tuple)) else [int(ff)] * G.n_layers
     double = any(f == 2 * ffs[0] for f in ffs)
 
-    cfg = Gemma4TextConfig(
+    kw = dict(
         vocab_size=len(uniq), hidden_size=G.hidden, intermediate_size=ffs[0],
         num_hidden_layers=len(layers), num_attention_heads=G.nh, num_key_value_heads=G.kvh, head_dim=G.hd,
         global_head_dim=G.ghd, hidden_activation="gelu_pytorch_tanh", rms_norm_eps=G.eps, sliding_window=G.window,
         layer_types=["sliding_attention" if k == "sliding" else "full_attention" for k in kinds],
-        final_logit_softcapping=G.softcap or None, vocab_size_per_layer_input=len(uniq),
-        hidden_size_per_layer_input=G.ple, num_kv_shared_layers=nsh, attention_k_eq_v=False,
+        final_logit_softcapping=G.softcap or None, num_kv_shared_layers=nsh, attention_k_eq_v=G.k_eq_v,
+        num_global_key_value_heads=G.gkvh or None,
         use_double_wide_mlp=double, tie_word_embeddings=True, pad_token_id=0,
         rope_parameters={"full_attention": {"rope_type": "proportional", "partial_rotary_factor": G.grot / G.ghd,
                                             "rope_theta": G.theta},
                          "sliding_attention": {"rope_type": "default", "rope_theta": G.theta_local}})
+    if G.ple:
+        cfg = Gemma4TextConfig(vocab_size_per_layer_input=len(uniq), hidden_size_per_layer_input=G.ple, **kw)
+        cls = Gemma4ForCausalLM
+    else:
+        # the 12B is transformers' own gemma4_unified text model, which has no per-layer inputs at all
+        from transformers import Gemma4UnifiedForCausalLM, Gemma4UnifiedTextConfig
+        cfg, cls = Gemma4UnifiedTextConfig(**kw), Gemma4UnifiedForCausalLM
     cfg._attn_implementation = "eager"
-    model = Gemma4ForCausalLM(cfg).float().eval()
+    model = cls(cfg).float().eval()
+    print(f"transformers {cls.__name__}")
 
     def put(name, arr):
         p = dict(model.named_parameters()).get(name)
@@ -72,11 +84,12 @@ def main() -> int:
 
     emb_rows = g.get("token_embd.weight", rows=uniq)
     put("model.embed_tokens.weight", emb_rows)
-    tok = g.get("per_layer_token_embd.weight", rows=uniq).reshape(len(uniq), -1, G.ple)[:, layers, :]
-    put("model.embed_tokens_per_layer.weight", tok.reshape(len(uniq), -1))
-    W = g.get("per_layer_model_proj.weight").reshape(-1, G.ple, G.hidden)[layers]
-    put("model.per_layer_model_projection.weight", W.reshape(-1, G.hidden))
-    put("model.per_layer_projection_norm.weight", g.get("per_layer_proj_norm.weight"))
+    if G.ple:
+        tok = g.get("per_layer_token_embd.weight", rows=uniq).reshape(len(uniq), -1, G.ple)[:, layers, :]
+        put("model.embed_tokens_per_layer.weight", tok.reshape(len(uniq), -1))
+        W = g.get("per_layer_model_proj.weight").reshape(-1, G.ple, G.hidden)[layers]
+        put("model.per_layer_model_projection.weight", W.reshape(-1, G.hidden))
+        put("model.per_layer_projection_norm.weight", g.get("per_layer_proj_norm.weight"))
     put("model.norm.weight", g.get("output_norm.weight"))
     for i, l in enumerate(layers):
         b, p = f"blk.{l}.", f"model.layers.{i}."
@@ -85,12 +98,16 @@ def main() -> int:
              "post_attention_layernorm.weight": "post_attention_norm.weight",
              "pre_feedforward_layernorm.weight": "ffn_norm.weight", "mlp.gate_proj.weight": "ffn_gate.weight",
              "mlp.up_proj.weight": "ffn_up.weight", "mlp.down_proj.weight": "ffn_down.weight",
-             "post_feedforward_layernorm.weight": "post_ffw_norm.weight",
-             "per_layer_input_gate.weight": "inp_gate.weight", "per_layer_projection.weight": "proj.weight",
-             "post_per_layer_input_norm.weight": "post_norm.weight", "layer_scalar": "layer_output_scale.weight"}
+             "post_feedforward_layernorm.weight": "post_ffw_norm.weight"}
+        if G.ple:
+            m.update({"per_layer_input_gate.weight": "inp_gate.weight", "per_layer_projection.weight": "proj.weight",
+                      "post_per_layer_input_norm.weight": "post_norm.weight"})
+        if g.has(b + "layer_output_scale.weight"):
+            m["layer_scalar"] = "layer_output_scale.weight"
         if l not in src:
-            m.update({"self_attn.k_proj.weight": "attn_k.weight", "self_attn.v_proj.weight": "attn_v.weight",
-                      "self_attn.k_norm.weight": "attn_k_norm.weight"})
+            m.update({"self_attn.k_proj.weight": "attn_k.weight", "self_attn.k_norm.weight": "attn_k_norm.weight"})
+            if not (G.k_eq_v and kinds[i] == "full"):
+                m["self_attn.v_proj.weight"] = "attn_v.weight"
         for hn, gn in m.items():
             put(p + hn, g.get(b + gn))
 

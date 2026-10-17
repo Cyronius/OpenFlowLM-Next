@@ -1,4 +1,4 @@
-"""fp64 CPU reference for Gemma 4 E2B / E4B text (recipes/gemma4.py), from the model's own GGUF.
+"""fp64 CPU reference for Gemma 4 E2B / E4B / 12B text (recipes/gemma4.py), from the model's own GGUF.
 
 The weights are the GGUF's, dequantized by llama.cpp's own `gguf` package, so a disagreement with the NPU
 is the kernels' or the packing's, not a difference of source weights. The math is transformers'
@@ -17,6 +17,10 @@ so it equals token-at-a-time decode):
 RoPE: sliding layers rotate the whole 256-wide head (pairs (i, i + 128), theta 1e4); global layers rotate
 pairs (i, i + 256) for i < 64 only, at theta^(-2i/512) -- transformers' `proportional` type, which llama.cpp
 writes as rope_freqs (1 for the 64 rotated pairs, 1e30 for the rest).
+
+The 12B: no per-layer inputs and no KV sharing; its global layers have their own kv-head count (the GGUF's
+head_count_kv is per layer) and no attn_v: V is the raw k projection, before k_norm and RoPE, then the
+weightless norm (attention_k_eq_v).
 
     python replica_gemma4.py <model.gguf> --ids 2,818,5279 [--layers 6] [--out ref.npz]
 """
@@ -86,6 +90,11 @@ class Geo:
     kinds: list = field(default_factory=list)         # per model layer: "sliding" | "full"
     sources: dict = field(default_factory=dict)       # shared layer -> the layer whose K / V it uses
     n_layers: int = 0
+    gkvh: int = 0                                     # the global layers' kv heads (the 12B: 1); 0 = kvh
+    k_eq_v: bool = False                              # the global layers have no attn_v: V is the raw k projection
+
+    def kv_heads(self, full: bool) -> int:
+        return (self.gkvh or self.kvh) if full else self.kvh
 
     @classmethod
     def from_gguf(cls, g: Gguf):
@@ -102,13 +111,20 @@ class Geo:
         rf = g.get("rope_freqs.weight").reshape(-1) if g.has("rope_freqs.weight") else None
         ghd = int(md[f"{a}.attention.key_length"])
         grot = 2 * int((rf == 1.0).sum()) if rf is not None else ghd // 4
+        kv = md[f"{a}.attention.head_count_kv"]
+        kvs = [int(x) for x in kv] if isinstance(kv, (list, tuple, np.ndarray)) else [int(kv)] * n
+        kvh = kvs[kinds.index("sliding")] if "sliding" in kinds else kvs[0]
+        gkvh = kvs[kinds.index("full")] if "full" in kinds else kvh
+        g0 = kinds.index("full") if "full" in kinds else -1
         return cls(hidden=int(md[f"{a}.embedding_length"]), nh=int(md[f"{a}.attention.head_count"]),
-                   kvh=int(md[f"{a}.attention.head_count_kv"]), hd=int(md[f"{a}.attention.key_length_swa"]),
+                   kvh=kvh, hd=int(md[f"{a}.attention.key_length_swa"]),
                    ghd=ghd, grot=grot, window=int(md[f"{a}.attention.sliding_window"]),
                    theta=float(md[f"{a}.rope.freq_base"]), theta_local=float(md[f"{a}.rope.freq_base_swa"]),
-                   ple=int(md[f"{a}.embedding_length_per_layer_input"]),
+                   ple=int(md.get(f"{a}.embedding_length_per_layer_input", 0)),
                    eps=float(f"{float(md[f'{a}.attention.layer_norm_rms_epsilon']):.6g}"),
-                   softcap=float(md.get(f"{a}.final_logit_softcapping", 0.0)), kinds=kinds, sources=src, n_layers=n)
+                   softcap=float(md.get(f"{a}.final_logit_softcapping", 0.0)), kinds=kinds, sources=src, n_layers=n,
+                   gkvh=gkvh if gkvh != kvh else 0,
+                   k_eq_v=g0 >= 0 and g0 not in src and not g.has(f"blk.{g0}.attn_v.weight"))
 
 
 def rope_full(x, pos, theta):
@@ -158,7 +174,9 @@ def attention(q, K, V, sliding, window):
 
 
 def ple_inputs(g: Gguf, G: Geo, ids, emb, cols):
-    """[T, len(cols), ple]: the per-layer inputs for the model layers `cols`."""
+    """[T, len(cols), ple]: the per-layer inputs for the model layers `cols` (None: the model has none)."""
+    if not G.ple:
+        return None
     T = len(ids)
     tok = g.get("per_layer_token_embd.weight", rows=ids).reshape(T, -1, G.ple)[:, cols, :] * np.sqrt(G.ple)
     W = g.get("per_layer_model_proj.weight")                       # [L * ple, hidden]
@@ -182,8 +200,10 @@ def layer(g: Gguf, G: Geo, l, h, pos, ple_l, kv, keep):
     if l in G.sources:
         K, V = kv[G.sources[l]]
     else:
-        K = (x @ g.get(b + "attn_k.weight").T).reshape(T, G.kvh, hd)
-        V = (x @ g.get(b + "attn_v.weight").T).reshape(T, G.kvh, hd)
+        kvh = G.kv_heads(full)
+        K = (x @ g.get(b + "attn_k.weight").T).reshape(T, kvh, hd)
+        # K = V (the 12B's global layers): v is the raw k projection, taken before k_norm and RoPE
+        V = K if (full and G.k_eq_v) else (x @ g.get(b + "attn_v.weight").T).reshape(T, kvh, hd)
         K = rot(rms(K, g.get(b + "attn_k_norm.weight").reshape(-1), G.eps))
         V = rms(V, None, G.eps)
         if keep:
@@ -194,10 +214,11 @@ def layer(g: Gguf, G: Geo, l, h, pos, ple_l, kv, keep):
     x = rms(h, g.get(b + "ffn_norm.weight").reshape(-1), G.eps)
     m = (gelu_tanh(x @ g.get(b + "ffn_gate.weight").T) * (x @ g.get(b + "ffn_up.weight").T)) @ g.get(b + "ffn_down.weight").T
     h = h + rms(m, g.get(b + "post_ffw_norm.weight").reshape(-1), G.eps)
-    p = gelu_tanh(h @ g.get(b + "inp_gate.weight").T) * ple_l
-    p = p @ g.get(b + "proj.weight").T
-    h = h + rms(p, g.get(b + "post_norm.weight").reshape(-1), G.eps)
-    return h * g.scalar(b + "layer_output_scale.weight")
+    if ple_l is not None:
+        p = gelu_tanh(h @ g.get(b + "inp_gate.weight").T) * ple_l
+        p = p @ g.get(b + "proj.weight").T
+        h = h + rms(p, g.get(b + "post_norm.weight").reshape(-1), G.eps)
+    return h * g.scalar(b + "layer_output_scale.weight") if g.has(b + "layer_output_scale.weight") else h
 
 
 def forward(g: Gguf, ids, n_layers=None, G: Geo | None = None, want_logits=True, layers=None, sources=None):
@@ -217,7 +238,7 @@ def forward(g: Gguf, ids, n_layers=None, G: Geo | None = None, want_logits=True,
     keep = set(G.sources.values())
     kv, h, res = {}, emb, []
     for i, l in enumerate(layers):
-        h = layer(g, G, l, h, pos, ple[:, i, :], kv, l in keep)
+        h = layer(g, G, l, h, pos, None if ple is None else ple[:, i, :], kv, l in keep)
         res.append(h)
     if not want_logits:
         return res, None

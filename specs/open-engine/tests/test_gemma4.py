@@ -1,7 +1,7 @@
 # Traces: OPEN-FAMILY-GEMMA4, OPEN-SPEC-DERIVE, OPEN-GGUF-BF16-POOL (canonical spec: specs/open-engine/spec.md)
-"""Gemma 4 E2B / E4B (text) on the dense recipe: the spec from Google's GGUF and from transformers'
-config, the KV-sharing layout, the tensor names the plan reads against the real file's, and the four
-layer kinds' attention geometry."""
+"""Gemma 4 E2B / E4B / 12B (text) on the dense recipe: the spec from Google's GGUF and from transformers'
+config, the KV-sharing layout, the tensor names the plan reads against the real file's, the layer kinds'
+attention geometry, and the 12B's K = V global layers."""
 from __future__ import annotations
 
 import json
@@ -17,8 +17,11 @@ from recipes.spec import DENSE, DENSE_LOCAL, DENSE_LOCAL_SHARED, DENSE_SHARED, M
 FIX = Path(__file__).resolve().parent / "fixtures"
 HDR = json.loads((FIX / "gguf_gemma4_e4b_header.json").read_text(encoding="utf-8"))
 HDR_E2B = json.loads((FIX / "gguf_gemma4_e2b_header.json").read_text(encoding="utf-8"))
+HDR_12B = json.loads((FIX / "gguf_gemma4_12b_header.json").read_text(encoding="utf-8"))
 CFG_E4B = json.loads((FIX / "config_gemma4_e4b.json").read_text(encoding="utf-8"))
 CFG_E2B = json.loads((FIX / "config_gemma4_e2b.json").read_text(encoding="utf-8"))
+CFG_12B = json.loads((FIX / "config_gemma4_12b.json").read_text(encoding="utf-8"))
+SPECS = Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
 
 
 def gguf_md(with_rope_freqs=True, hdr=HDR):
@@ -91,23 +94,29 @@ def test_the_shipped_e2b_spec_is_the_derived_one():
     assert shipped.spec_hash() == ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B)).spec_hash()
 
 
-@pytest.mark.parametrize("key,val", [("attention_k_eq_v", True), ("enable_moe_block", True),
-                                     ("use_bidirectional_attention", "all")])
-def test_the_12b_and_moe_and_bidirectional_variants_are_refused(key, val):
+@pytest.mark.parametrize("key,val", [("enable_moe_block", True), ("use_bidirectional_attention", "all")])
+def test_the_moe_and_bidirectional_variants_are_refused(key, val):
     cfg = json.loads(json.dumps(CFG_E4B))
     cfg["text_config"][key] = val
     with pytest.raises(SpecError):
         ModelSpec.from_hf_config(cfg)
 
 
+def test_vision_only_bidirectional_attention_leaves_text_causal():
+    cfg = json.loads(json.dumps(CFG_E4B))
+    cfg["text_config"]["use_bidirectional_attention"] = "vision"
+    assert ModelSpec.from_hf_config(cfg).spec_hash() == ModelSpec.from_hf_config(CFG_E4B).spec_hash()
+
+
 def test_no_other_spec_hash_moved_by_the_new_fields():
     # every new field serialises only when set, so a spec without them hashes as before
     d = ModelSpec.from_gguf_metadata(gguf_md()).to_dict()
     assert {"global_head_dim", "global_rotary_dim", "ple_dim", "logit_softcap"} <= set(d)
-    assert "intermediate_shared" not in d
+    assert not {"intermediate_shared", "global_kv_heads", "k_eq_v"} & set(d)
     from recipes.load import load_spec
     q = load_spec(Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs" / "qwen3-4b.json")
-    assert not {"global_head_dim", "global_rotary_dim", "intermediate_shared", "ple_dim", "logit_softcap"} & set(q.to_dict())
+    assert not {"global_head_dim", "global_rotary_dim", "intermediate_shared", "ple_dim", "logit_softcap",
+                "global_kv_heads", "k_eq_v"} & set(q.to_dict())
 
 
 # ---- the tensor names, against the real file's table
@@ -115,9 +124,12 @@ def plan_names(spec):
     p = G4.pack_plan(spec)
     by_kind = {k: [o["tensor"] for o in v["pool"] + v["consts"]] for k, v in p["layer_types"].items()}
     glob = [o["tensor"] for o in p["lm_head"]["ops"]] + [p["embed"]["tensor"], p["norm"]["tensor"]]
-    st = G4.host_stages(spec)["ple"]
+    hs = G4.host_stages(spec)
+    if "ple" not in hs:                                   # the 12B
+        return by_kind, glob, [hs["layer_scalar"]]
+    st = hs["ple"]
     return by_kind, glob + [st["embed"], st["model_proj"], st["model_norm"]], \
-        [st["gate"], st["proj"], st["norm"], G4.host_stages(spec)["layer_scalar"]]
+        [st["gate"], st["proj"], st["norm"], hs["layer_scalar"]]
 
 
 def test_every_tensor_the_plan_reads_is_in_the_file(unvalidated, e4b):
@@ -233,3 +245,89 @@ def test_manifest_carries_the_host_stages_and_one_gguf_view(unvalidated, e4b):
     assert g["rotary_dim"] == 128 and len(g["inv_freq"]) == 64
     assert g["inv_freq"][1] == pytest.approx(1e6 ** (-2 / 512))       # proportional: over the head, not the rotation
     assert m["globals"]["ptab_local"]["cs_off"] == 1024
+
+
+# ---- the 12B: no per-layer inputs, no KV sharing, one kv head and K = V on the global layers
+def no_attn_v(hdr):
+    """What a GGUF caller passes as gemma4.attention.k_eq_v: a global layer with its own cache has no attn_v."""
+    pat = hdr["metadata"]["gemma4.attention.sliding_window_pattern"]
+    g = pat.index(False)
+    return f"blk.{g}.attn_k.weight" in hdr["tensors"] and f"blk.{g}.attn_v.weight" not in hdr["tensors"]
+
+
+@pytest.fixture
+def g12():
+    md = gguf_md(hdr=HDR_12B)
+    md["gemma4.attention.k_eq_v"] = no_attn_v(HDR_12B)
+    return ModelSpec.from_gguf_metadata(md)
+
+
+def test_12b_gguf_and_its_unified_config_derive_the_shipped_spec(g12):
+    from recipes.load import load_spec
+    assert CFG_12B["model_type"] == "gemma4_unified" and CFG_12B["text_config"]["attention_k_eq_v"] is True
+    hf = ModelSpec.from_hf_config(CFG_12B)
+    assert g12.spec_hash() == hf.spec_hash() == load_spec(SPECS / "gemma4-12b.json").spec_hash()
+    # the file has no K = V key: the per-layer kv counts imply it when the caller does not say
+    assert ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_12B)).spec_hash() == g12.spec_hash()
+
+
+def test_12b_shape(g12):
+    assert (g12.hidden, g12.num_layers, g12.num_heads, g12.num_kv_heads, g12.global_kv_heads) == (3840, 48, 16, 8, 1)
+    assert (g12.head_dim, g12.global_head_dim, g12.rotary_dim, g12.global_rotary_dim) == (256, 512, 256, 128)
+    assert (g12.intermediate, g12.intermediate_shared, g12.ple_dim, g12.logit_softcap) == (15360, 0, 0, 30.0)
+    assert (g12.rope_theta, g12.rope_local_theta, g12.sliding_window, g12.k_eq_v) == (1e6, 1e4, 1024, True)
+    assert [i for i, t in enumerate(g12.layer_types) if t == DENSE] == list(range(5, 48, 6))
+    assert set(g12.layer_types) == {DENSE_LOCAL, DENSE} and G4.kv_sources(g12) == [-1] * 48
+
+
+def test_12b_global_layers_have_no_v_projection_in_the_file():
+    have = HDR_12B["tensors"]
+    for l in range(48):
+        glob = (l + 1) % 6 == 0
+        assert (f"blk.{l}.attn_v.weight" in have) != glob
+        assert have[f"blk.{l}.attn_k.weight"][0] == [3840, 512 if glob else 2048]
+
+
+def test_12b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, g12):
+    have = HDR_12B["tensors"]
+    by_kind, glob, _ = plan_names(g12)
+    assert set(glob) <= set(have)
+    for l, kind in enumerate(g12.layer_types):
+        names = [n.replace("{l}", str(l)) for n in by_kind[kind] + [G4.T_SCALAR]]
+        assert set(names) <= set(have), sorted(set(names) - set(have))
+    p = G4.pack_plan(g12)
+    for kind, l in ((DENSE_LOCAL, 0), (DENSE, 5)):
+        for op in p["layer_types"][kind]["pool"]:
+            dims, ty = have[op["tensor"].replace("{l}", str(l))]
+            assert ty == "Q4_0" and op["op"] == "std_perm_gguf"
+            assert op["in_dim"] == dims[0] and op["nch"] * 8192 == dims[0] * dims[1]
+    # K = V: the global kind's v slot streams the k projection, the sliding kind's its own v
+    tensors = {k: [o["tensor"] for o in p["layer_types"][k]["pool"]] for k in (DENSE_LOCAL, DENSE)}
+    assert tensors[DENSE].count(G4.T_K) == 2 and G4.T_V not in tensors[DENSE]
+    assert tensors[DENSE_LOCAL].count(G4.T_K) == 1 and G4.T_V in tensors[DENSE_LOCAL]
+
+
+@pytest.mark.parametrize("part,hd,rot,kvh,e_a,kv_row,ptab_row", [
+    ("local", 256, 256, 8, 4096, 8192, 4096), ("global", 512, 128, 1, 2048, 2048, 2048)])
+def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row):
+    monkeypatch.setenv("G4_PART", part)
+    R = G4.recipe(g12)
+    G, L = R.geo, R.layout
+    assert (G.HD, G.ROT, G.KVH, G.N_CORES, G.KV_SHARED, G.ACORES, G.NHL, G.RB) == (hd, rot, kvh, 4, False, 4, 4, 1)
+    assert (L.E_A, L.KV_ROW, L.PTAB_ROW, G.PTAB_ELEMS, G.PTAB_CS_OFF) == (e_a, kv_row, ptab_row, 1, 512)
+
+
+def test_12b_manifest_has_the_scalar_but_no_per_layer_inputs(unvalidated, g12):
+    m = manifest(g12)
+    assert "ple" not in m and m["layer_scalar"] == G4.T_SCALAR and m["logit_softcap"] == 30.0
+    assert m["kv_source"] == [-1] * 48
+    assert {k: v["kv_row"] for k, v in m["kernels"].items() if "kv_row" in v} == {"dx_local": 8192, "dx": 2048}
+    c = m["hf_config_check"]
+    assert (c["num_global_key_value_heads"], c["attention_k_eq_v"], c["hidden_size_per_layer_input"]) == (1, True, 0)
+    assert {"gemma4", "gemma4_unified", "gemma4_unified_text"} <= set(c["model_type"])
+
+
+def test_the_e_series_config_checks_did_not_move(unvalidated, e4b):
+    c = manifest(e4b)["hf_config_check"]
+    assert c["model_type"] == ["gemma4", "gemma4_text"]
+    assert not {"num_global_key_value_heads", "attention_k_eq_v"} & set(c)
