@@ -199,6 +199,8 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  (256, 8, 2, 256, False), (512, 8, 2, 128, False), (256, 8, 2, 256, True), (512, 8, 2, 128, True),
                  # E2B's four at one kv head, the same day: its 6- and 20-layer slices and the whole model
                  (256, 8, 1, 256, False), (512, 8, 1, 128, False), (256, 8, 1, 256, True), (512, 8, 1, 128, True),
+                 # the 12B's two, 2026-10-17 (the global one with ATTN_QLOCAL): its 5-, 6- and 12-layer slices and the whole model
+                 (256, 16, 8, 256, False), (512, 16, 1, 128, False),
                  keys=("head_dim", "num_heads", "num_kv_heads", "rotary_dim", "kv_shared")),),
              note="OPEN-FAMILY-GEMMA4's procedure: the replica slice through these kinds"),
     Template("deltanet", "designs/layer_x/dnx.h",
