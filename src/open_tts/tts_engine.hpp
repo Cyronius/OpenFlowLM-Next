@@ -30,10 +30,8 @@ public:
     ~TtsEngine();
 
     std::vector<std::string> voices() const;
-    // A voice name the request may use: an installed voice, or a unique "<lang><g>_<name>" match
-    // for a bare name ("alloy" -> "af_alloy"). Empty when there is none.
+    // A bare name resolves to the one installed voice ending in "_<name>" ("alloy" -> "af_alloy").
     std::string resolve_voice(const std::string& name) const;
-    // Only American (a*) and British (b*) English voices; the phonemizer is English only.
     static bool english_voice(const std::string& voice);
 
     std::vector<float> speak(const std::string& text, const std::string& voice, float speed,
@@ -57,8 +55,7 @@ private:
     uint64_t noise_seed_ = kDefaultNoiseSeed;
 };
 
-// Kokoro takes at most 510 phonemes per call; longer text splits where KPipeline's
-// waterfall would: after . ! ? ..., else : ;, else , and dashes, else at a space.
+// Kokoro takes at most 510 phonemes per call; cuts fall where KPipeline's would (OPEN-TTS-CHUNK).
 std::vector<std::u32string> chunk_phonemes(const std::u32string& ps, size_t limit = 510);
 
 std::string encode_wav(const std::vector<float>& samples, int rate = kSampleRate);

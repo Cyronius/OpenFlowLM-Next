@@ -1,6 +1,4 @@
-// English G2P for Kokoro: a C++ port of misaki 0.9.4's en.py dictionary path (2026-10-16).
-// spaCy's tokenizer and tagger are replaced by tokenize() below; every tag-dependent rule takes
-// the tag misaki would see for the common reading (see specs/open-tts/spec.md, OPEN-TTS-G2P).
+// English G2P for Kokoro: misaki 0.9.4's en.py dictionary path, spaCy replaced by fixed tags (2026-10-16).
 #include "g2p_en.hpp"
 
 #include <algorithm>
@@ -980,8 +978,7 @@ std::vector<Tok> tokenize(const u32& text, const Lexicon& lex) {
             }
         }
     }
-    // The tagger stand-ins: a/A as a determiner, I as a pronoun, in/vs as prepositions,
-    // "used" before "to" as the past tense.
+    // Fixed tags where misaki asks spaCy (OPEN-TTS-G2P lists them).
     for (size_t k = 0; k < out.size(); ++k) {
         Tok& t = out[k];
         if (!t.tag.empty()) continue;

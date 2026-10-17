@@ -206,8 +206,7 @@ std::vector<float> transpose(const std::vector<float>& x, int rows, int cols) {
 
 std::vector<float> harmonic_source(const std::vector<float>& f0, int up, const float* w9, float bias,
                                    uint64_t noise_seed) {
-    // SineGen + SourceModuleHnNSF in torch's float32 order. The random initial phase torch adds
-    // lands on sample 0 only, which the 1/up linear downsample never reads, so it has no effect.
+    // torch's random initial phase only reaches sample 0, which the 1/up downsample never reads.
     const int n = (int)f0.size(), L = n * up, NH = 9;
     std::vector<float> phd((size_t)n * NH);
     for (int h = 0; h < NH; ++h) {

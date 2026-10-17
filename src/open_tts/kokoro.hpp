@@ -1,4 +1,4 @@
-// Kokoro-82M (StyleTTS 2 + ISTFTNet) on the host, fp32 (2026-10-16).
+// Kokoro-82M (StyleTTS 2 + ISTFTNet) on the host CPU (2026-10-16).
 #pragma once
 
 #include <cstdint>
@@ -65,9 +65,7 @@ public:
     const std::string& weights_path() const { return weights_path_; }
     const std::string& weights_dtype() const { return weights_dtype_; }
 
-    // ids: token ids including the leading and trailing 0. style: one 256-wide voice row.
-    // noise_seed == 0 turns the harmonic source's noise off, which the parity check uses.
-    // force_durations replaces the predicted frame counts, so a check can follow the reference's.
+    // noise_seed 0 turns the source noise off; force_durations lets a check follow the reference's.
     std::vector<float> synthesize(const std::vector<int>& ids, const float* style, float speed,
                                   uint64_t noise_seed, Trace* trace = nullptr,
                                   std::vector<int>* durations = nullptr,
@@ -113,8 +111,7 @@ private:
     ConvTranspose1d ups_[2];
 };
 
-// Reads tensors by PyTorch module path, whatever names or conv layout a conversion stored,
-// folding weight norm (weight_g, weight_v) at load. Exposed for the block tests.
+// Finds tensors by PyTorch module path under any conversion's names and layout; folds weight norm.
 class WeightReader {
 public:
     explicit WeightReader(const SafetensorsFile& f) : f_(f) {}
@@ -140,8 +137,7 @@ AdaINResBlock1 resblock1(const WeightReader& w, const std::string& p, int ch, in
 ConvTranspose1d upsampler(const WeightReader& w, const std::string& p, int cin, int cout, int k, int stride);
 }  // namespace blocks
 
-// SineGen + SourceModuleHnNSF over an F0 curve at frame rate: `up` samples per F0 value,
-// nine harmonics merged by l_linear (w9, b) and tanh. noise_seed 0 means no noise.
+// SineGen + SourceModuleHnNSF, `up` samples per F0 value; noise_seed 0 means no noise.
 std::vector<float> harmonic_source(const std::vector<float>& f0, int up, const float* w9, float b,
                                    uint64_t noise_seed);
 

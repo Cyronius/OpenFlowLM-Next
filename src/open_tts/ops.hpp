@@ -8,8 +8,7 @@ namespace open_tts {
 
 enum class DType { F32, F16 };
 
-// How matrix weights are held: F16 by default (the weights rule's 16-bit), F32 with
-// OFLM_TTS_WEIGHTS=f32 or set_weight_dtype(), for checks against an f32 reference.
+// F16 by default (the weights rule's 16-bit); OFLM_TTS_WEIGHTS=f32 for checks against an f32 reference.
 DType weight_dtype();
 void set_weight_dtype(DType t);
 
@@ -27,9 +26,7 @@ struct Weight {
     float at(size_t i) const { return t == DType::F16 ? f16_to_f32(h[i]) : f[i]; }
 };
 
-// C[M,N] (+)= A[M,K] * B[K,N], f32 accumulation. A is row-major (lda) in dtype at. Row k of B
-// starts at brow[k] (dtype bt) and its column n sits at brow[k][n * bcs], so a convolution's
-// taps are shifted row pointers into the padded input, with no im2col copy.
+// B is given as row pointers, so a convolution's taps are shifted rows of its input (no im2col).
 void sgemm_rows(int M, int N, int K, const void* A, DType at, int lda, const void* const* brow, DType bt,
                 int bcs, float* C, int ldc, bool accumulate);
 void sgemm(int M, int N, int K, const float* A, int lda, const float* B, int ldb, float* C, int ldc,
@@ -89,8 +86,7 @@ void leaky_relu(float* x, int64_t n, float slope);
 void snake(const float* x, int c, int t, const float* alpha, float* y);
 void gelu_tanh(float* x, int64_t n);
 
-// torch.stft(n_fft, hop, win = n_fft, periodic hann, center, reflect) -> |X| and angle(X),
-// each [n_fft/2 + 1][frames], frames = 1 + len / hop.
+// torch.stft with a periodic Hann window, center and reflect padding: frames = 1 + len / hop.
 void stft_mag_phase(const float* x, int len, int n_fft, int hop, std::vector<float>& mag,
                     std::vector<float>& phase, int& frames);
 // torch.istft(mag * exp(i * phase), n_fft, hop, periodic hann, center) -> hop * (frames - 1) samples.

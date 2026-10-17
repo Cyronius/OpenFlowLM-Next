@@ -1833,8 +1833,7 @@ KOKORO_FAMILY = "kokoro"
 KOKORO_WEIGHTS = ("kokoro-v1_0.safetensors", "model.safetensors")
 # American and British English voices: the open phonemizer is English only.
 KOKORO_VOICE_RE = re.compile(r"^voices/([ab][fm]_[a-z]+)\.safetensors$")
-# misaki's lexicons (Apache-2.0), fetched from its PyPI wheel at install time and pinned by hash,
-# so the repository never carries them.
+# Fetched from misaki's PyPI wheel at install and pinned by hash, so the repository never carries them.
 MISAKI_WHEEL = "misaki-0.9.4-py3-none-any.whl"
 MISAKI_LEXICONS = {
     "us_gold.json": "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f",

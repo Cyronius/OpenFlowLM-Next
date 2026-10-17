@@ -226,6 +226,10 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
     2.0e-4. The free run's waveform is within 1.5e-2 (36 dB SNR); the difference enters at the
     harmonic source, whose phase integrates F0 (2.8e-3 there from F0's 3.7e-7).
   - f16 weights (the default): durations identical again; blocks within about 6e-4.
+  - Three more sentences, the round-trip set below (`check-three-sentences.log`): the durations
+    are identical again (86, 89 and 102 tokens) with f32 and with f16 weights; with f32 weights F0
+    and the decoder output are within 6e-7 and the generator on the reference's inputs within
+    3.3e-6; log-mel distance to PyTorch 0.07 to 0.12 dB with f32 weights, 0.35 to 0.49 dB with f16.
 - **How it sounds**, log-mel distance to the f32 reference (`mel-distance-ref-sentence.log`;
   mean |dB| over voiced frames): the engine with f32 weights 0.10 dB; with f16 weights 0.46 dB;
   PyTorch itself with f16-rounded weights 0.48 dB; PyTorch with another noise seed 0.48 dB. So

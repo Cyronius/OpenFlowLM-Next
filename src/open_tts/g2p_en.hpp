@@ -25,8 +25,7 @@ struct G2PResult {
 
 class EnglishG2P {
 public:
-    // misaki's us_gold.json + us_silver.json (or gb_*). Unknown words are reported, and spelled
-    // letter by letter, or dropped as KPipeline drops them when espeak is absent (unk = "").
+    // Unknown words are spelled out, or dropped as KPipeline does without espeak (OPEN-TTS-G2P).
     EnglishG2P(const std::string& gold_json, const std::string& silver_json, bool british,
                bool spell_unknown = true);
     ~EnglishG2P();

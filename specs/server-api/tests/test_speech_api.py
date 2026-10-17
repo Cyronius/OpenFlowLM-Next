@@ -1,8 +1,5 @@
-# Traces: SERVER-SPEECH, SERVER-SPEECH-PARAMS, SERVER-SPEECH-VOICES, SERVER-SPEECH-LOAD
-#         (canonical spec: specs/server-api/spec.md)
-# Integration: needs `oflm serve [<chat model>] --tts 1` on localhost:52625 (OFLM_TEST_BASE_URL) with
-# kokoro:82m installed by oflm-add (OFLM_TEST_TTS_MODEL names another). The engine runs on the CPU;
-# no NPU is needed. A sentence takes about a second. Standard library only.
+# Traces: SERVER-SPEECH, SERVER-SPEECH-PARAMS, SERVER-SPEECH-VOICES, SERVER-SPEECH-LOAD (canonical spec: specs/server-api/spec.md)
+# Needs `oflm serve --tts 1` at OFLM_TEST_BASE_URL (default localhost:52625) with kokoro:82m installed by oflm-add.
 import json
 import os
 import struct
