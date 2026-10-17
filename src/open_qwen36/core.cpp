@@ -380,6 +380,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     for (const auto& s : w_->tail) wanted[s.kernel] = true;
     for (const auto& [name, d] : w_->kernels)
         if (wanted.count(name)) load_kernel(name, d);
+    // a kind's position table can be narrower than the layout's (the 12B: 2048 global, 4096 sliding)
+    for (int l = 0; l < nl_; ++l)
+        for (const auto& s : types_[l]->program) {
+            auto k = kerns_.find(s.kernel);
+            if (k == kerns_.end() || k->second.patch != "attnpos") continue;
+            for (const auto& a : s.args) {
+                auto g = w_->per_row_globals.find(a);
+                if (g != w_->per_row_globals.end()) k->second.geom.ptab_row = g->second.per_row;
+            }
+        }
     logits_host_.assign(w_->vocab, 0.f);
 
     // 0167/#32: the GEMM-route block size every loaded layer type agrees on.

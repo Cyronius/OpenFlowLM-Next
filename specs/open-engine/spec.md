@@ -1121,6 +1121,9 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   keeps only its own four heads' q (`ATTN_QLOCAL`; all 16 heads of 512 would take 32 KB of the core's
   64 KB), and the main cores take the 16 KB attention output one x element at a time (it is four
   elements, and their x fifo holds two).
+- Each attention kernel finds its position record at the row of the table its program reads, not at
+  the layout's: the 12B's global table is 2048 bytes a row and the sliding one 4096 (every other
+  shipped kernel's table matches its layout, `utilities/ptab_strides.py`).
 
 **Acceptance criteria (unit):**
 - The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
