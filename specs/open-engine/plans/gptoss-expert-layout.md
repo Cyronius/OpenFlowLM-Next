@@ -59,11 +59,26 @@ sliding window on the even layers, 32 experts with 4 routed per token and no sha
 width 2880, vocabulary 201,088. Every projection has a bias, attention has a learned sink per head,
 the experts use a clamped SwiGLU, positions use YaRN.
 
-The source is `ggml-org/gpt-oss-20b-GGUF`, file `gpt-oss-20b-MXFP4.gguf` (12,109,566,624 bytes,
-sha256 `27cd6c43...35901`). The repo's `convert.log` says the experts were carried over from
-OpenAI's own MXFP4 without re-quantizing, the attention projections, embedding and head were
-converted from bf16 to Q8_0, and router, biases, norms and sinks are f32. The experts are 10.15 GB
-of the 12.1.
+The measurements below used `ggml-org/gpt-oss-20b-GGUF`, file `gpt-oss-20b-MXFP4.gguf`
+(12,109,566,624 bytes, sha256 `27cd6c43...35901`). The repo's `convert.log` says the experts were
+carried over from OpenAI's own MXFP4 without re-quantizing, the attention projections, embedding and
+head were converted from bf16 to Q8_0, and router, biases, norms and sinks are f32. The experts are
+10.15 GB of the 12.1.
+
+**Which GGUF to build against (survey, 2026-10-16).** Hugging Face lists 40 GGUF repos for
+gpt-oss-20b. Reading the tensor headers of seven files across the most-downloaded ones:
+
+- OpenAI released the experts in MXFP4 (`quant_method: mxfp4`; attention, router, embedding and
+  head are bf16), and every base-model GGUF read keeps them in MXFP4: unsloth's Q4_0, Q4_1 and F16,
+  bartowski's Q4_0 and ggml-org's file. The quant in a file's name applies only to the attention,
+  embedding and head, which is why those files are 11.5 to 13.8 GB whatever the label.
+- Non-MXFP4 experts appear only in fine-tunes saved in bf16 and re-quantized (MaziyarPanahi's
+  Derestricted Q4_K_M: Q5_0 and Q8_0 experts, 15.8 GB). None is the base model.
+- So the expert decision below does not depend on the file chosen, but the attention side does.
+  **Build against `unsloth/gpt-oss-20b-GGUF`, file `gpt-oss-20b-Q4_1.gguf`** (11.58 GB): its
+  attention projections and embedding are Q4_1, one rounding from OpenAI's bf16, and pack exactly
+  into the q4 pool with no re-quantization by the engine. Its head is Q8_0. ggml-org's file would
+  instead need its Q8_0 attention re-quantized (a second rounding).
 
 ## The expert layout: options and accounting
 
@@ -357,9 +372,9 @@ speed and memory step rather than a correctness one.
   35B), dropping what this family does not use (`moe_hdr2`'s shared-expert gate), and as a last
   step one tile walk for both formats with a runtime format branch, the kind of fold that made the
   mixed q8/q4_1 cores fit (`gemv_q4_gyms`).
-- **The attention projections are Q8_0 in the GGUF**, and the weights rule re-quantizes Q8_0 to q4_1.
-  On the 35B that cost a KL of 0.157 on its own. Here it touches only attention (about 15% of the
-  weights), and I did not measure it. The engine has a native q8 GEMV for q4nx containers already.
+- **The attention projections are Q8_0 in ggml-org's file**, and the weights rule re-quantizes Q8_0
+  to q4_1. On the 35B that cost a KL of 0.157 on its own. Building against unsloth's Q4_1 file
+  (above) avoids it: its attention and embedding are already Q4_1 and pack exactly.
 - **Prefill speed** (step 10), as above.
 - **Memory**: about 11.5 to 12 GB of NPU buffers resident (10.62 experts, 0.41 attention, 0.39 to
   0.70 for the head at q4_1 or q8, the KV cache), against 21.6 GB for the 35B. FLM's page asks for
@@ -392,7 +407,9 @@ speed and memory step rather than a correctness one.
    GGUF ships is not one the pools hold.
 2. **Uneven deal or padded rows.** I recommend uneven (6.7% less expert stream). Padded is simpler
    and is the fallback.
-3. **The attention projections: Q8_0 re-quantized to q4_1 as the weights rule says, or native q8.**
-   Unmeasured for this model; the 35B's number suggests it is not free.
+3. **The source file.** I recommend unsloth's `gpt-oss-20b-Q4_1.gguf`: the experts are the same
+   MXFP4 as every base-model GGUF, and the attention and embedding arrive as Q4_1, so nothing outside
+   the experts is re-quantized. The alternative is ggml-org's file, whose Q8_0 attention the engine
+   would re-quantize to q4_1 (unmeasured here; the 35B's number suggests it is not free).
 4. **Whether to start the build now or after Gemma 4.** The plan put gpt-oss last of the five, and
    the work above is about five weeks.

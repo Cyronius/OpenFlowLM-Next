@@ -15,6 +15,10 @@ the decisions it leaves to the user and the ordered work are in
 
 ## Source weights
 
+Build against `unsloth/gpt-oss-20b-GGUF` / `gpt-oss-20b-Q4_1.gguf`: experts MXFP4 as in every
+base-model GGUF, attention and embedding Q4_1 (exact into the q4 pool), head Q8_0. The file
+names' quant labels cover only those non-expert tensors; read headers, not names (the survey
+is in the plan doc). The spike's measurements used
 `ggml-org/gpt-oss-20b-GGUF` / `gpt-oss-20b-MXFP4.gguf`, 12,109,566,624 bytes,
 sha256 `27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901`. Experts are
 MXFP4 (type 39, 17-byte blocks: one E8M0 byte, then 16 bytes holding element j in the
