@@ -124,6 +124,9 @@ size_t gguf_view::to_q4nx_chunks(const GgufFile& g, const std::string& name, uin
         fail(name + " is not a [rows, " + std::to_string(cols) + "] matrix");
     if (rows % 32 || cols % 256) fail(name + ": [" + std::to_string(rows) + ", " + std::to_string(cols) + "] is not whole 32 x 256 chunks");
     const uint64_t src_rows = t.dims[1], nb = cols / 32, ncol = cols / 256;
+    // only the head pads rows; a body tensor whose rows disagree with the metadata would pack zeros
+    if (!head && rows != src_rows)
+        fail(name + " has " + std::to_string(src_rows) + " rows, the plan reads " + std::to_string(rows));
     using T = GgufFile::Type;
     const bool q4 = !head && (t.type == T::Q4_1 || t.type == T::Q4_0);
     const bool q4k = !head && t.type == T::Q4_K;

@@ -1511,6 +1511,8 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
 - **The head is the q8 head.** A Q8_0 head is exact; any other is re-quantized per 32 values with
   s = max|v| / 127 rounded toward +inf in bf16 and code = floor(v / s + 1/2) in [-127, 127], so
   every value lands within s/2. Rows are padded to a multiple of 256 with zeros (the spec's vocab).
+  Only the head pads: a body matmul whose row count differs from what the metadata implies is
+  refused, not packed with zero rows.
 - **Small tensors** as the container stores them: norms, conv1d and the alpha / beta copies bf16
   (round to nearest even), `ssm_a` / `ssm_dt.bias` f32 exact. The embedding row is the GGUF's own
   exact value.
@@ -1528,13 +1530,18 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
   reshape); q_proj's rows are all q then all gate; a re-quantized tensor is within d/2 of its
   source; a transcoded Q4_K one within 2^-8 of (15 d + |m|); the q8 head within s/2 with its
   padded rows zero.
+- Both views refuse a body tensor with fewer rows than the metadata implies (z at 224 rows where
+  the value heads need 256).
 - `oflm-add` treats a `qwen35` manifest at 5120-byte chunks as GGUF-capable without a nested
   section, and a `qwen36moe` one or a 6144-byte one as not; `qwen35` maps to family `qwen3.5`; a
   qwen3.5 GGUF install is text only (`vlm: false`, no `vision` label).
-- `oflm-add` accepts a `qwen35` GGUF whose `output.weight` is another quant than its body
-  (llama.cpp writes a Q6_K head over a Q4_1 or Q4_0 body), since the head is always repacked as
-  the q8 head; a body tensor of another quant is still refused, and so is such a head on an
-  architecture without a view.
+- The qwen3.5 GGUF route is opt-in while no qwen35 kernel set for it ships: without
+  `--open-kernels`, `oflm-add` skips the GGUF and installs as it did before the view; with it, the
+  install is GGUF-direct through the view.
+- `oflm-add` accepts a `qwen35` GGUF whose head is another quant than its body (llama.cpp writes a
+  Q6_K head over a Q4_1 or Q4_0 body; a tied model has no `output.weight` and its `token_embd`
+  takes the head's type), since the head is always repacked as the q8 head; a body tensor of
+  another quant is still refused, and so is such a head on an architecture without a view.
 
 **Verification (manual), a real file:** `src/open_qwen36/out/gguf_pack_test.exe --pack <manifest.json>
 <model.gguf> <dir> 0 3`, then `python open_kernels/model/gguf_q4nx_check.py <manifest.json>
@@ -1543,7 +1550,8 @@ recipes/pack.py over the NumPy view, byte for byte.
 
 **Result 2026-10-17 (openbmb/MiniCPM-V-4.7-1B-gguf, `MiniCPM-V-4_7-1B-Q4_1.gguf`): PASS.** Layer 0
 (linear) and layer 3 (full) pools and consts, the 271 MB lm_head pool (from the file's Q6_K head)
-and the final norm are byte-identical between the two packers.
+and the final norm are byte-identical between the two packers. Re-run on the final code (after the
+Q4_K transcode and the row check): PASS (`.claude/plans/qwen35-gguf-run/33-py-vs-cpp-pack-final.log`).
 
 **Result 2026-10-17, on the NPU (same file, its own export `MiniCPM-V-4.7-1B-gguf`, 41 kernels,
 `lx` fullest core 15 712 of 16 384 B): PASS.** OPEN-FAMILY-QWEN35's procedure. Slice (8 layers,
@@ -1581,19 +1589,24 @@ the recipe's `hf_config_check` names with the same values.
 The 256-row pad keeps the family's head kernel: 248320 for every Qwen3.5 / 3.6 vocabulary, whether
 the GGUF carries Qwen's padded 248320 rows or a fine-tune's 248094 or 248144.
 
-**The spec hash covers `real_vocab`.** MiniCPM-V-4.7-1B (248094 ids) derives the Qwen3.5-0.8B q4_1
-spec in every field but `real_vocab`: the same builds and kernels, a different hash, so `oflm-add`
-would not link it to the 0.8B set. It has a spec file of its own
-(`recipes/specs/minicpm-v-4.7-1b.json`) and a separate, byte-identical export. Leaving `real_vocab`
-out of the kernel-match hash would let such fine-tunes link to the family set without an export,
-and changes linking for every family; that is the maintainer's decision, not taken here.
+**The spec hash covers `real_vocab`.** A spec that differs only in `real_vocab` builds the same
+kernels and hashes differently, so `oflm-add` would not link a fine-tune that adds tokens to its
+base model's set. MiniCPM-V-4.7-1B (248094 ids, every role Q4_1) differs from the official
+Qwen3.5-0.8B-NPU2 container's derived spec in two fields, `real_vocab` (248070 there) and the quant
+map (that container derives `{"linear_out": "q8"}`; `.claude/plans/qwen35-gguf-run/31-qwen35-08b-container-spec.log`),
+so it would not link to that set even with `real_vocab` out of the hash. It has a spec file of its
+own, `recipes/specs/pending/minicpm-v-4.7-1b.json`, outside the default export (CMake, release
+staging and `export-kernels.py` without `--specs` build `recipes/specs/*.json` only): whether its
+set ships is the maintainer's decision, as is whether `real_vocab` belongs in the kernel-match hash.
 
 **Acceptance criteria:**
 - MiniCPM-V-4.7-1B's metadata gives family qwen35, 24 layers, hidden 1024, FFN 3584, 8 / 2 heads at
   256, rotary 64, 16 / 16 DeltaNet heads of 128, vocab 248320, real vocab 248094, epsilon 1e-6,
-  q4_1 everywhere, and the hash of `recipes/specs/minicpm-v-4.7-1b.json`.
-- That spec and the 0.8B q4_1 one differ in `real_vocab` alone, build the same kernels, and hash
+  q4_1 everywhere, and the hash of `recipes/specs/pending/minicpm-v-4.7-1b.json`.
+- That spec and one differing from it in `real_vocab` alone build the same kernels and hash
   differently.
+- `export-kernels.py`'s default spec list leaves the pending spec out; `--specs
+  pending/minicpm-v-4.7-1b` reaches it.
 - 248094 and 248144 rows pad to 248320, 248321 to 248576; trailing `[PAD<n>]` tokens are not
   vocabulary; one MTP block out of 25 leaves 24 layers; a Q8_0 `ssm_out` gives `{"linear_out": "q8"}`
   at hidden 1024; expert metadata is refused.

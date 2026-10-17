@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 OFLM_ADD = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(OFLM_ADD))
@@ -527,6 +529,46 @@ def test_verify_choice_lets_a_view_arch_head_differ(tmp_path):
     f.write_bytes(_gguf_bytes([("general.architecture", (8, "llama"))], body + q6k_head))
     ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
     assert not ok and "claims Q4_1" in note
+    # Tied: no output.weight, so llama.cpp gives token_embd the head's Q6_K.
+    f.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen35"))],
+                              body + [("token_embd.weight", 14, [256, 64])]))
+    ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
+    assert ok, note
+    f.write_bytes(_gguf_bytes([("general.architecture", (8, "qwen35"))],
+                              body + q6k_head + [("token_embd.weight", 14, [256, 64])]))
+    ok, note = oflm_add.verify_gguf_choice(str(f), "q.gguf", "Q4_1")
+    assert not ok and "claims Q4_1" in note
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_qwen35_gguf_route_is_opt_in(tmp_path, capsys, monkeypatch, explicit):
+    # Traces: OPEN-GGUF-Q4NX-VIEW. Without --open-kernels a qwen3.5 GGUF installs as it did before the view.
+    from pathlib import Path as _Path
+    system_list = _Path(__file__).resolve().parents[3] / "src" / "model_list.json"
+    if not system_list.is_file():
+        pytest.skip("no checked-in model_list.json")
+    repo = tmp_path / "SomeQwen35Tune"
+    repo.mkdir()
+    (repo / "sometune-Q4_1.gguf").write_bytes(_gguf_bytes(
+        [("general.architecture", (8, "qwen35"))],
+        [("blk.0.ffn_up.weight", 3, [256, 32]), ("output.weight", 14, [256, 64])]))
+    kernels = tmp_path / "set"
+    kernels.mkdir()
+    (kernels / "manifest.json").write_text(
+        json.dumps({"family": "qwen35", "layout": {"chunk_bytes": 5120}}), encoding="utf-8")
+    argv = ["oflm-add", str(repo), "--tag", "sometune:0.8b", "--system-list", str(system_list),
+            "--config", str(tmp_path / "user_list.json"), "--models-root", str(tmp_path / "models"),
+            "--dry-run", "--quiet"]
+    if explicit:
+        argv += ["--open-kernels", str(kernels)]
+    monkeypatch.setattr("sys.argv", argv)
+    oflm_add.main()
+    out = capsys.readouterr().out
+    assert "details.family : qwen3.5" in out
+    if explicit:
+        assert "GGUF-direct, read through the q4nx view" in out
+    else:
+        assert "GGUF-direct" not in out and "opt-in" in out
 
 
 def test_extract_tokenizer_from_gguf_round_trips(tmp_path):

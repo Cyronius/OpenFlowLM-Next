@@ -68,12 +68,9 @@ GGUF_OPTIONAL = ["chat_template.jinja"]
 # then K-quants, Q8_0 last (~2x the bytes of the 4-bit files for little
 # quality gain on the NPU path).
 GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
-# Families whose engine loads model.gguf: open_qwen36's dense recipe (the GGUF manifest
-# section + f32-scale kernel sets) and qwen3.5, whose engine reads the GGUF through a
-# q4nx view (GGUF_VIEW_RECIPES). qwen3.6-moe is NOT there yet -- a GGUF for it installs
-# as plain safetensors instead.
+# qwen3.6-moe is not here yet: a GGUF for it installs as plain safetensors instead.
 GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan", "qwen3.5"}
-# Registry families read through the q4nx view: no vision path on the open engine.
+# Read through the q4nx view (GGUF_VIEW_RECIPES): text only, and opt-in with --open-kernels.
 GGUF_VIEW_FAMILIES = {"qwen3.5"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
@@ -158,12 +155,9 @@ def repo_has_q4nx(tree, cache=None):
     )
 
 
-# Recipe families whose engine reads a GGUF through a q4nx view of it (OPEN-GGUF-Q4NX-VIEW,
-# src/open_qwen36/gguf_view.cpp): their kernel set's own 5120-byte plan serves the GGUF, so the
-# manifest needs no nested `gguf` section. Such a model is text-only on the open engine.
+# The set's own 5120-byte plan serves the GGUF (OPEN-GGUF-Q4NX-VIEW), so no nested `gguf` section.
 GGUF_VIEW_RECIPES = {"qwen35"}
-# The same, by GGUF general.architecture: the view repacks the head into the family's q8 head
-# whatever its type, so llama.cpp's Q6_K output.weight over a Q4_1 body is not a mismatch.
+# The view repacks the head as the q8 head whatever its type, so a Q6_K head is no mismatch.
 GGUF_VIEW_ARCHS = {"qwen35"}
 
 
@@ -1694,9 +1688,11 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     # (Q8_0 over Q4_*); anything else must be the claimed family.
     arch = kv.get("general.architecture", "?")
     head_free = str(arch).strip().lower() in GGUF_VIEW_ARCHS
+    # a tied model has no output.weight; llama.cpp then gives token_embd the head's type
+    head = "output.weight" if any(n == "output.weight" for n, _, _ in tensors) else "token_embd.weight"
     quants = {GGML_TYPE_NAMES[t] for name, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")
-               and not (head_free and name == "output.weight")}
+               and not (head_free and name == head)}
     others = quants - {claimed_family, "Q8_0"}
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
@@ -2048,6 +2044,10 @@ def main():
             gguf_skip = (f"family '{family}' does not load GGUF yet (GGUF-direct covers "
                          + ", ".join(sorted(GGUF_CAPABLE_FAMILIES))
                          + "); installing the safetensors weights instead")
+        elif family in GGUF_VIEW_FAMILIES and not args.open_kernels:
+            # validated at one shape and no set ships for it yet, so a default install must not change
+            gguf_skip = (f"the {family} GGUF route is opt-in until its kernel sets ship: pass "
+                         "--open-kernels <set>; installing the safetensors weights instead")
         else:
             if args.open_kernels:
                 mj = Path(args.open_kernels) / "manifest.json"
@@ -2223,8 +2223,7 @@ def main():
         entry["details"]["weights"] = "gguf"      # the engine loads model.gguf (f32-scale pools)
         entry.setdefault("flm_min_version", "0.9.45")
         if family in GGUF_VIEW_FAMILIES:
-            # the open engine reads the language model only; no mmproj is installed
-            entry["vlm"] = False
+            entry["vlm"] = False   # the open engine reads the language model only; no mmproj is installed
             entry["label"] = [x for x in entry.get("label", []) if x != "vision"]
     if npue_embed:
         # build_entry copies npue_design_family / details / label from the official

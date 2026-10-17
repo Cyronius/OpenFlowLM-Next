@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,8 +33,7 @@ using namespace open_qwen36;
 
 namespace {
 
-// ---- OPEN-GGUF-Q4NX-VIEW: a synthetic qwen35 GGUF, built the same way by
-// specs/open-engine/tests/test_gguf_q4nx_view.py, whose view must hash the same.
+// test_gguf_q4nx_view.py builds the same synthetic GGUF; both views must hash to this
 constexpr uint64_t VIEW_FNV1A = 0xbbe4818c9288d59cull;
 
 uint64_t fnv1a(uint64_t h, const void* p, size_t n) {
@@ -135,7 +135,8 @@ std::vector<SynTensor> syn_qwen35_tensors() {
 }
 
 /// A GGUF v3 file of the tensors above under the qwen35 keys the view reads.
-std::string write_syn_qwen35(const fs::path& dir, const std::vector<SynTensor>& ts) {
+std::string write_syn_qwen35(const fs::path& dir, const std::vector<SynTensor>& ts,
+                             const char* file = "syn-qwen35.gguf") {
     std::vector<uint8_t> f;
     f.insert(f.end(), {'G', 'G', 'U', 'F'});
     auto u32 = [&](uint32_t v) { f.insert(f.end(), reinterpret_cast<const uint8_t*>(&v), reinterpret_cast<const uint8_t*>(&v) + 4); };
@@ -176,7 +177,7 @@ std::string write_syn_qwen35(const fs::path& dir, const std::vector<SynTensor>& 
         f.insert(f.end(), t.bytes.begin(), t.bytes.end());
         rel = (rel + t.bytes.size() + 31) / 32 * 32;
     }
-    const fs::path out = dir / "syn-qwen35.gguf";
+    const fs::path out = dir / file;
     std::ofstream of(out, std::ios::binary);
     of.write(reinterpret_cast<const char*>(f.data()), static_cast<std::streamsize>(f.size()));
     return out.string();
@@ -216,8 +217,7 @@ uint64_t view_hash(const GgufQ4nxView& v, bool verbose) {
     return all;
 }
 
-/// `gguf_pack_test --pack <manifest.json> <model.gguf> <out dir> <layer>...`: the engine's own
-/// pool, consts and head bytes through the q4nx view, for open_kernels/model/gguf_q4nx_check.py.
+// --pack: the engine's pools, consts and head for open_kernels/model/gguf_q4nx_check.py to compare
 int pack_mode(int argc, char** argv) {
     if (argc < 6) {
         std::printf("usage: gguf_pack_test --pack <manifest.json> <model.gguf> <out dir> <layer>...\n");
@@ -690,6 +690,23 @@ int main(int argc, char** argv) {
         std::printf("%s derive_config: the qwen35 fields the kernel set checks %s\n", cfg_ok ? "ok  " : "FAIL",
                     c.dump().c_str());
         if (!cfg_ok) return 1;
+    }
+
+    // ---- OPEN-GGUF-Q4NX-VIEW: a body tensor shorter than the metadata says is refused, not zero-filled
+    {
+        auto ts = syn_qwen35_tensors();
+        for (auto& t : ts)
+            if (t.name == "blk.0.attn_gate.weight") t = syn_tensor(t.name, t.type, {256, 224});
+        const GgufQ4nxView v(write_syn_qwen35(dir, ts, "syn-qwen35-short.gguf"));
+        bool refused = false;
+        try {
+            size_t n = 0;
+            v.raw("model.layers.0.self_attn.gate_proj.weight", &n);
+        } catch (const std::runtime_error&) {
+            refused = true;
+        }
+        std::printf("%s q4nx view refuses a body tensor with fewer rows than the metadata\n", refused ? "ok  " : "FAIL");
+        if (!refused) return 1;
     }
 
     std::printf("GGUF-PACK OK\n");

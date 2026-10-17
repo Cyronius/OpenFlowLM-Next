@@ -202,8 +202,7 @@ def _dq_q4_k(raw) -> np.ndarray:
 
 
 def file_head(h, num_k, num_v):
-    """llama.cpp's tiled value-head order -> the grouped one: grouped head h is file head
-    (h % grp) * num_k + h // grp (OPEN-CONVERT-QWEN35-VHEADS)."""
+    """Grouped head h is file head (h % grp) * num_k + h // grp (OPEN-CONVERT-QWEN35-VHEADS)."""
     grp = num_v // num_k
     return (h % grp) * num_k + h // grp
 
@@ -218,8 +217,7 @@ _CODE_AT = _code_index()
 
 
 def requant_q8_blocks(v) -> tuple[np.ndarray, np.ndarray]:
-    """The head's q8 law (gguf_view.cpp requant_q8_block): per 32 values s = max|v| / 127
-    toward +inf in bf16, code = floor(v / s + 1/2) clipped to [-127, 127]. v: [..., 32]."""
+    """gguf_view.cpp requant_q8_block: s = max|v| / 127 toward +inf in bf16, code = floor(v / s + 1/2)."""
     v = np.asarray(v, np.float32)
     amax = np.abs(v).max(-1)
     s_u = bf16_ceil((amax / np.float32(127)).astype(np.float32))
@@ -237,6 +235,8 @@ def to_q4nx_chunks(g: GgufReader, name, rows, cols, row_of=None, blk_of=None, he
     src_rows, src_cols = g.shape(name)
     if src_cols != cols:
         raise ValueError(f"{name} is [{src_rows}, {src_cols}], the plan reads {cols} columns")
+    if not head and rows != src_rows:
+        raise ValueError(f"{name} has {src_rows} rows, the plan reads {rows}")
     if rows % 32 or cols % 256:
         raise ValueError(f"{name}: [{rows}, {cols}] is not whole 32 x 256 chunks")
     nb, ncol, nrb = cols // 32, cols // 256, rows // 32

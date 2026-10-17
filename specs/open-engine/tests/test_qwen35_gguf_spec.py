@@ -12,6 +12,8 @@ from recipes.load import load_spec, narrow_to_buildable
 from recipes.spec import ModelSpec, SpecError, gguf_real_vocab, quant_map_from_gguf_types
 
 SPECS = Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
+# not in the default export (specs/pending/README.md): whether its set ships is the maintainer's call
+MINICPM_SPEC = SPECS / "pending" / "minicpm-v-4.7-1b.json"
 
 # openbmb/MiniCPM-V-4.7-1B-gguf, MiniCPM-V-4_7-1B-Q4_1.gguf, read by range request 2026-10-16
 MINICPM_V_47_1B = {
@@ -40,13 +42,15 @@ def test_minicpm_gguf_derives_the_checked_in_spec():
     assert s.vocab == 248320 and s.real_vocab == 248094       # padded to 256 rows; the tokenizer's own ids
     assert s.norm_eps == 1e-6                                  # the f32 field read back as config.json says it
     assert quant_map_from_gguf_types("qwen35", MINICPM_TYPES) == {}
-    want = load_spec(SPECS / "minicpm-v-4.7-1b.json")
+    want = load_spec(MINICPM_SPEC)
     assert s.spec_hash() == want.spec_hash()
+    assert want.spec_hash() == "sha256:b6087971182e34fcaa1f8c0132409ef9f14f82224bde33ee44fa11d5da7e25d1"
+    assert want.extra["model"] == "MiniCPM-V-4.7-1B-gguf"           # the directory oflm-add installs it as
 
 
-def test_the_only_difference_from_the_qwen35_08b_q4_1_set_is_real_vocab():
-    """The spec-hash finding: every kernel is the 0.8B's, the hash is not."""
-    mini = load_spec(SPECS / "minicpm-v-4.7-1b.json")
+def test_real_vocab_moves_the_hash_but_not_the_kernels():
+    """The spec-hash finding: a spec that differs only in real_vocab builds the same kernels."""
+    mini = load_spec(MINICPM_SPEC)
     base = ModelSpec.from_dict({**mini.to_dict(), "real_vocab": 248070})
     assert mini.to_dict().keys() == base.to_dict().keys()
     diff = {k for k in mini.to_dict() if k != "extra" and mini.to_dict()[k] != base.to_dict()[k]}
@@ -104,3 +108,13 @@ def test_engine_config_fields_match_the_recipe_check():
     assert {k: engine[k] for k in check} == check
     assert engine["model_type"] in ("qwen3_5", "qwen3_5_text")
     assert json.dumps(engine["layer_types"]) == json.dumps(list(s.layer_types))
+
+
+def test_the_minicpm_set_is_not_in_the_default_export():
+    import importlib.util
+    path = SPECS.parents[2] / "utilities" / "export-kernels.py"
+    spec = importlib.util.spec_from_file_location("export_kernels", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert MINICPM_SPEC not in mod.spec_list("")        # the default: what CMake and release staging build
+    assert mod.spec_list("pending/minicpm-v-4.7-1b") == [MINICPM_SPEC]

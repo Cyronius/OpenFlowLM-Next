@@ -479,8 +479,7 @@ def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:
                             f"{a}.expert_feed_forward_length": 0, f"{a}.block_count": n})
     d = base.to_dict()
     rows = d["vocab"]
-    # OPEN-GGUF-QWEN35-SPEC: the head pads to whole 256 rows (248320 for every Qwen3.5 / 3.6 vocabulary,
-    # trimmed or not), so a fine-tune that resizes the vocabulary keeps the family's lm_head kernel
+    # whole 256 rows, so a fine-tune that resizes the vocabulary keeps the family's lm_head kernel
     d.update(family="qwen35", intermediate=k("feed_forward_length"), vocab=-(-rows // 256) * 256,
              real_vocab=gguf_real_vocab(md, rows), norm_eps=_f32_shortest(d["norm_eps"]))
     return ModelSpec.from_dict(d)

@@ -105,17 +105,17 @@ def syn_bytes(name: str, ty: int, dims) -> bytes:
     return bytes(b)
 
 
-def syn_gguf() -> bytes:
+def syn_gguf(tensors=TENSORS) -> bytes:
     """gguf_pack_test.cpp `write_syn_qwen35`, in memory."""
     def s(x: str) -> bytes:
         e = x.encode()
         return struct.pack("<Q", len(e)) + e
-    out = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(TENSORS), len(GEOMETRY) + 1))
+    out = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(GEOMETRY) + 1))
     out += s("general.architecture") + struct.pack("<I", 8) + s("qwen35")
     for k, v in GEOMETRY.items():
         out += s(k) + struct.pack("<II", 4, v)
     data, rel = [], 0
-    for name, ty, dims in TENSORS:
+    for name, ty, dims in tensors:
         payload = syn_bytes(name, ty, dims)
         out += s(name) + struct.pack("<I", len(dims)) + b"".join(struct.pack("<Q", d) for d in dims)
         out += struct.pack("<IQ", ty, rel)
@@ -148,6 +148,13 @@ def view_hash(v) -> int:
 
 def test_view_bytes_match_the_cpp_view(view):
     assert view_hash(view) == VIEW_FNV1A
+
+
+def test_body_tensor_with_fewer_rows_than_the_metadata_is_refused():
+    short = [(n, ty, [256, 224] if n == "blk.0.attn_gate.weight" else d) for n, ty, d in TENSORS]
+    v = GgufAsQ4nx(GgufReader(syn_gguf(short)))
+    with pytest.raises(ValueError, match="rows"):
+        v._get("model.layers.0.self_attn.gate_proj.weight")
 
 
 def tiled_to_grouped(t, num_k, num_v, unit):

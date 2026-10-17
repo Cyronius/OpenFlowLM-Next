@@ -133,9 +133,7 @@ def spec_from_model_dir(model_dir: Path) -> ModelSpec:
     return spec
 
 
-# GGUF architectures the engine reads through a q4nx view of the file (src/open_qwen36/gguf_view.cpp),
-# so their spec comes from the GGUF itself (OPEN-GGUF-QWEN35-SPEC): a wrapper's config.json, like
-# MiniCPM-V's, need not describe the tower the weights are for.
+# spec from the GGUF itself: a wrapper's config.json (MiniCPM-V's) need not describe this tower
 GGUF_VIEW_ARCHS = ("qwen35",)
 _GGUF_TYPES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1",
                10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 30: "BF16"}
@@ -178,9 +176,7 @@ def read_gguf_header(path: Path, types: bool = True):
 
 
 def spec_from_gguf(path: Path, real_vocab: int | None = None, model: str | None = None) -> ModelSpec:
-    """The spec a GGUF derives (OPEN-GGUF-QWEN35-SPEC): shape from its metadata, the per-role
-    weight format from its tensor types (a Q8_0 role streams at q8 where the family can), the real
-    vocabulary from the model's tokenizer.json when one is at hand."""
+    """OPEN-GGUF-QWEN35-SPEC: shape from the metadata, each role's format from its tensor type."""
     from .spec import quant_map_from_gguf_types
     kv, types = read_gguf_header(path)
     spec = ModelSpec.from_gguf_metadata(kv)

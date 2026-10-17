@@ -172,8 +172,7 @@ def test_no_shipped_models_hash_moved():
     what would catch a `short_conv` change that moved the hash. minicpm5-2b arrived from
     main in #85 and is pinned at the value it hashes to here, which is the point: the
     eleven that predate this branch did not move, so `qkv_bias` is a kernel knob and not
-    a ModelSpec field. minicpm-v-4.7-1b came with the qwen35 GGUF route (OPEN-GGUF-QWEN35-SPEC)
-    and is pinned at the hash its GGUF derives."""
+    a ModelSpec field."""
     import pathlib
 
     from recipes.load import load_spec
@@ -193,7 +192,6 @@ def test_no_shipped_models_hash_moved():
         "k2-horizon-3.7b.json": "sha256:18952d15a05780550c7d469b728fd6c686b6cb4c23635257e82c842aecd8e50a",
         "qwen35-27b.json": "sha256:2a510346192e7ae9fbf24417c61fd7f6e90905c807ecd1fe444a4da7333f3458",
         "qwen3-8b.json": "sha256:04374f23aede126f34237de4e298a9d385dd36eb6041723032de14884648bab5",
-        "minicpm-v-4.7-1b.json": "sha256:b6087971182e34fcaa1f8c0132409ef9f14f82224bde33ee44fa11d5da7e25d1",
     }
     specs = pathlib.Path(__file__).resolve().parents[3] / "open_kernels" / "recipes" / "specs"
     assert {p.name for p in specs.glob("*.json")} == set(frozen), "a new shipped spec wants a hash here"

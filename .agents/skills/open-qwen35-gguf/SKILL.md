@@ -35,14 +35,16 @@ read yet (unsloth's Qwen3.5 Q4_K_M files carry it; oflm-add refuses them).
 `recipes/load.py spec_from_model_dir` derives a GGUF model dir's spec from the GGUF itself
 (OPEN-GGUF-QWEN35-SPEC): vocab padded to 256 rows (248320 for every Qwen3.5 vocabulary),
 real vocab from `tokenizer.json`, the role formats from the tensor types. `real_vocab` is in
-`spec_hash()`, so a fine-tune that adds tokens (MiniCPM-V-4.7-1B: 248094) does not link to the
-base model's set even though every kernel is the same. Today such a model gets a spec file of
-its own and a separate export (`recipes/specs/minicpm-v-4.7-1b.json`); whether to drop
-`real_vocab` from the kernel-match hash is the maintainer's decision.
+`spec_hash()`, so a fine-tune that adds tokens does not link to its base model's set even when
+every kernel is the same. MiniCPM-V-4.7-1B also differs in its quant map: every role is Q4_1,
+while the official Qwen3.5-0.8B-NPU2 container derives `linear_out=q8`. So it has a spec of its
+own, kept in `recipes/specs/pending/` so the default export (CMake, release staging,
+`export-kernels.py` without `--specs`) does not build and ship it; whether it ships, and whether
+`real_vocab` belongs in the kernel-match hash, is the maintainer's decision.
 
 ```
-python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/minicpm-v-4.7-1b.json
-#   -> src/xclbins/MiniCPM-V-4.7-1B-gguf/open_kernels (41 kernels, the 0.8B q4_1 set's)
+python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/pending/minicpm-v-4.7-1b.json
+#   -> src/xclbins/MiniCPM-V-4.7-1B-gguf/open_kernels (41 kernels, the 0.8B shape at q4_1)
 ```
 
 ## Install and serve
@@ -56,12 +58,13 @@ oflm-add picks the Q4_1 file, takes family `qwen3.5` from the GGUF architecture,
 tokenizer and `config.json` from the base repo, writes a text-only entry (`vlm: false`), and
 links the kernel set. Traps:
 
-- The GGUF gate checks the kernel set of the *official match* (`qwen3.5:0.8b` ->
-  `Qwen3.5-0.8B-NPU2`), not the set whose spec hash matches. Without that set installed, or
-  without `--open-kernels`, the install falls back to the base repo's safetensors (for MiniCPM-V,
-  the VLM wrapper's). Pass `--open-kernels` for a fine-tune with its own set.
-- llama.cpp writes the head as Q6_K over a Q4_1 / Q4_0 body; for a qwen35 GGUF oflm-add leaves the
-  head out of its quant-name check (the engine repacks it as the q8 head anyway). A body tensor of
+- The qwen3.5 GGUF route is opt-in: without `--open-kernels` oflm-add skips the GGUF and installs
+  the base repo's safetensors (for MiniCPM-V, the VLM wrapper's), as it did before the view. It
+  has run on hardware at one shape only (16 key heads over 16 value heads), and no qwen35 set a
+  plain install could link ships for it yet.
+- llama.cpp writes the head as Q6_K over a Q4_1 / Q4_0 body (for a tied model, `token_embd` takes
+  the head's type); for a qwen35 GGUF oflm-add leaves the head out of its quant-name check (the
+  engine repacks it as the q8 head anyway). A body tensor of
   another quant is still refused: MiniCPM-V's Q4_K_M file mixes Q6_K into qkv / v / down, so
   oflm-add refuses it even though the engine reads it.
 - MiniCPM-V's `config.json` keeps `vocab_size` under `text_config`; the Qwen3.5 adapter
@@ -75,6 +78,7 @@ Then `oflm serve minicpm-v-4.7:1b` and `oflm-test --llm --model minicpm-v-4.7:1b
 - Unit: `src/open_qwen36/gguf_pack_test` (ctest GGUF-PACK) and
   `specs/open-engine/tests/test_gguf_q4nx_view.py` / `test_qwen35_gguf_spec.py`. The two views
   must hash to the same FNV-1a on the shared synthetic GGUF; if one changes, both tests fail.
+- The view refuses a body tensor whose rows disagree with the metadata, rather than zero-filling.
 - A real file: `gguf_pack_test --pack <manifest.json> <model.gguf> <dir> 0 3` then
   `python open_kernels/model/gguf_q4nx_check.py <manifest.json> <model.gguf> <dir> 0 3`
   (engine pools vs recipes/pack.py, byte for byte).
@@ -88,5 +92,5 @@ memory at h1024.
 
 ## Not covered yet
 
-Vision (the mmproj GGUF), `qwen35moe` (expert tensors), Q5_K, and the release export list (the
-MiniCPM set is not in it).
+Vision (the mmproj GGUF), `qwen35moe` (expert tensors), Q5_K, a default (no `--open-kernels`)
+install, and shipping the MiniCPM set (its spec is in `recipes/specs/pending/`).
