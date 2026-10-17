@@ -557,6 +557,18 @@ def test_verify_choice_matches_tensors_against_claim(tmp_path):
     assert not ok and "Q4_0_4_4" in note
 
 
+def test_verify_choice_lets_the_embedding_differ_from_the_body(tmp_path):
+    """Traces: OPEN-VISION-GEMMA3. unsloth's MedGemma Q4_1 file keeps token_embd at Q6_K (type 14)."""
+    med = tmp_path / "med.gguf"
+    med.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 3, [32, 32]), ("token_embd.weight", 14, [256, 8])]))
+    ok, note = oflm_add.verify_gguf_choice(str(med), "med-Q4_1.gguf", "Q4_1")
+    assert ok, note
+    body = tmp_path / "body.gguf"
+    body.write_bytes(_gguf_bytes(_llama_kv(), [("blk.0.attn_q.weight", 14, [256, 8]), ("token_embd.weight", 3, [32, 32])]))
+    ok, note = oflm_add.verify_gguf_choice(str(body), "body-Q4_1.gguf", "Q4_1")
+    assert not ok and "claims Q4_1" in note
+
+
 def test_extract_tokenizer_from_gguf_round_trips(tmp_path):
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(_gguf_bytes(_llama_kv()))

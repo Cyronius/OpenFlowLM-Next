@@ -1745,7 +1745,10 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     # (Q8_0 over Q4_*); anything else must be the claimed family.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
+    # unsloth's and bartowski's Q4_0 / Q4_1 files keep the embedding (the tied head) at Q6_K
+    body = {GGML_TYPE_NAMES[t] for n, t, _ in tensors
+            if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16") and n not in ("token_embd.weight", "output.weight")}
+    others = body - {claimed_family, "Q8_0"}
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
                        f"{claimed_family}; refusing rather than packing the wrong layout")
