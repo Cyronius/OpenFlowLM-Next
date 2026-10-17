@@ -18,12 +18,26 @@ void Gemma4_12B::load_model(std::string model_path, json model_info, int default
 
     this->_shared_load_model(model_path, model_info, default_context_length, enable_preemption);
 
-    this->q4nx = std::make_unique<Q4NX>(this->model_path);
-    this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
-
-    this->lm_engine->load_weights(*this->q4nx);
-    // free the q4nx
-    this->q4nx.reset();
+    // The open kernels when installed for this model (text only), the closed gemma4_12b_npu DLL otherwise
+    auto open_engine = this->_shared_select_open_engine("OFLM_GEMMA4_ENGINE", "Gemma 4 12B (text)");
+    this->open_text_ = static_cast<bool>(open_engine);
+    if (open_engine) {
+        this->lm_engine = std::move(open_engine);
+        // Google's config.json nests the text model under text_config, where top-level readers (the sampler's vocab_size) never look
+        auto& jc = this->lm_config->_json_config;
+        if (jc.contains("text_config") && jc["text_config"].is_object()) {
+            const nlohmann::json tc = jc["text_config"];
+            for (auto it = tc.begin(); it != tc.end(); ++it) {
+                if (!jc.contains(it.key())) jc[it.key()] = it.value();
+            }
+        }
+    } else {
+        this->q4nx = std::make_unique<Q4NX>(this->model_path);
+        this->lm_engine = std::make_unique<gemma4_12b_npu>(*this->lm_config, this->npu.get(), this->MAX_L);
+        this->lm_engine->load_weights(*this->q4nx);
+        // free the q4nx
+        this->q4nx.reset();
+    }
     // The soft token budget is a preprocessing constant (processor_config.json
     // image_seq_length / image_processor.max_soft_tokens), read by the engine
     // along with the rest of the image front end parameters.
@@ -106,6 +120,20 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
         return false;
     }
 
+    if (this->open_text_) {
+        bool media = !input.images.empty() || !input.audios.empty();
+        for (const auto& m : input.messages) media = media || m.contains("images") || m.contains("audios");
+        if (media) {
+            header_print("ERROR", "Gemma 4 12B on the open kernels is text only; for images and audio run the gemma4-it:12b tag (FLM's .q4nx container, closed engine)");
+            return false;
+        }
+        nlohmann::ordered_json messages = input.messages;
+        if (messages.empty()) messages.push_back({{"role", "user"}, {"content", input.prompt}});
+        std::vector<int> tokens = this->tokenizer->encode(this->apply_chat_template(messages, input.tools));
+        this->profiler_list[TKOEN_ENCODE_TIME].stop(tokens.size());
+        this->feed_empty_thought = false;    // the closed engine's checkpoint trick; the open one prefills the block as written
+        return this->_shared_insert(meta_info, tokens, is_cancelled);
+    }
 
     gemma4_12b_image_payload_t image_payload;
     gemma4_12b_audio_payload_t audio_payload;

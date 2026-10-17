@@ -72,7 +72,7 @@ GGUF_QUANT_PREFERENCE = ["Q4_1", "Q4_0", "Q4_K", "Q6_K", "Q8_0"]
 # manifest section + f32-scale kernel sets only ship for these). qwen3.5
 # (fused attn_qkv/MTP) and qwen3.6-moe are NOT there yet -- a GGUF for those
 # installs as plain safetensors instead.
-GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan", "gemma4e"}
+GGUF_CAPABLE_FAMILIES = {"qwen3", "llama3", "gemma3", "granite", "hunyuan", "gemma4e", "gemma4-12b"}
 # Embedding GGUF (gemma-embedding) loads via the existing bf16 matmul kernels,
 # not the f32-scale GGUF-direct pools; the engine reads model.gguf directly and
 # dequantizes, so no open_kernels "gguf" manifest section is required.
@@ -188,6 +188,9 @@ FAMILY_ALIASES = [
     ("qwen2.5", "qwen2"),
     ("qwen2vl", "qwen2vl"),
     ("qwen2", "qwen2"),
+    # the 12B is its own adapter (and its own closed engine); every other Gemma 4 is the E-series'
+    ("gemma4-12b", "gemma4-12b"),
+    ("gemma-4-12b", "gemma4-12b"),
     ("gemma4", "gemma4e"),
     ("gemma-4", "gemma4e"),
     ("gemma3", "gemma3"),

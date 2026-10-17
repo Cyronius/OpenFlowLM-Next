@@ -561,6 +561,15 @@ def test_verify_choice_lets_the_embeddings_be_coarser(tmp_path):
     assert not ok and "claims Q4_0" in note
 
 
+def test_gemma4_12b_names_route_to_their_own_family_and_may_install_a_gguf():
+    """Traces: OPEN-FAMILY-GEMMA4. The 12B is the gemma4-12b adapter, not the E-series one."""
+    for name in ("Gemma4-12B-it-GGUF", "gemma-4-12B-it-qat-q4_0-gguf", "gemma-4-12b-it-GGUF"):
+        assert oflm_add.derive_family({}, name) == "gemma4-12b", name
+    for name in ("gemma-4-E4B-it-qat-q4_0-gguf", "Gemma4-E2B-it-GGUF"):
+        assert oflm_add.derive_family({}, name) == "gemma4e", name
+    assert {"gemma4e", "gemma4-12b"} <= oflm_add.GGUF_CAPABLE_FAMILIES
+
+
 def test_a_gguf_install_is_registered_text_only():
     """The official gemma4-it entry advertises images and audio; a GGUF install carries the text model only."""
     base = {"name": "Gemma4-E4B-IT-NPU2", "vlm": True, "asr": True,

@@ -26,6 +26,7 @@ class Gemma4_12B : public AutoModel {
 private:
     // set per insert(): the prompt ended with the empty thought block that was trimmed off
     bool feed_empty_thought = false;
+    bool open_text_ = false;      ///< text on the open kernels (OPEN-FAMILY-GEMMA4); images and audio need the closed engine
 
     void setup_tokenizer(std::string model_path);
 

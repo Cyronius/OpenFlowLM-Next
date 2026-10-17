@@ -173,7 +173,8 @@ nlohmann::json derive_config(const GgufFile& g) {
     else
         c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
     c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
+    // the Gemma 4 12B lists head_count_kv per layer, an array this reader skips: the gemma4 branch reads its k projections
+    if (!g.kv_str(arch + ".attention.head_count_kv").empty()) c["num_key_value_heads"] = u("attention.head_count_kv");
     // Gemma 4 E2B lists one FFN width per layer, an array this reader skips: layer 0's tensor says it
     if (g.kv_str(arch + ".feed_forward_length").empty())
         c["intermediate_size"] = g.tensor("blk.0.ffn_up.weight").dims.at(1);
@@ -187,8 +188,27 @@ nlohmann::json derive_config(const GgufFile& g) {
         // key_length is the global layers' width; transformers' head_dim is the sliding one
         c["head_dim"] = u("attention.key_length_swa");
         c["global_head_dim"] = u("attention.key_length");
-        c["hidden_size_per_layer_input"] = u("embedding_length_per_layer_input");
+        c["hidden_size_per_layer_input"] =
+            g.kv_has(arch + ".embedding_length_per_layer_input") ? u("embedding_length_per_layer_input") : 0;
         c["final_logit_softcapping"] = g.kv_f64(arch + ".final_logit_softcapping");
+        if (!c.contains("num_key_value_heads")) {
+            // a global layer's q is head_count heads of key_length; the k projection's rows give each kind's kv
+            // heads, and a global layer without attn_v takes v from k (attention_k_eq_v)
+            const uint64_t nh = u("attention.head_count"), hd = u("attention.key_length_swa"),
+                           ghd = u("attention.key_length"), n = u("block_count");
+            for (uint64_t l = 0; l < n; ++l) {
+                const std::string b = "blk." + std::to_string(l) + ".";
+                if (!g.has(b + "attn_k.weight")) continue;
+                const bool glob = g.tensor(b + "attn_q.weight").dims.at(1) == nh * ghd;
+                const uint64_t kv = g.tensor(b + "attn_k.weight").dims.at(1) / (glob ? ghd : hd);
+                if (!glob) {
+                    c["num_key_value_heads"] = kv;
+                } else if (!c.contains("num_global_key_value_heads")) {
+                    c["num_global_key_value_heads"] = kv;
+                    c["attention_k_eq_v"] = !g.has(b + "attn_v.weight");
+                }
+            }
+        }
     }
     return c;
 }
@@ -761,7 +781,7 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
         pools::build_ptab(*w_, rg, cfg_.max_ctx, pt.data());
         globals_[name] = alloc(pt.size(), pt.data(), pt.size());
     }
-    if (w_->ple.present()) ple_load();
+    if (w_->ple.present() || !w_->ple.scalar.empty()) ple_load();
     file_->drop_pages();  // the packers are done with the container; keep only what the steps touch
     if (progress) progress(nl_ + 1, nl_ + 1);
     weights_loaded_ = true;
@@ -1896,7 +1916,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
     //
     // Deepstack (Qwen3-VL) reads xres back between layers, which needs the layer's last
     // dispatch to have landed; the pipeline is off for that path rather than special-cased.
-    const bool pipe = submit_ahead_ > 0 && !deepstack && !w_->ple.present();   // both read xres between layers
+    const bool pipe = submit_ahead_ > 0 && !deepstack && ple_w_.scalar.empty();   // both read xres between layers
     Inflight head, tail_in;                 // layer l's first dispatch; layer l - 1's last
     for (int l = 0; l < nl_; ++l) {
         const std::vector<Step>& prog = types_[l]->program;
@@ -1926,7 +1946,7 @@ void Core::step_impl(int token, const float* x, bool want_logits, const int64_t*
                 for (size_t i = 0; i < w_->hidden; ++i) r[i] += f[i];
                 xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_->hidden * 4, 0);
             }
-            if (w_->ple.present()) ple_layer(l);
+            if (!ple_w_.scalar.empty()) ple_layer(l);
             continue;
         }
         // (1) the previous layer's last dispatch, so its instruction BO is free to patch and
@@ -2270,17 +2290,22 @@ void Core::ple_load() {
                                      std::to_string(n));
         return v;
     };
+    ple_w_.scalar.assign(nl_, 1.f);
+    for (int l = 0; l < nl_; ++l)
+        if (!p.scalar.empty()) ple_w_.scalar[l] = take(at_layer(p.scalar, l), 1)[0];
+    if (!p.present()) {             // the 12B: the layer scalars without per-layer inputs
+        log("layer output scalars on the host (no per-layer inputs)");
+        return;
+    }
     ple_w_.model_proj = take(p.model_proj, L * D * H);
     ple_w_.model_norm = take(p.model_norm, D);
     ple_w_.gate.resize(nl_);
     ple_w_.proj.resize(nl_);
     ple_w_.norm.resize(nl_);
-    ple_w_.scalar.assign(nl_, 1.f);
     for (int l = 0; l < nl_; ++l) {
         ple_w_.gate[l] = take(at_layer(p.gate, l), D * H);
         ple_w_.proj[l] = take(at_layer(p.proj, l), H * D);
         ple_w_.norm[l] = take(at_layer(p.norm, l), H);
-        if (!p.scalar.empty()) ple_w_.scalar[l] = take(at_layer(p.scalar, l), 1)[0];
     }
     ple_in_.assign(L * D, 0.f);
     log("per-layer inputs: " + std::to_string(L) + " x " + std::to_string(D) + " on the host (" +
@@ -2317,6 +2342,12 @@ void Core::ple_layer(int l) {
     xrt::bo& xres = buffer("xres", 0);
     read_back(xres, H * 4, 0);
     float* h = xres.map<float*>();
+    if (!p.present()) {
+        const double s = ple_w_.scalar[l];
+        for (size_t i = 0; i < H; ++i) h[i] = static_cast<float>(static_cast<double>(h[i]) * s);
+        xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, H * 4, 0);
+        return;
+    }
     std::vector<double> g(D), y(H);
     const float* G = ple_w_.gate[l].data();
     const float* P = ple_w_.proj[l].data();
