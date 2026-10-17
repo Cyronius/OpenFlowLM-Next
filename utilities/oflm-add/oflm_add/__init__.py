@@ -1681,7 +1681,10 @@ def verify_gguf_choice(source, gguf_name, claimed_family):
     # (Q8_0 over Q4_*); anything else must be the claimed family.
     quants = {GGML_TYPE_NAMES[t] for _, t, _ in tensors
                if GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
-    others = quants - {claimed_family, "Q8_0"}
+    # imatrix Q4_0 / Q4_1 files keep token_embd at Q6_K, and the engine reads embedding rows of any engine type
+    body = {GGML_TYPE_NAMES[t] for n, t, _ in tensors
+            if n != "token_embd.weight" and GGML_TYPE_NAMES[t] not in ("F32", "F16", "BF16")}
+    others = body - {claimed_family, "Q8_0"}
     if others:
         return False, (f"tensors are {'/'.join(sorted(quants))} but the file name claims "
                        f"{claimed_family}; refusing rather than packing the wrong layout")

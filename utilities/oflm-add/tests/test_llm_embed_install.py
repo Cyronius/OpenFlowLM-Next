@@ -26,6 +26,29 @@ def _gguf(path, arch="qwen3"):
     path.write_bytes(bytes(out))
 
 
+def _gguf_tensors(path, tensors):
+    def blob(b):
+        return struct.pack("<Q", len(b)) + b
+
+    out = bytearray(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", len(tensors), 1))
+    out += blob(b"general.architecture") + struct.pack("<I", 8) + blob(b"qwen3")
+    for name, ggml_type in tensors:
+        out += blob(name.encode()) + struct.pack("<I", 2) + struct.pack("<QQ", 256, 256) + struct.pack("<IQ", ggml_type, 0)
+    path.write_bytes(bytes(out))
+
+
+def test_an_imatrix_q4_1_file_with_a_q6_k_embedding_is_accepted(tmp_path):
+    # mradermacher's i1-Q4_1 files: every matmul Q4_1, token_embd Q6_K (14)
+    ok_file = tmp_path / "Qwen3-Embedding-0.6B.i1-Q4_1.gguf"
+    _gguf_tensors(ok_file, [("blk.0.attn_q.weight", 3), ("blk.0.ffn_down.weight", 3), ("token_embd.weight", 14)])
+    ok, note = oflm_add.verify_gguf_choice(str(ok_file), ok_file.name, "Q4_1")
+    assert ok, note
+    bad = tmp_path / "mislabelled-Q4_1.gguf"
+    _gguf_tensors(bad, [("blk.0.attn_q.weight", 12), ("token_embd.weight", 14)])
+    ok, note = oflm_add.verify_gguf_choice(str(bad), bad.name, "Q4_1")
+    assert not ok and "Q4_K" in note
+
+
 def _repo(tmp_path, name, gguf_name):
     repo = tmp_path / name
     repo.mkdir()
