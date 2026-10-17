@@ -2453,6 +2453,13 @@ before the change (`dx` must come back stamps-only, `dx_f32` must differ), the 1
 1's set (both stamps-only), the dense MLIR of every spec before and after
 (`utilities/mlir_equiv.py`), then one prompt through the 4B GGUF on the NPU against the fp64
 replica.
+**Result 2026-10-17:** before the change every layer of the 4B GGUF came out NaN on the NPU (layer
+0's `q` at 1e30 from a sane `xn`). After it: the 4B's `dx` re-exports stamps-only and `dx_f32`
+differs (`insts.bin` byte-identical, the xclbin not); the 1B's `dx` and `dx_f32` match round 1's set
+stamps-only; the dense MLIR of all 13 dense specs (36 designs) is unchanged; and the 4B's text prompt
+matches the replica at correlation 0.999992 with the same top 5. K2 Horizon 3.7B and Qwen2.5 3B, the
+other two specs it reaches, were not run. Logs (`.claude/plans/gemma3-images-run/`):
+`30-probe-cli-model-l1.log`, `31-mlir-diff.log`, `32-export-check.log`, `16-npu-text.log`, `29-npu-cmp.log`.
 
 ### OPEN-MOE-WIDE-FF: the MoE block when the expert width equals hidden
 **Applies to:** openflowlm-next (`open_kernels/recipes/qwen36moe.py`,
@@ -3204,6 +3211,18 @@ in order, with natural drains. Cost: `(2 (L - 1) + 1) N` single-layer dispatches
 5. `oflm-add <gguf repo> --tag gemma3:4b`, `oflm serve gemma3:4b`, one image request, then
    `oflm-test --vision --model gemma3:4b`; and one image request with `mmproj.gguf` moved aside,
    which must be refused by name.
+
+**Result 2026-10-17 (the image path, one 896 px image and a 275-token prompt):** the host tower
+matches transformers fp32 at worst per-row cosine 0.9999984 (4096 tower rows) and 0.99999997 (256
+projected rows), on the CLI too. The both-ways replica is within 0.30 nats of llama.cpp on llama.cpp's
+top 20 at the first answer position, the causal one 1.09; their top two are a near tie (0.22 nats)
+that they order differently. The schedule on the 1B, 64 rows past its window: correlation at least
+0.999992 against the both-ways replica at all 11 positions after the block, 0.90 against the causal
+one. The 4B on the NPU, at the 14 positions after the image: both ways against the both-ways replica
+at least 0.999937 (the one top-token difference is a 0.017-logit near tie), causal against causal
+0.999932, crossed 0.977; the tower in the loop 0.999935; Google's GGUF and mmproj 0.999938 with 14 of
+14 top tokens. Logs (`.claude/plans/gemma3-images-run/`): `12-siglip-real-port-fastattn.log`,
+`27-llama-vs-replica.log`, `35-npu-1b-block-cmp.log`, `29-npu-cmp.log`.
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
