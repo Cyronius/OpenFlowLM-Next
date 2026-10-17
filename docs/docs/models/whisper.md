@@ -18,8 +18,9 @@ parent: Models
 > ⚠️ **The shipped `whisper-v3:turbo` container runs the closed engine.** It ships
 > only `model.q4nx`. The open Whisper engine reads OpenAI's own checkpoint or a GGUF
 > of it instead, with no conversion step; install one with `oflm-add` (below). Its
-> decoder runs entirely on the host in fp32 -- the open Whisper README makes no NPU
-> performance claim for it.
+> decoder runs entirely on the host, with int8 weights by default (`OW_DEC_W=bf16`
+> restores the exact path) -- the open Whisper README makes no NPU performance claim
+> for it.
 
 ### The open engine: OpenAI's checkpoint or a GGUF
 
@@ -31,12 +32,17 @@ oflm serve --asr 1 --asrmodel whisper-v3:turbo-q8_0
 ```
 
 The engine loads the file as it ships: a GGUF's tensors are widened to the engine's
-bf16 at load, so a smaller quant saves download and disk, not memory. A GGUF holds
+bf16 at load, so a smaller quant saves download and disk, not memory. Each quant
+installs into its own directory, so two of them can sit side by side. A GGUF holds
 no tokenizer or config files; `oflm-add` fetches them from the checkpoint the GGUF
 names (here `openai/whisper-large-v3-turbo`) and refuses the install if they do not
-match the GGUF's own vocabulary and settings. The open engine also needs its kernel
-set (`open_kernels/export_whisper_kernels.py`), which ships with releases; it is
-found by the model's geometry, so any directory name works.
+match the GGUF's own vocabulary and settings.
+
+The open engine also needs its Whisper kernel set, and releases do not ship it yet.
+Build it once from a clone with `python open_kernels/export_whisper_kernels.py` (it
+needs the IRON toolchain and writes `src/xclbins/Whisper-V3-Turbo-NPU2/open_kernels`).
+The engine finds the set by the model's geometry, so any install directory works, and
+`oflm-add` says whether it found one.
 
 ▶️ Run with OpenFlowLM in PowerShell:  
 

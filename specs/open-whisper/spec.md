@@ -119,7 +119,8 @@ tensors.
   round-to-nearest-even, so every container tensor is bit-identical to the one q4nx-build's
   `whisper_tensors()` writes from the same checkpoint. The encoder, decoder and tiling are
   unchanged.
-- A tensor that is missing, or has another shape, is refused at load, naming it.
+- A tensor that is missing, or has another shape, is refused at load, naming it; so is a
+  file cut short.
 - When a directory holds more than one weight file, the engine reads `model.open.safetensors`,
   then `model.safetensors`, then `model.gguf`, and the load log names the one it read and the
   ones it ignored.
@@ -128,18 +129,23 @@ tensors.
 64) written as a checkpoint: all 67 container tensors match the converter's output for the
 same values, by dtype, shape and bytes (fixtures and expected hashes from
 `src/open_whisper/testdata/gen_weight_fixtures.py`, which runs the converter's own code).
-Swapping q and v in the fused operand, or moving the cross-attention bias, fails it.
+Swapping q and v in the fused operand, or moving the cross-attention bias, fails it. The
+same checkpoint cut short by 64 bytes is refused.
 
 **Verification (manual), 2026-10-16:** `weight_source_test --compare <model.open.safetensors>
 <model.safetensors>` on openai/whisper-large-v3-turbo against the container built from it:
 481 of 481 tensors, 808,924,160 values, identical.
 
 **Verification (manual), hardware.** Procedure: install with `oflm-add` into a user registry,
-put the exported kernel set under any xclbins root, run `OFLM_WHISPER_ENGINE=open oflm serve
---asr 1 --asrmodel <tag>`, post a 30 s clip to `/v1/audio/transcriptions`, then serve the
-container built from the same weights the same way. Pass: the two texts are identical.
+put the exported kernel set under any xclbins root, run `oflm serve --asr 1 --asrmodel <tag>`
+with `OFLM_WHISPER_ENGINE` unset (the load log must say the open engine was chosen and why),
+post a 30 s clip to `/v1/audio/transcriptions`, then serve the container built from the same
+weights the same way. Pass: the two texts are identical. A transcript from a build older
+than #111 is compared with today's speed defaults switched off: `OFLM_WHISPER_PROTOCOL=legacy
+OW_ATTN=host OW_HOST_FAST=0 OW_DEC_W=bf16 OW_DEC_HEAD=bf16 OW_DEC_XKV=fp32`.
 2026-10-16: `whisper-v3:turbo-safetensors` matched the checkpoint's container with NPU
-attention and with `OW_ATTN=host`. One clip.
+attention and with `OW_ATTN=host`; with the speed defaults switched off it reproduced, word for
+word, the transcript a September build made from that container. One clip.
 
 ### OPEN-WHISPER-GGUF: the engine reads a GGUF of the model
 **Applies to:** `src/open_whisper/weight_source.cpp`, `src/open_qwen36/gguf_file.cpp`
@@ -156,17 +162,21 @@ attention and with `OW_ATTN=host`. One clip.
 - Refused at load, naming the reason: `general.architecture` other than `whisper`; any
   `stt.whisper.*` geometry key (layers, widths, heads, mels, positions, vocabulary) that is
   not the engine's; a scaled or untied token embedding; a missing tensor; a tensor of
-  another shape; a type the reader does not dequantize.
-- The engine keeps its weights in bf16 whatever the file holds: the quant changes the
-  download and adds its rounding, not the 1.2 GB of resident encoder operands. An 8-bit
-  encoder stream is separate work.
+  another shape; a type the reader does not dequantize; a file cut short, even by less
+  than its header (tensor offsets count from the end of the header).
+- Every tensor is widened to bf16 at load whatever the file holds, so the quant changes
+  the download and adds its own rounding, not the 1.2 GB of resident encoder operands,
+  which stay bf16. The decoder then requantizes its linear layers and head to int8 by
+  default (`OW_DEC_W`, `OW_DEC_HEAD`), as it does for the container. An 8-bit encoder
+  stream is separate work.
 
 **Test (2026-10-16):** the same tiny Whisper as an F16 and a Q8_0 GGUF, all 67 tensors
 against the converter run on the values the gguf package reads from each file; Q4_K, Q5_K
 and Q6_K rows against the gguf package's dequant of the same bytes, bit for bit; the name
 map against the real turbo GGUF's tensor list (all 587 tensors but the two frontend ones
 used, with their shapes); a GGUF of another geometry, or without the `stt.whisper` keys,
-refused.
+refused; the F16 GGUF cut short by 64 bytes refused (it used to load, the missing bytes
+read as zeros).
 
 **Verification (manual), 2026-10-16,** handy-computer/whisper-large-v3-turbo-gguf with
 `weight_source_test --compare`: the F16 GGUF against the container built from OpenAI's
@@ -177,13 +187,14 @@ dequant of the same file, 481 of 481 identical each. The all-Q6_K file was not r
 type is covered by the token embedding in both K files.
 
 **Verification (manual), hardware,** the OPEN-WHISPER-STOCK procedure. 2026-10-16: the Q8_0
-GGUF installed as `whisper-v3:turbo-q8_0` (directory `whisper-gguf`, kernels found by
+GGUF installed as `whisper-v3:turbo-q8_0` (directory `whisper-gguf-Q8_0`, kernels found by
 geometry under `xclbins/Whisper-V3-Turbo-NPU2`) transcribed the clip exactly as the Q8_0
-container did with the same build. With `OW_ATTN=host` it also reproduced, word for word, the
-transcript a September build made from that container; with today's default NPU attention,
-the GGUF and the container alike differ from that older transcript in two words.
-`oflm-test --audio --model whisper-v3:turbo-q8_0`: transcription 3 of 3 PASS. One clip; F16,
-Q4_K_M and Q5_K_M were checked at the weight level only.
+container did with the same build, and the default rule chose the open engine with
+`OFLM_WHISPER_ENGINE` unset. With the speed defaults switched off it reproduced, word for word,
+the transcript a September build made from that container. With them on, the GGUF and the
+container alike differ from that older transcript in two marginal words. `oflm-test --audio
+--model whisper-v3:turbo-q8_0`: transcription 3 of 3 PASS. One clip; F16, Q4_K_M and Q5_K_M
+were checked at the weight level only.
 
 ### OPEN-WHISPER-INSTALL: oflm-add installs a GGUF or OpenAI's checkpoint
 **Applies to:** `utilities/oflm-add`
@@ -195,7 +206,15 @@ Q4_K_M and Q5_K_M were checked at the weight level only.
   `oflm-add openai/whisper-large-v3-turbo` installs the checkpoint and registers
   `whisper-v3:turbo-safetensors`. Both are ASR entries (`asr: true`, family `whisper-v3`,
   `details.weights` `gguf` or `safetensors`) in the user registry, with no download URL, so
-  nothing can be re-fetched over them. `--tag` overrides the tag.
+  nothing can be re-fetched over them.
+- Each GGUF quant installs into its own directory (`<repo directory>-<quant>`), so a second
+  `--quant` install never serves the first one's `model.gguf` under its own tag. `--force`
+  replaces files already in that directory, downloaded ones included.
+- `--tag` overrides the tag within `whisper-v3:<name>`: `oflm serve` refuses an `--asrmodel`
+  tag that does not start with `whisper`, and keeps only `whisper-v3` out of the chat model
+  list. A tag the shipped registry already holds (`whisper-v3:turbo`) is refused: `oflm`
+  would size the files against that model's download records, call them missing and
+  download it again. Both refusals come before anything is copied.
 - A GGUF carries no config or tokenizer files. `config.json`, `tokenizer.json`,
   `tokenizer_config.json` and `generation_config.json` come from the checkpoint the GGUF
   names in `general.repo_url` (else its README's `base_model`), and the install is refused
@@ -215,15 +234,21 @@ merges, special ids and suppress lists, but not every value the host reads: gene
 on conventions for those, and would differ from OpenAI's without failing anywhere. The
 fetched files are OpenAI's own, checked against the metadata.
 
-**Test (2026-10-16):** 8 unit tests: quant choice, the GGUF checks, every sidecar check
+**Test (2026-10-16):** 10 unit tests: quant choice, the GGUF checks, every sidecar check
 (merges, vocabulary, a special id, a suppress list), the tokenizer_config fields, kernel
 discovery by geometry under another name, another Whisper size refused before anything is
-copied, and a local GGUF install end to end with the fetch stubbed.
+copied, a local GGUF install end to end with the fetch stubbed, two quants installed in
+turn (then one again with `--force`) each serving its own file, and the tags the server
+cannot serve refused before anything is copied. The two-quant test fails on the earlier
+one-directory layout.
 
 **Verification (manual), 2026-10-16:** installing the Q8_0 GGUF from a local directory into
 a scratch registry fetched the four files from openai/whisper-large-v3-turbo; config.json,
 tokenizer.json and generation_config.json are byte-identical to OpenAI's, and
 tokenizer_config.json to the one in the container directory (OpenAI's plus the two ids).
+Reinstalled into `whisper-gguf-Q8_0` after the directory change, every file came out
+identical to the first install's. With the network stubbed at the download call, `--force`
+on a remote install replaced a `model.gguf` downloaded earlier; before the fix it kept it.
 
 ### OPEN-WHISPER-KERNELS: one xclbin, one instruction stream per encoder shape
 **Applies to:** `open_kernels/designs/whisper_gemm/`, `open_kernels/export_whisper_kernels.py`
@@ -428,6 +453,11 @@ XDNA1. That is the version worth building, and it is not a variant of this one.
   engine no longer needs a converted repository (OPEN-WHISPER-STOCK, -GGUF): `oflm-add`
   installs OpenAI's checkpoint or a GGUF under another tag (OPEN-WHISPER-INSTALL). Whether
   the default tag should move to one of those is the maintainer's call.
+- **Releases do not carry the Whisper kernel set.** `utilities/export-kernels.py`, which the
+  CMake `export_kernels` target and release staging run, builds the recipe specs and the
+  BERT sets but never calls `open_kernels/export_whisper_kernels.py`. So the open engine
+  runs only where someone ran that export; on a release, both installs above are refused at
+  load for want of a kernel set. Adding the export there is a distribution change.
 - **The decoder** runs on the host first. Moving it to the NPU needs an `attn.h` variant
   with no RoPE and no cache append, plus a decoder layer design with LayerNorm, biases and
   a non-gated GELU.
