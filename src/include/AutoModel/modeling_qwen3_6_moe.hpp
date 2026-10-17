@@ -7,6 +7,7 @@
 
 #pragma once
 #include "AutoModel/automodel.hpp"
+#include "AutoModel/tool_arg_types.hpp"
 #include "metrices.hpp"
 
 
@@ -67,6 +68,7 @@ public:
     StreamResult parse_stream_content_final(const std::string content) override;
 
 private:
+    tool_string_args_t tool_string_args_;
     StreamResult parse_stream_content_impl(const std::string content, bool is_final);
 
 public:

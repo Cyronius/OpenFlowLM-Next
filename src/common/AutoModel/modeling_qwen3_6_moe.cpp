@@ -72,6 +72,7 @@ std::string Qwen3_6_MOE::apply_chat_template(nlohmann::ordered_json& messages, n
     inputs.messages = messages;
     inputs.extra_context = this->extra_context;
     inputs.extra_context["enable_thinking"] = this->enable_think;
+    this->tool_string_args_ = tool_string_args(tools);
     if (!tools.empty() && this->enable_tool)
         inputs.tools = tools;
     return this->_shared_apply_template(inputs);
@@ -552,12 +553,7 @@ NonStreamResult Qwen3_6_MOE::parse_nstream_content(const std::string response_te
 
             std::string param_value = trim_tool_value(block.substr(value_start, value_end - value_start));
 
-            try {
-                args[param_name] = nlohmann::json::parse(param_value);
-            }
-            catch (...) {
-                args[param_name] = param_value;
-            }
+            args[param_name] = tool_arg_value(this->tool_string_args_, tool_name, param_name, param_value);
 
             pos = value_end;
             if (block.compare(value_end, param_close.length(), param_close) == 0) {
@@ -712,13 +708,7 @@ StreamResult Qwen3_6_MOE::parse_stream_content_impl(const std::string content, b
                             param_value.pop_back();
                         }
 
-                        try {
-                            // Try to parse as native JSON type (Integer, Float, Boolean, Array, Object)
-                            args[param_name] = nlohmann::json::parse(param_value);
-                        }
-                        catch (...) {
-                            args[param_name] = param_value;
-                        }
+                        args[param_name] = tool_arg_value(this->tool_string_args_, result.tool_name, param_name, param_value);
 
                         search_pos = param_close_pos != std::string::npos && val_end == param_close_pos
                             ? val_end + param_close.length()
