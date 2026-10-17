@@ -1,6 +1,6 @@
 ---
 name: open-gptoss
-description: GPT-OSS 20B on the open kernels - where the design stands (a proposed expert layout waiting on the user's format and deal decisions, no kernels yet), the MXFP4 GGUF it loads from, the host prototype of the expert layout and how to check it, and how the MXFP4-vs-q4_1 quality cost was measured. Use when starting the gpt-oss build, changing the expert tile or the core deal, re-measuring the re-quantization cost, or when someone asks why gpt-oss still raises NotImplementedError.
+description: GPT-OSS 20B on the open kernels - where the design stands (an expert layout chosen 2026-10-16, MXFP4 with the uneven deal, no kernels yet), the MXFP4 GGUF it loads from, the host prototype of the expert layout and how to check it, and how the MXFP4-vs-q4_1 quality cost was measured. Use when starting the gpt-oss build, changing the expert tile or the core deal, re-measuring the re-quantization cost, or when someone asks why gpt-oss still raises NotImplementedError.
 ---
 
 # GPT-OSS 20B: a proposed layout, not yet kernels
@@ -33,8 +33,8 @@ under the weights rule nothing new reads it.
 
 ## The proposed layout in one breath
 
-Not decided: the expert format (MXFP4, q4_1 or exact int8) and the deal (uneven or
-padded) are the user's calls. As recommended, MXFP4 stays MXFP4. Tile = 32 rows x 288
+Decided 2026-10-16: MXFP4 stays MXFP4 and the deal is uneven; exact int8 on the q8 GEMV
+(2.4x the bytes, 25.5 GB resident) is the fallback. Tile = 32 rows x 288
 columns in 5120 bytes (nibble planes at 0 and 2304 in gemv_q4.h's interleave, E8M0 at
 4608, the 32 rows' bf16 biases at 4928 in k-tile 0 of each band half). 2880 = 10 tiles,
 so no K padding, and two tiles are the 10,240-byte w element q4_1 already uses. 45 bands

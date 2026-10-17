@@ -8,6 +8,10 @@ proposal takes GPT-OSS out of qwen36moe's MoE block. `OPEN-FAMILY-GPTOSS` is unc
 still raises `NotImplementedError` until kernels exist.
 **Evidence:** raw logs under `.claude/plans/gptoss-run/` in this worktree (gitignored); each claim
 below names its file.
+**Decided 2026-10-16:** the experts stay MXFP4 in the layout below, with the uneven deal, built
+against unsloth's `gpt-oss-20b-Q4_1.gguf`. If the MXFP4 decode cannot keep pace on the NPU, the
+fallback is the exact int8 form on the q8 GEMV, at 2.4 times the expert bytes (25.5 GB resident).
+The build has not started.
 
 ## The recommendation
 
@@ -398,7 +402,9 @@ speed and memory step rather than a correctness one.
 - **The re-quantized copy was deleted** after the measurement; the MXFP4 GGUF was kept for the
   next session.
 
-## Decisions for you
+## Decisions
+
+Items 1 to 3 were decided on 2026-10-16 as recommended. Item 4 is open; the build has not started.
 
 1. **Native MXFP4 for the experts** (recommended, gated on the kernel keeping pace with the
    stream), or q4_1 with the measured KL of about 0.19 and the existing kernel, or the exact int8

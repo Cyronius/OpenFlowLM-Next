@@ -2322,23 +2322,23 @@ K 3072), each needing a compare run against `replica_gptoss.moe_block` the way
 OPEN-FAMILY-QWEN36MOE's does. Until then this requirement is the refusals and the budget,
 which is what a recipe meets first.
 
-**Proposed 2026-10-16, not decided: GPT-OSS would not go through this block.** The design
+**Chosen 2026-10-16, not yet built: GPT-OSS would not go through this block.** The design
 spike in `plans/gptoss-expert-layout.md` recommends a layout of its own
 (OPEN-GPTOSS-EXPERT-LAYOUT): MXFP4 tiles instead of q4_1 stripes, 64-row bands dealt to cores
 instead of stripes shared between them, two phases per token instead of a second activation
-table, h in three x elements. Which expert format and which row deal the build uses are the
-user's decisions and are still open. The refusals above stay as they are; they describe
-qwen36moe, and they still fire.
+table, h in three x elements. The build will use that layout, with the experts in MXFP4 and
+the rows dealt unevenly. The refusals above stay as they are; they describe qwen36moe, and they
+still fire.
 
 ### OPEN-GPTOSS-EXPERT-LAYOUT: a host prototype of the proposed GPT-OSS expert layout
 **Applies to:** openflowlm-next (`open_kernels/model/gptoss_layout.py`; no design consumes it yet)
 **Test category:** unit (`tests/test_gptoss_layout.py`); manual for the slice on the real GGUF
 
 `gptoss_layout.py` shall model the expert layout `plans/gptoss-expert-layout.md` recommends, and
-shall refuse a stream that does not fit it. **This records a proposal, not a decision.** Whether
-the experts stay MXFP4 (or are re-quantized to q4_1, or held as exact int8 on the q8 GEMV) and
-whether the rows are dealt unevenly or padded to 3072 are the user's decisions, open as of
-2026-10-16; if either goes the other way, this requirement changes with it. The modeled layout:
+shall refuse a stream that does not fit it. **The layout was chosen on 2026-10-16; no kernel
+consumes it yet.** The experts stay MXFP4 (not re-quantized to q4_1, and not held as exact int8 on
+the q8 GEMV, which stays the fallback), and the rows are dealt unevenly rather than padded to
+3072. If either choice is reversed, this requirement changes with it. The modeled layout:
 
 - The experts stay MXFP4, the format the GGUF ships. (Re-quantizing them to q4_1 measured a mean
   KL divergence of 0.18 to 0.20 against the shipped model; the plan has the runs.)
