@@ -1,5 +1,5 @@
 /// \file bidir_block.hpp
-/// \brief OPEN-VISION-GEMMA3's image-block schedule; specs/open-engine/plans/gemma3-images.md derives it.
+/// \brief OPEN-VISION-GEMMA3's image-block schedule; specs/open-engine/plans/archive/gemma3-images.md derives it.
 #pragma once
 
 #include <cstdint>

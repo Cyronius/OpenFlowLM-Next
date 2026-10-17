@@ -3224,6 +3224,15 @@ at least 0.999937 (the one top-token difference is a 0.017-logit near tie), caus
 14 top tokens. Logs (`.claude/plans/gemma3-images-run/`): `12-siglip-real-port-fastattn.log`,
 `27-llama-vs-replica.log`, `35-npu-1b-block-cmp.log`, `29-npu-cmp.log`.
 
+**Result 2026-10-17 (serving, Google's QAT Q4_0 repo installed by `oflm-add` as `gemma3:4b`):** the
+load logs `Gemma 3 on the open kernels` and the tower from `mmproj.gguf`; one image request answers
+"A solitary seagull perches atop a black pole with multiple lights, set against a brilliant blue sky."
+(275 prompt tokens). `oflm-test --vision`: seagull PASS, spectrogram PASS, text extraction FAIL -- the
+answer quotes the whole sentence but writes `nation’s` with a typographic apostrophe, which the
+check's pattern does not accept. With `mmproj.gguf` moved aside the image request is refused with
+the message naming the file and `OFLM_GEMMA_ENGINE=closed`; nothing reaches the closed DLL. Logs:
+`30-serve.log`, `30-chat.json`, `31-oflm-test-vision.log`, `36-noproj-serve.log`.
+
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)
 **Test category:** unit (`tests/test_lfm2.py`); the kernel and its hardware run are
