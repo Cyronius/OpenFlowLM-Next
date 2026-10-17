@@ -2,6 +2,28 @@
 
 `cmp_logits.py` scores how far one run's per-position logits are from another's (worst / median
 correlation, argmax flips and how many were near-ties, top-5 agreement, KL divergence).
+`head_nll.py` runs a dense GGUF through the fp64 replica and scores the next token with the head
+as the engine packs it and as the file stores it.
+
+## Result 2026-10-16: Gemma 3 1B's F16 head re-quantized to q4_1
+
+Google's QAT Q4_0 GGUF keeps the 26 layers at Q4_0, which the pool holds exactly, and the tied
+head at F16, which it cannot: the engine re-quantizes the head to q4_1 at load. Over the first
+1024 tokens of the repo's `README.md`, both heads on the same hidden states:
+
+| head | mean NLL | next token is the top-1 |
+|---|---|---|
+| as packed (q4_1) | 3.4845 nats | 438 / 1024 |
+| as stored (F16) | 3.4860 nats | 437 / 1024 |
+
+The 4-bit head costs nothing measurable in NLL (median difference +0.0001 nats, worst single
+position +1.37). The two heads' argmax differs at 88 positions, 79 of them near-ties (top-2 margin
+under 0.5 logits); KL(F16 || q4_1) is 0.020 nats on average, 0.23 at worst. One text, so it says
+nothing about a long generation's drift.
+
+    python utilities/quant-compare/head_nll.py --gguf gemma-3-1b-it-q4_0.gguf \
+        --spec open_kernels/recipes/specs/gemma3-1b.json --text README.md \
+        --tokenizer <the model's tokenizer.json> --tokens 1024
 
 ## Result 2026-10-06: the 35B's q8 container re-quantized to q4_1
 

@@ -1,19 +1,4 @@
-"""A GGUF weight file read the way src/open_qwen36 packs it, for the fp64 replicas (2026-10-16).
-
-replica_dense.dense_decode asks its weight object for `bf16(name)` and `matmul_w(name, rows,
-cols)` with HF-style names; q4nx.Q4NX answers from a container, this answers from a GGUF:
-
-  * names map as GgufFile::resolve does (llama.cpp's blk.N.* names; a GGUF that carries
-    post_attention_norm is a sandwich-norm model, where HF's post_attention_layernorm is
-    post_attention_norm and pre_feedforward_layernorm is ffn_norm);
-  * small weights round to bf16 (RNE), as pools.cpp pack_norm puts them in `consts`;
-  * Q4_0 / Q4_1 matrices dequantize with their fp16 scales narrowed to bf16 (RNE), which is
-    what the f32-scale kernels compute with (gemv_q4.h load_scale);
-  * a float matrix (Gemma 3's tied F16 embedding as the head) is re-quantized by pools.cpp's
-    std_perm_gguf law first: per 32-block, d = fp16((max - min) / 15), m = fp16(min), codes
-    lround((v - m) / d) clipped to [0, 15], fp16 below 2^-14 flushed to zero;
-  * the embedding row is the stored row times the manifest's scale (Gemma: sqrt(hidden)).
-"""
+"""A GGUF read the way src/open_qwen36 packs it, for the fp64 replicas (2026-10-16)."""
 from __future__ import annotations
 
 import numpy as np
@@ -95,8 +80,7 @@ class GGUFModel:
         return v.reshape(r1 - r0, cols)
 
     def _scales_codes(self, g: str, r0: int, r1: int, narrow: bool = True):
-        """(d, m, codes) of rows [r0, r1) as the pool holds them: bf16-narrowed f32 scales
-        (`narrow=False`: the exact fp16 ones, as the host's embedding row reads them)."""
+        """(d, m, codes) of rows [r0, r1) as the pool holds them; narrow=False keeps fp16 scales, as embed_row does."""
         nar = bf16_rne if narrow else (lambda a: a)
         info = self.t[g]
         cols = info["dims"][0]
@@ -113,6 +97,7 @@ class GGUFModel:
             q = np.concatenate([qs & 0xF, qs >> 4], axis=-1).astype(np.float32)
             return nar(d), nar(m), q
         if info["type"] in ("F16", "F32"):
+            # pools.cpp std_perm_gguf's re-quantization of a float matrix, exactly
             v = self._float_rows(g, r0, r1).reshape(r1 - r0, nb, 32)
             lo, hi = v.min(-1), v.max(-1)
             df = fp16_flush((hi - lo) / np.float32(15.0))
@@ -133,19 +118,24 @@ class GGUFModel:
             self._w[g] = (q * d[..., None] + m[..., None]).reshape(rows, cols).astype(np.float32)
         return self._w[g]
 
-    def head_logits(self, hn, block: int = 16384) -> np.ndarray:
-        """logits = W_head @ hn in fp64, from the head the engine packs."""
+    def head_logits(self, hn, block: int = 16384, exact: bool = False) -> np.ndarray:
+        """logits = W_head @ hn in fp64: the head the engine packs, or with exact=True the file's own values."""
         g = self.name("lm_head.weight")
         rows, cols = self.t[g]["dims"][1], self.t[g]["dims"][0]
-        if "head" not in self._w:
+        key = "head_exact" if exact else "head"
+        if key not in self._w:
             parts = []
             for r0 in range(0, rows, block):
-                d, m, q = self._scales_codes(g, r0, min(rows, r0 + block))
+                r1 = min(rows, r0 + block)
+                if exact and self.t[g]["type"] in ("F16", "F32"):
+                    parts.append(self._float_rows(g, r0, r1).astype(np.float32))
+                    continue
+                d, m, q = self._scales_codes(g, r0, r1, narrow=not exact)
                 parts.append((q * d[..., None] + m[..., None]).reshape(-1, cols).astype(np.float32))
-            self._w["head"] = np.concatenate(parts)
-        x = np.asarray(hn, np.float64)[:cols]
-        w = self._w["head"]
-        return np.concatenate([w[r0:r0 + block].astype(np.float64) @ x for r0 in range(0, rows, block)])
+            self._w[key] = np.concatenate(parts)
+        x = np.asarray(hn, np.float64)[..., :cols]    # one hidden vector, or [positions, hidden]
+        w = self._w[key]
+        return np.concatenate([w[r0:r0 + block].astype(np.float64) @ x.T for r0 in range(0, rows, block)])
 
     def embed(self, tok: int, hidden: int) -> np.ndarray:
         g = self.name("model.embed_tokens.weight")
