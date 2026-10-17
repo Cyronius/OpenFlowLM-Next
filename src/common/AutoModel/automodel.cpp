@@ -47,6 +47,9 @@ std::unique_ptr<causal_lm> AutoModel::_shared_select_open_engine(const char* env
         return nullptr;
     header_print("OFLM", family_label + " on the open kernels (" + kernels + ")");
     auto eng = std::make_unique<open_qwen36::Engine>(*this->lm_config, this->npu_device_inst, this->MAX_L);
+    // Gemma 3 4B's config.json leaves vocab_size to transformers' default; the sampler walks the engine's logits
+    if (this->lm_config->get("vocab_size") == 0)
+        this->lm_config->_json_config["vocab_size"] = eng->core().vocab();
     eng->load_open_weights();
     return eng;
 #else
