@@ -129,7 +129,7 @@ def main() -> int:
         print(f"  layer {l} ({spec.layer_types[l]}): |res| {np.abs(X).max():.2f}", flush=True)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    last_img = int(np.nonzero(is_img)[0].max())
+    last_img = int(np.nonzero(is_img)[0].max()) if is_img.any() else T - 2
     for p in range(last_img + 1, T):
         _, lg = final_logits(m, spec, X[p])
         lg = np.asarray(lg, np.float32)[: spec.vocab]

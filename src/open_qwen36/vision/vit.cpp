@@ -1384,9 +1384,8 @@ std::vector<float> siglip_patches(const VitConfig& cfg, const float* chw) {
     return out;
 }
 
-std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, const float* patches,
-                                  std::vector<float>* tower) {
-    if (cfg.family != VitFamily::Siglip) throw std::runtime_error("vit: siglip_forward on another tower");
+std::vector<float> siglip_tower(const VitConfig& cfg, const VitWeights& w, const float* patches) {
+    if (cfg.family != VitFamily::Siglip) throw std::runtime_error("vit: siglip_tower on another tower");
     if (cfg.head_dim > 128) throw std::runtime_error("vit: head_dim > 128 does not fit the attention accumulator");
     const int G = cfg.grid(), n = G * G, H = cfg.hidden;
     std::vector<float> x(static_cast<size_t>(n) * H);
@@ -1419,7 +1418,15 @@ std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, con
     if (std::getenv("OFLM_VIT_TIMING"))
         std::fprintf(stderr, "vit: siglip attention %.2f s, the rest of the blocks %.2f s\n", t_att, t_rest);
     layer_norm(x.data(), n, H, w.post_ln_w.data(), w.post_ln_b.data(), cfg.eps, hn.data());
+    return hn;
+}
+
+std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, const float* patches,
+                                  std::vector<float>* tower) {
+    if (cfg.projector != "gemma3") throw std::runtime_error("vit: no projector '" + cfg.projector + "' here");
+    const std::vector<float> hn = siglip_tower(cfg, w, patches);
     if (tower) *tower = hn;
+    const int G = cfg.grid(), H = cfg.hidden;
     // Gemma 3's projector: pool the patch grid by `pool`, RMSNorm (the file stores 1 + w), project
     const int T = G / cfg.pool, k = cfg.pool;
     std::vector<float> pooled(static_cast<size_t>(T) * T * H), normed(pooled.size());

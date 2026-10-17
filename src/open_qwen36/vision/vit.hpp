@@ -132,6 +132,9 @@ VitWeights load_vit(const std::string& vision_q4nx_path, const VitConfig& cfg);
 /// [grid^2, channels * patch^2] patches in row-major patch order, each patch (c, y, x).
 std::vector<float> siglip_patches(const VitConfig& cfg, const float* chw);
 
+/// The SigLIP tower alone, [grid^2, hidden] after post_ln: the part MiniCPM-V's tower shares.
+std::vector<float> siglip_tower(const VitConfig& cfg, const VitWeights& w, const float* patches);
+
 /// Siglip + Gemma 3's projector: patches from siglip_patches in, [tokens, out] out. `tower`,
 /// when given, receives the tower's own [grid^2, hidden] output, before the projector.
 std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, const float* patches,

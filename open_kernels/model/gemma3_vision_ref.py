@@ -196,15 +196,24 @@ def cmd_logits(a) -> int:
     x = torch.tensor([ids])
     tt = (x == image_id).long()
     pv = torch.from_numpy(px[None]).to(torch.bfloat16)
+    sfx = "_fp32feat" if a.features else ""
     with torch.no_grad():
-        feats = model.model.get_image_features(pv, return_dict=True).pooler_output
-        np.asarray(feats[0].float().numpy(), np.float32).tofile(out / "hf_features_bf16.bin")
+        if a.features:
+            # the fp32 tower's rows instead of the bf16 model's own (the bf16 tower drifts over 27 blocks)
+            emb = model.get_input_embeddings()(torch.where(x == image_id, torch.zeros_like(x), x))
+            f = torch.from_numpy(np.fromfile(a.features, np.float32).reshape(-1, emb.shape[-1])).to(emb.dtype)
+            emb[0, (x[0] == image_id)] = f
+            kw0 = {"inputs_embeds": emb}
+        else:
+            feats = model.model.get_image_features(pv, return_dict=True).pooler_output
+            np.asarray(feats[0].float().numpy(), np.float32).tofile(out / "hf_features_bf16.bin")
+            kw0 = {"input_ids": x, "pixel_values": pv}
         for tag, kw in (("bidir", {"token_type_ids": tt}), ("causal", {})):
-            lg = model(input_ids=x, pixel_values=pv, **kw).logits[0, -1].float().numpy()
-            lg.astype(np.float32).tofile(out / f"hf_logits_{tag}.bin")
+            lg = model(**kw0, **kw).logits[0, -1].float().numpy()
+            lg.astype(np.float32).tofile(out / f"hf_logits_{tag}{sfx}.bin")
             top = np.argsort(-lg)[:5]
-            print(f"{tag}: top-5 {top.tolist()} logits {[round(float(lg[t]), 3) for t in top]}")
-    a_, b_ = (np.fromfile(out / f"hf_logits_{t}.bin", np.float32) for t in ("bidir", "causal"))
+            print(f"{tag}{sfx}: top-5 {top.tolist()} logits {[round(float(lg[t]), 3) for t in top]}")
+    a_, b_ = (np.fromfile(out / f"hf_logits_{t}{sfx}.bin", np.float32) for t in ("bidir", "causal"))
     print(f"bidir vs causal: corr {np.corrcoef(a_, b_)[0, 1]:.6f}, max |diff| {np.abs(a_ - b_).max():.3f}")
     return 0
 
@@ -225,6 +234,7 @@ def main() -> int:
     g.add_argument("--hf", required=True)
     g.add_argument("--image", required=True)
     g.add_argument("--ids-file", required=True)
+    g.add_argument("--features", default=None, help="f32 [256, hidden] rows to inject instead of the model's own tower")
     a = ap.parse_args()
     return {"tiny": cmd_tiny, "tower": cmd_tower, "logits": cmd_logits}[a.cmd](a)
 
