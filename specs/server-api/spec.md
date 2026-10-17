@@ -508,8 +508,10 @@ JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
 - `input`: required, a string with text in it, at most 4096 characters (OpenAI's limit; counted
   in characters, not bytes).
 - `voice`: required, a string (SERVER-SPEECH-VOICES says which).
-- `response_format`: `wav` (default) or `pcm`. `mp3`, `opus`, `aac` and `flac` are 400
-  `not_implemented`, naming the missing encoder; anything else is 400 `invalid_value`.
+- `response_format`: `wav` (default) or `pcm`. `mp3` is 400 `not_implemented`: the bundled
+  FFmpeg (vcpkg's port, features avcodec/avformat/swresample and no LAME) has no mp3 encoder.
+  `opus`, `aac` and `flac` are 400 `not_implemented` too: FFmpeg's built-in encoders could
+  provide them, but the encode path is not written. Anything else is 400 `invalid_value`.
 - `speed`: a number in [0.25, 4.0], default 1, OpenAI's range.
 - `stream_format`: `audio` (the whole file) is accepted, `sse` is 400 `not_implemented`.
 - `instructions`: a string, accepted and ignored with a log line: Kokoro takes none.

@@ -147,7 +147,8 @@ the flap and glottal-stop substitutions it makes for v1.0 (`ɾ` -> `T`, `ʔ` -> 
 spaCy is replaced by a tokenizer that splits off what spaCy splits off (quotes, brackets, final
 punctuation unless the word is an abbreviation, dashes, currency signs), and by fixed tags where
 misaki asks the tagger: `a` is a determiner, `A` is one at a sentence start and a letter
-elsewhere, `I` is a pronoun, `in` and `vs` are prepositions, `used` before `to` is past tense.
+elsewhere, `I` is a pronoun, `in` and `vs` are prepositions, `used` before `to` is past tense,
+`that` before a subject or determiner is a conjunction (unstressed) and a determiner otherwise.
 Words with per-tag pronunciations (790 in the gold lexicon: read, live, lead...) take their
 DEFAULT, or the `None` variant at the end of a sentence, as misaki does for an unknown tag.
 
@@ -174,8 +175,9 @@ Kokoro takes at most 510 phonemes per call. As KPipeline does, the text is split
 each paragraph is phonemized, and a paragraph longer than 510 phonemes is cut after the last
 `. ! ? …` that fits, else `: ;`, else `, —`, else at a space. The chunks' audio is concatenated.
 
-**Verification (manual):** `kokoro_cli --text-file <a 3000-character file>` prints one
-`phonemes:` line per chunk, each at most 510 characters and ending at sentence punctuation.
+**Verification (manual):** `kokoro_cli --model <dir> --g2p-chunks <a 2700-character paragraph>`
+prints one line per chunk with its length: each at most 510 and ending at sentence punctuation
+(2026-10-17: 8 chunks, 179 to 510 phonemes, all ending at a full stop).
 
 ### OPEN-TTS-INSTALL: oflm-add installs Kokoro with its voices and lexicons
 **Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `install_kokoro`)
@@ -232,18 +234,23 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
 - **Noise off is the worse comparison** (`check-f32-vs-ref-noiseoff.log`, waveform within 9e-2):
   without the noise an unvoiced stretch of the source is a constant, the STFT phase of a
   near-zero bin is undefined, and the two implementations' rounding picks different angles.
-- **Phonemizer** (`g2p_test.log`, `g2p-agreement-2.log`): the 14 misaki cases are exact. On a
-  36-line mixed corpus (chat, news, prose, numbers, names, tech; 470 words) 32 lines are
-  identical to misaki 0.9.4 with spaCy and 99.2% of the phoneme words agree. The four
-  differences are all the tagger's: `that` as a determiner (twice), `restart` as a noun, and the
-  `-` of `-m` read as a dash. Unknown words: 34 (7.2% of the words), exactly misaki's count, all
-  names (Siobhan, Nguyen, Saoirse, Kilimanjaro, Xiaomi, Tchaikovsky...) and tech terms
+- **Phonemizer** (`g2p_test.log`, `g2p-agreement-3.log`, `g2p-agreement-3--british.log`,
+  `g2p-agreement-that.log`): the 14 misaki cases are exact. On a 36-line mixed corpus (chat,
+  news, prose, numbers, names, tech; 470 words) 34 lines are identical to misaki 0.9.4 with
+  spaCy and 99.6% of the phoneme words agree; the two differences are the tagger's (`restart`
+  as a noun, the `-` of `-m` read as a dash). British, on the corpus's first 18 lines: 18 of 18
+  identical. The `that` rule (unstressed before a subject or determiner, stressed otherwise) was
+  tuned on the corpus, so it was checked on ten more sentences: 9 of 10 match misaki ("the idea
+  that people change" does not). Unknown words: 34 (7.2% of the words), exactly misaki's count,
+  all names (Siobhan, Nguyen, Saoirse, Kilimanjaro, Xiaomi, Tchaikovsky...) and tech terms
   (Kubernetes, Redis, nginx, softmax, tokenizer, PostgreSQL, pytest).
+- **Chunking** (`chunks-long-paragraph.log`): the corpus as one 2702-character paragraph splits
+  into 8 chunks of 179 to 510 phonemes, each ending at a full stop.
 
 ## Not settled
 
-- mp3 and opus output: refused (SERVER-SPEECH-PARAMS); the bundled ffmpeg's encoders were not
-  wired up.
+- mp3, opus, aac and flac output: refused (SERVER-SPEECH-PARAMS). The bundled FFmpeg has no mp3
+  encoder; its built-in opus, aac and flac encoders are not wired to the endpoint.
 - Words with per-tag pronunciations always take the DEFAULT reading; a tagger would fix read/
   live/lead-type heteronyms.
 - Other languages: misaki's other G2Ps (Japanese, Mandarin, ...) are separate ports.

@@ -666,10 +666,13 @@ inline json speech_request(const json& req, SpeechRequest& out) {
         const json& v = req.at("response_format");
         if (!v.is_string()) return invalid_param("response_format", "response_format must be a string.");
         const std::string f = v.get<std::string>();
-        if (f == "mp3" || f == "opus" || f == "aac" || f == "flac")
-            return invalid_param("response_format", "response_format " + f + " is not implemented in this "
-                                 "server: it has no " + f + " encoder. Use wav or pcm (24 kHz, 16-bit mono).",
+        if (f == "mp3")
+            return invalid_param("response_format", "response_format mp3 is not available: the bundled FFmpeg "
+                                 "is built without an mp3 encoder. Use wav or pcm (24 kHz, 16-bit mono).",
                                  "not_implemented");
+        if (f == "opus" || f == "aac" || f == "flac")
+            return invalid_param("response_format", "response_format " + f + " is not implemented in this "
+                                 "server yet. Use wav or pcm (24 kHz, 16-bit mono).", "not_implemented");
         if (f != "wav" && f != "pcm")
             return invalid_param("response_format", "response_format must be wav or pcm.");
         out.response_format = f;

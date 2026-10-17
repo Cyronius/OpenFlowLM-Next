@@ -1,6 +1,8 @@
 // Traces: OPEN-TTS-OPS, OPEN-TTS-BLOCKS (specs/open-tts/spec.md). No device, no model weights.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -297,7 +299,31 @@ static void test_fixtures(const std::string& path, double scale) {
     }
 }
 
+// ops_test --bench-gemm M N K: GEMM throughput, for looking at the kernel (not a test).
+static int bench_gemm(int M, int N, int K) {
+    std::mt19937 g(1);
+    const auto A = randv(g, (size_t)M * K), B = randv(g, (size_t)K * N);
+    std::vector<float> C((size_t)M * N);
+    for (DType t : {DType::F32, DType::F16}) {
+        Weight w;
+        w.set(A, t);
+        std::vector<const void*> rows((size_t)K);
+        for (int k = 0; k < K; ++k) rows[(size_t)k] = B.data() + (size_t)k * N;
+        double best = 1e30;
+        for (int r = 0; r < 5; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            sgemm_rows(M, N, K, w.ptr(), w.t, K, rows.data(), DType::F32, 1, C.data(), N, false);
+            best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::printf("%s A: %dx%dx%d in %.2f ms = %.1f GFLOP/s\n", t == DType::F16 ? "f16" : "f32", M, N, K,
+                    best * 1e3, 2.0 * M * N * K / best / 1e9);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[1]) == "--bench-gemm")
+        return bench_gemm(std::atoi(argv[2]), std::atoi(argv[3]), std::atoi(argv[4]));
     std::mt19937 g(1234);
     set_weight_dtype(DType::F32);
     test_gemm(g);
