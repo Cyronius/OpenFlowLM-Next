@@ -28,8 +28,7 @@
 #endif
 static constexpr unsigned kN = LN_N;
 static constexpr unsigned kHalf = LN_N / 2;
-// LN_DIV: the model's own width when LN_N is zero-padded past it (OPEN-PACK-PAD); the pad adds
-// nothing to the sum of squares, so dividing by the real width gives the unpadded RMS exactly
+// LN_DIV: the model's own width under a zero-padded LN_N; the pad adds nothing to the sum (OPEN-PACK-PAD)
 #ifdef LN_DIV
 #define LN_INV_N (1.0f / LN_DIV)
 #else

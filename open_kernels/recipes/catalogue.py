@@ -141,8 +141,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                                                  # 11264: Qwen2.5-3B (OPEN-ATTN-QKV-BIAS, 2026-09-12);
                                                  # 5120: Qwen3.8-27B (OPEN-FAMILY-QWEN35, 2026-10-01; its
                                                  # FF 17408 runs as K 8192 + 9216, qwen36moe.down_split);
-                                                 # 1280 / 6912: Gemma 3 1B, hidden 1152 zero-padded
-                                                 # (OPEN-PACK-PAD, OPEN-FAMILY-GEMMA3, 2026-10-16)
+                                                 # 1280 / 6912: Gemma 3 1B's padded 1152 (OPEN-PACK-PAD)
               "rs": values(2, 4),                # band row split: standard layout / expert stripes
               "rows_per_core": multiple_of(64),  # one y element per 64-row band
               "per_call": values(2, 1)},         # chunks per w element (10 KB; 5 KB when the table is wide)
@@ -223,8 +222,7 @@ CATALOGUE: dict[str, Template] = {t.name: t for t in [
                  defaults={"groups": 1}),),),
     Template("ln_div", "designs/ln/ln.h",
              combos=(combination(
-                 # (width, real): a zero-padded width whose RMS divides by the model's own (LN_DIV,
-                 # OPEN-PACK-PAD); every unpadded norm is the `ln` point above
+                 # (width, real): a zero-padded norm dividing by the model's own width (LN_DIV, OPEN-PACK-PAD)
                  (1280, 1152),                    # Gemma 3 1B (OPEN-PACK-PAD, 2026-10-16)
                  keys=("width", "real")),),
              note="the divisor is a compile-time macro; a new (width, real) pair needs a slice run"),

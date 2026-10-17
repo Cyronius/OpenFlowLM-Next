@@ -786,8 +786,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- OPEN-PACK-PAD: a view that pads a std_perm op reads only a GGUF, so the engine
-    // declines it for a .q4nx model; no shipped kernel set is one
+    // ---- OPEN-PACK-PAD: a view that pads a std_perm op reads only a GGUF; no shipped set is one
     {
         bool none = true;
         for (int a = 1; a < argc; ++a) none = none && !Manifest::load(argv[a]).reads_gguf_only();

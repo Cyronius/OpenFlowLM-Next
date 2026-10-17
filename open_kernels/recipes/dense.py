@@ -189,13 +189,7 @@ def cores_for(spec: ModelSpec) -> int:
 
 
 def widths(spec: ModelSpec) -> tuple[int, int, int]:
-    """(main cores, hidden, intermediate) the kernels and pools are built at (OPEN-PACK-PAD).
-
-    A spec whose hidden and intermediate are whole 256-column k-tiles gets its own widths at
-    cores_for's count, so no shipped family moves. One that is not (Gemma 3 1B: hidden 1152
-    is 4.5 k-tiles) takes the most cores its q and kv widths allow and pads hidden and
-    intermediate with zeros to pad_width there. The extra pool rows and columns are zero and
-    the norms divide by the model's own width, so the padding adds exactly nothing."""
+    """(main cores, hidden, intermediate) to build at: a width that is not whole k-tiles is zero-padded (OPEN-PACK-PAD)."""
     if spec.hidden % 256 == 0 and spec.intermediate % 256 == 0:
         return cores_for(spec), spec.hidden, spec.intermediate
     qw, kvw = spec.attn_q_width, spec.attn_kv_width

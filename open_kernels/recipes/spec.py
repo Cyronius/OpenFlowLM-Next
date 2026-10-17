@@ -295,8 +295,7 @@ class ModelSpec:
 
 
 def _f32_decimal(x: float) -> float:
-    """GGUF stores float metadata as f32, so 1e-6 reads back as 9.99999997e-07; the shortest
-    decimal that rounds to the same f32 is the value the source config wrote."""
+    """The shortest decimal with the same f32: a GGUF's 1e-6 reads back as 9.99999997e-07."""
     f = struct.unpack("<f", struct.pack("<f", x))[0]
     for p in range(1, 10):
         d = float(f"{f:.{p}g}")
