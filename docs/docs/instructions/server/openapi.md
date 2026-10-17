@@ -54,6 +54,7 @@ The OpenAI-compatible endpoints:
 | `POST` | `/v1/chat/completions` |
 | `POST` | `/v1/completions` |
 | `POST` | `/v1/audio/transcriptions` |
+| `POST` | `/v1/audio/speech` (Kokoro-82M on the CPU, with `--tts 1`) |
 | `POST` | `/v1/embeddings` |
 | `POST` | `/v1/images/generations` (FLUX.2 [klein] 4B on the NPU) |
 | `POST` | `/v1/images/edits` (one reference image, PNG or JPEG, centre-cropped to a square; `mask` is not implemented) |
@@ -523,3 +524,35 @@ with open("fox.png", "wb") as f:
   (1-50, default 4). `cfg_scale` / `guidance_scale` and `negative_prompt` are accepted and
   ignored: klein has no CFG. `sampler` / `sampler_name` accepts the Euler family only.
 - Each returned image carries its `seed`, so a random one can be made again.
+
+---
+
+## 🗣️ Example: Text to Speech
+
+`kokoro:82m` (hexgrad's Kokoro-82M) speaks English on the CPU, so it sits beside any chat
+model. Install it once, then start the server with `--tts 1`:
+
+```
+oflm-add mlx-community/Kokoro-82M-bf16
+oflm serve llama3.2:1b --tts 1
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:52625/v1", api_key="oflm")
+speech = client.audio.speech.create(
+    model="kokoro:82m",
+    voice="af_heart",            # any installed English voice; "alloy" means af_alloy
+    input="Hello from the open text to speech engine.",
+    response_format="wav",       # wav, pcm, flac, aac or opus; mp3 is not available
+    speed=1.0,                   # 0.25 to 4.0
+)
+speech.write_to_file("hello.wav")
+```
+
+- The voices are the installed `a*` (American) and `b*` (British) English ones: `af_heart`,
+  `bm_george`, ... A request for another language's voice is refused.
+- Audio is 24 kHz mono (opus is 48 kHz). The same request gives the same bytes.
+- Words the English lexicon does not know (mostly names and tech terms) are spelled letter by
+  letter; set `OFLM_TTS_UNKNOWN=skip` on the server to drop them instead.

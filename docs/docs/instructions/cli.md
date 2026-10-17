@@ -376,6 +376,19 @@ oflm serve gemma3:4b --asr 1 --asrmodel whisper-v3:turbo
 
 ---
 
+### 🗣️ Text to Speech (server only)
+
+`--tts 1` loads a text-to-speech model for `POST /v1/audio/speech`. It runs on the CPU, so it
+sits beside any chat model; install it first with `oflm-add mlx-community/Kokoro-82M-bf16`.
+`--ttsmodel` picks the model (default `kokoro:82m`).
+
+```shell
+oflm serve llama3.2:1b --tts 1
+oflm serve --tts 1 --ttsmodel kokoro:82m
+```
+
+---
+
 ### 🔢 Serving an Embedding Model
 
 `--embed 1` starts an encoder alongside the LLM for `/v1/embeddings`. Pick the

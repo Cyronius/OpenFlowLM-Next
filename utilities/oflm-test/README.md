@@ -9,6 +9,7 @@ oflm-test is designed to thoroughly test OpenFlowLM's API compatibility and mode
 - **LLM Tests**: Language model inference in both streaming and non-streaming modes, checked for the things a client depends on: non-empty content, a `finish_reason`, the right model name, sane `usage` counts and context carried across turns
 - **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity, task prompts) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`oflm serve -e 1`, or `oflm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
+- **Text-to-Speech Tests**: `/v1/audio/speech` on a server started with `--tts 1`: the audio file, its formats, determinism, speed and refusals
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
 - **Tool Calling Tests**: Function/tool-calling across seven escalating complexity levels, in streaming and non-streaming modes
 - **Server Conformance Tests**: What the OpenAI-compatible API owes every client whatever the weights say — error status codes, model identity, `finish_reason`, per-request isolation and stream/non-stream parity
@@ -77,6 +78,7 @@ oflm-test --audio                  # Audio tests only
 oflm-test --vision                 # Vision tests only
 oflm-test --tools                  # Tool-calling tests only
 oflm-test --api                    # Server conformance tests only
+oflm-test --tts                    # Text-to-speech tests only (server started with --tts 1)
 
 # Target a specific model (instead of all available models)
 oflm-test --llm --model gemma3:4b
@@ -226,6 +228,24 @@ Tests audio-capable models through chat completions using the OpenAI-style `inpu
 By default, audio tests run against known audio models (currently `whisper-v3:turbo`). An explicit `--model` filter always wins, so any audio-capable model can be targeted directly.
 
 **Output:** `audio_results_v{version}_{timestamp}.csv`
+
+### Text-to-Speech Tests
+Tests `/v1/audio/speech` on a server started with `--tts 1` (`oflm-add mlx-community/Kokoro-82M-bf16`
+installs `kokoro:82m`). `--model` names the speech model; the default is `kokoro:82m`. `--all` does not
+include this suite.
+
+**Automated Checks:**
+| Check | Verdict | Description |
+|-------|---------|-------------|
+| S1 Speaks | PASS / FAIL | A sentence comes back as a 24 kHz mono 16-bit WAV, at least half a second long and not silent |
+| S2 Repeats | PASS / FAIL | The same request twice gives the same bytes |
+| S3 Raw PCM | PASS / FAIL | `response_format: pcm` is the WAV's samples without the header |
+| S4 Speed | PASS / FAIL | `speed: 2.0` gives audio clearly shorter than `speed: 1.0` |
+| S5 Refuses | PASS / FAIL | No input, an unknown voice and mp3 (no encoder in this build) are each a 400 naming the field |
+| S6 Round trip | PASS / SOFT-FAIL / SKIPPED | With a Whisper model on the same server (`--asr 1`), the speech transcribes back to the sentence (word error rate at most 0.25) |
+| S7 Formats | PASS / FAIL | flac, opus and aac come back in their containers (`fLaC`, Ogg with an `OpusHead`, ADTS) |
+
+**Output:** `speech_results_v{version}_{timestamp}.csv`
 
 ### Embedding Tests
 Tests text embedding models through the OpenAI-compatible `embeddings.create` API, with the same automated PASS/SOFT-FAIL/FAIL verdicts used by the other suites.

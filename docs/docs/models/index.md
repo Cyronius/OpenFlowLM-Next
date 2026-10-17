@@ -28,6 +28,7 @@ has_children: true
 - [Phi](phi/)
 - [Nanbeige](nanbeige/)
 - [Whisper](whisper/)
+- [Kokoro](kokoro/) *(text to speech, on the CPU)*
 - [EmbeddingGemma](embeddinggemma/) and the
   [BERT-family encoders](#-bert-family-npu-encoders)
 - [SmolVLA](smolvla/) *(not yet supported)*
@@ -60,6 +61,7 @@ one of them is built from source here.
 | **Whisper** | `whisper-v3:turbo` | ❌ **closed** | ❌ closed | The published container ships only `model.q4nx`, so the open Whisper path is never selected for it. |
 | DeepSeek-R1 (distills) | `deepseek-r1:8b`, `deepseek-r1-0528:8b` | ✅ open *(via the base recipe)* | — | These are **distills of Qwen3-8B and Llama-3.1-8B**, so they reuse the `qwen3` and `llama3` recipes respectively rather than having one of their own. |
 | EmbeddingGemma | `embed-gemma:300m` | ⚙️ CPU by default | — | Ships unquantized; NPU matmul is opt-in, not the default. |
+| Kokoro (text to speech) | `kokoro:82m` (installed with `oflm-add`) | ⚙️ CPU | speech out | Open C++ engine on the host; no NPU kernels. |
 | BERT-family encoders | `bge-*`, `all-minilm:l6-v2`, `nomic-embed-text:v1.5`, `gte-multilingual:base` | ✅ **open** | — | See below. |
 
 **Legend:** ✅ open = built from source in this repo · ❌ closed = upstream

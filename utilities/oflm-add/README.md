@@ -72,6 +72,18 @@ cd ~/models/Qwen3.5-9B-Claude-4.8-Opus-NPU2
 oflm-add . --tag qwen3.5-claude:9b
 ```
 
+### Text to speech (Kokoro-82M)
+
+A repo with "kokoro" in its name (or `--family kokoro`) installs for the open text-to-speech engine:
+`config.json`, the safetensors checkpoint, every English voice (`voices/a*_*`, `voices/b*_*`) and the
+English lexicons of misaki 0.9.4, which are fetched from its PyPI release and checked against pinned
+hashes. It registers `kokoro:82m` for `oflm serve --tts 1`. hexgrad's own repo ships only a PyTorch
+`.pth`, which the engine does not read, so it is refused with a pointer to the safetensors copy:
+
+```bash
+oflm-add mlx-community/Kokoro-82M-bf16
+```
+
 ## How It Works
 
 `oflm-add`:

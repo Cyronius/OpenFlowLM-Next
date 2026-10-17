@@ -47,7 +47,18 @@ hexgrad's own repo has only the `.pth` and is refused with a pointer.
   (hexgrad's `.pth`, noise from the shared seeded stream), then
   `kokoro_cli --model <dir> --check ref.safetensors`. Run the reference with `--round f16` to
   compare against the engine's 16-bit weights exactly; without it you see the 16-bit cost.
-- `oflm-test --tts --model kokoro:82m --port <port>`; S6 (Whisper round trip) needs `--asr 1` too.
+- More sentences: `ref_kokoro.py --text "<sentence>" --seed 1234 --out ref-N.safetensors --wav ref-N.wav`,
+  then `kokoro_cli --check ref-N.safetensors --out engine-N.wav` and
+  `utilities/kokoro-ref/mel_distance.py ref-N.wav engine-N.wav` (log-mel dB; the free run drifts in
+  phase, so compare by mel, not sample by sample).
+- Phonemizer against misaki + spaCy: `utilities/kokoro-ref/g2p_agreement.py --pylib <misaki 0.9.4>
+  --corpus g2p_corpus.txt --cli kokoro_cli.exe --model <dir>` (also prints the unknown-word rate).
+- Server: `specs/server-api/tests/test_speech_api.py` with `OFLM_TEST_BASE_URL` pointing at an
+  `oflm serve --tts 1`; `oflm-test --tts --model kokoro:82m --port <port>`. S6 (Whisper round trip)
+  needs a Whisper model on the same server (`--asr 1`); otherwise it is SKIPPED.
+- Round trip through Whisper on another server: `utilities/kokoro-ref/round_trip.py --port <whisper
+  server> --text round_trip.txt --wav engine-{i}.wav` (word error rate; numerals scored as words).
+- The CTests: `open_tts_ops`, `open_tts_g2p`, `openai_compat` (the request rules).
 
 ## Traps
 
