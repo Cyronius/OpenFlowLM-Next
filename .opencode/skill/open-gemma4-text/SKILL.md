@@ -1,6 +1,6 @@
 ---
 name: open-gemma4-text
-description: Build, verify and run Gemma 4 E4B / E2B (text) on the open XDNA2 kernels from Google's GGUF -- the gemma4 recipe (four dx kinds: sliding / global x own / shared KV cache), the attn.h knobs it adds, the engine's KV sharing, per-layer inputs and soft cap, and the oflm serve path. Use when exporting the gemma4 kernel set, bringing up E2B, debugging a Gemma 4 load, or adding the 12B (which shares the 512-wide attention).
+description: Build, verify and run Gemma 4 E4B / E2B (text) on the open XDNA2 kernels from Google's GGUF -- the gemma4 recipe (four dx kinds: sliding / global x own / shared KV cache), the attn.h knobs it adds, E2B's one kv head and double-wide FFN, the engine's KV sharing, per-layer inputs and soft cap, the guard that keeps FLM's official container off these kernels, and the oflm serve path. Use when exporting a gemma4 kernel set, debugging a Gemma 4 load or serve, or adding the 12B (which shares the 512-wide attention).
 ---
 
 # Gemma 4 E-series text on the open kernels
@@ -64,6 +64,9 @@ all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` i
 - `ALL_SPECS=1 OLD_DIR=<pristine>/open_kernels bash utilities/attn_pp_identical.sh`: every attention TU
   preprocesses to the same tokens at every spec's flags. The worktree's copy has CRLF line endings
   (autocrlf), which WSL bash refuses: run an LF copy inside a snapshot of the tree, not the worktree file.
+  It writes ~3.5 GB of preprocessed `.i` files under `<tree>/.claude/tmp/ppcheck`; delete them after.
+- Where a kernel set that passed on the NPU exists, re-export with `--check <that dir>` (E4B: 12 of 12
+  files match). `--no-build --check` re-runs only the comparison on the existing build dirs.
 
 ## E2B (one kv head)
 
@@ -74,6 +77,21 @@ all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` i
 - A KV-shared kind at one kv head reads this position's row back as one element: `ATTN_KV_SHARED`
   selects the one-pointer `attn_step_new` (dx.py adds the flag only there).
 - Validate the replica first: `gemma4_transformers_check.py <e2b gguf> --layers 0,4,15,19`.
+- Its GGUF lists `feed_forward_length` per layer; the engine's GGUF reader skips arrays, so
+  `derive_config` takes the FFN width from layer 0's `ffn_up` tensor.
+- Result 2026-10-16: logits corr 0.999998 / 0.999991 / 0.999988 at 6 / 20 / 35 layers against the
+  replica with the q4_1 head, same top 5; greedy "The capital of France is Paris." (`npu_e2b.sh` pattern:
+  `open_qwen36_cli --model <dir> --kernels <set> --layers N --ids ... --dump-logits <prefix>`, then
+  `model/compare_gemma4.py <prefix>_t0.bin <replica.npz> --key npu_logits_lN`).
+
+## The official container must not pick up these kernels
+
+The set is exported under the official model's name (`Gemma4-E4B-IT-NPU2`), where FLM's own `.q4nx`
+container also looks. Its one view packs GGUF-direct (`std_perm_gguf`), so `Engine::find_kernels`
+declines it unless the model directory reads a GGUF (`Manifest::reads_gguf_only`,
+`Core::reads_gguf`), and the official tag stays on the closed engine. feat/gemma3-1b added the same
+guard for zero-padded sets (3f701d3d); when the branches meet, keep one `reads_gguf_only` that is true
+for either reason.
 
 ## Serving (`oflm serve`)
 
@@ -83,3 +101,10 @@ all in WSL with the mlir-aie env (`C:\models\gemma4-text\scripts\equiv_e2b.sh` i
 - Google's config.json nests the text model under `text_config`; the adapter lifts absent keys to the
   top level on the open path, or the sampler is built with vocab 0 and the server crashes on the first
   token.
+- Scratch serving: install with `oflm-add <dir> --tag <tag> --config <root>\model_list.json --models-root
+  <root>\models --open-kernels <set> --no-xclbin`, then `oflm serve <tag> --port <p>` with OFLM_MODEL_PATH
+  = `<root>` and OFLM_CONFIG_PATH = `<root>\model_list.json`. Start it with PowerShell `Start-Process
+  -PassThru` writing the PID to a file, not through `$(...)`: the server inherits the pipe and the
+  substitution waits for it to exit. Stop it by that PID.
+- Prefill is token at a time (no block-prefill route for Gemma 4 yet): a 270-token tool prompt takes
+  most of a minute on E4B, so a full `oflm-test --tools` (both modes) runs past 15 minutes.

@@ -45,14 +45,14 @@ def test_an_unvalidated_hidden_is_refused_by_the_first_template_that_cannot_take
     when K2's GroupRMSNorm(2) entered it at (2560, 2) -- E3, the physical NPU parity pass."""
     spec = dataclasses.replace(default_spec(), hidden=6144)
     with pytest.raises(OpRangeError, match=r"ln: \('width', 'groups'\) = \(6144, 1\) is outside "
-                                          r"the validated combinations \{\(1024, 1\), \(2048, 1\), \(2560, 1\), "
+                                          r"the validated combinations \{\(1024, 1\), \(1536, 1\), \(2048, 1\), \(2560, 1\), "
                                           r"\(2560, 2\), \(3072, 1\), \(3840, 1\), \(4096, 1\), \(5120, 1\)\}"):
         Q.recipe(spec)
 
 
 def test_an_unvalidated_gemv_k_is_refused():
     with pytest.raises(OpRangeError, match=r"gemv_q4: K=7168 is outside the validated set "
-                                          r"\{1024, 2048, 2560, 3072, 3584, 3840, 4096, 5120, 6144, 8192, 9216, 9728, 10240, "
+                                          r"\{1024, 1536, 2048, 2560, 3072, 3584, 3840, 4096, 5120, 6144, 8192, 9216, 9728, 10240, "
                                           r"10752, 11264, 12288, 14336, 15360\}"):
         require("gemv_q4", K=7168)
 
