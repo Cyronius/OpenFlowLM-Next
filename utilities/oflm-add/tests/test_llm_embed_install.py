@@ -124,16 +124,17 @@ def test_the_embedder_takes_no_config_from_its_pretraining_base(tmp_path, monkey
     ("Qwen3-Reranker-0.6B-Q8_0-GGUF", "qwen3-reranker-0.6b-q8_0.gguf", ("qwen3-reranker", "0.6b"), "rerank"),
     ("Qwen3-Embedding-4B-i1-GGUF", "Qwen3-Embedding-4B.i1-Q4_1.gguf", ("qwen3-embedding", "4b"), "embeddings"),
     ("Qwen3-Reranker-4B-i1-GGUF", "Qwen3-Reranker-4B.i1-Q4_1.gguf", ("qwen3-reranker", "4b"), "rerank"),
+    ("Qwen3-Embedding-0.6B-i1-GGUF", "Qwen3-Embedding-0.6B.i1-Q4_1.gguf", ("qwen3-embedding", "0.6b"), "embeddings"),
 ])
 def test_installs_with_its_label_and_kernels(tmp_path, monkeypatch, capsys, name, gguf, tag, label):
     if not SYSTEM_LIST.is_file():
         pytest.skip("no src/model_list.json in this checkout")
     repo = _repo(tmp_path, name, gguf)
     kernels = _kernels(tmp_path)
-    # ggml-org's repo name ends in "-Q8_0-GGUF", which derive_tag reads as part of the size, so the tag is given
+    # no --tag: the "-i1" / "-Q8_0" repo suffixes must still give the exact tag the server routes
     monkeypatch.setattr("sys.argv", ["oflm-add", str(repo), "--system-list", str(SYSTEM_LIST),
                                      "--config", str(tmp_path / "user_list.json"),
-                                     "--models-root", str(tmp_path / "models"), "--tag", ":".join(tag),
+                                     "--models-root", str(tmp_path / "models"),
                                      "--open-kernels", str(kernels), "--no-xclbin", "--quiet"])
     oflm_add.main()
     target = tmp_path / "models" / name

@@ -2014,6 +2014,11 @@ def main():
             log(f"[INFO] tag size '{size_guess}' guessed for '{dir_name}'; "
                 "pass --tag to override")
             tag = derive_tag(dir_name, None, size_guess)
+        if family in LLM_EMBED_FAMILIES and args.tag is None:
+            # the server routes these by exact tag, so "-i1" / "-q8" repo suffixes must not reach the size
+            m = re.match(r"\d+(?:\.\d+)?b", tag.split(":", 1)[1])
+            if m:
+                tag = f"{family}:{m.group(0)}"
         bucket, size_token = tag.split(":", 1)
         size_value = (base_entry or {}).get("size") or size_from_tag(tag)
         official, official_note = resolve_official(system_registry, dir_name, family, size_value)
