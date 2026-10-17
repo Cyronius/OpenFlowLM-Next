@@ -22,6 +22,8 @@ touching the phonemizer, or porting another TTS model onto the same ops.
   `KModel.forward_with_tokens` step for step; `harmonic_source` is SineGen + SourceModuleHnNSF.
 - `g2p_en.cpp`: misaki 0.9.4's English lexicon path, ported (no spaCy, no espeak-ng).
 - `tts_engine.cpp`: text -> paragraphs -> phonemes -> <=510-phoneme chunks -> audio; WAV/PCM.
+- `src/common/audio/audio_encoder.cpp`: flac, aac (ADTS) and opus (Ogg, 48 kHz) through the
+  bundled FFmpeg's own encoders, in memory. FFmpeg has no mp3 encoder of its own, so mp3 is refused.
 - Server: `rest_handler.cpp handle_openai_audio_speech`, rules in `openai_compat::speech_request`,
   binary responses through `openai_compat::binary_body`.
 
@@ -58,7 +60,8 @@ hexgrad's own repo has only the `.pth` and is refused with a pointer.
   needs a Whisper model on the same server (`--asr 1`); otherwise it is SKIPPED.
 - Round trip through Whisper on another server: `utilities/kokoro-ref/round_trip.py --port <whisper
   server> --text round_trip.txt --wav engine-{i}.wav` (word error rate; numerals scored as words).
-- The CTests: `open_tts_ops`, `open_tts_g2p`, `openai_compat` (the request rules).
+- The CTests: `open_tts_ops`, `open_tts_g2p`, `openai_compat` (the request rules), `audio_encoder`
+  (each format decoded back through FFmpeg).
 
 ## Traps
 
@@ -72,3 +75,8 @@ hexgrad's own repo has only the `.pth` and is refused with a pointer.
 - misaki maps `ɾ` -> `T` and `ʔ` -> `t` unless version 2.0 is asked for; Kokoro v1.0 was trained
   on the mapped form.
 - MSVC needs `/utf-8` for g2p_en.cpp's literals, or the phoneme sets are cp1252 garbage.
+- FFmpeg 63's encoders no longer expose `sample_fmts`/`supported_samplerates`; ask
+  `avcodec_get_supported_config`. Its Opus encoder takes 48 kHz only and needs
+  `FF_COMPLIANCE_EXPERIMENTAL`.
+- The speech endpoint sits in the NPU queue on purpose (SERVER-SPEECH-QUEUE), so a long synthesis
+  delays chat requests and the other way round.

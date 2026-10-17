@@ -256,6 +256,14 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
   words and 2 of 47 counting the digits as errors, the same for the PyTorch audio.
 - **Chunking** (`chunks-long-paragraph.log`): the corpus as one 2702-character paragraph splits
   into 8 chunks of 179 to 510 phonemes, each ending at a full stop.
+- **Served** (`serve-session.log`, `test_speech_api.log`, `oflm-test-tts.log`): `oflm serve --tts 1`
+  from this branch's build loads `kokoro:82m` (28 voices, f16 weights). For the three round-trip
+  sentences in both voices the server's WAV is byte-identical to `kokoro_cli`'s, so the Whisper
+  result above holds for the served audio. `test_speech_api.py` 19 of 19 pass; `oflm-test --tts`
+  passes S1-S5 and S7 (S6 skipped: no Whisper on that server).
+- **Odd input** (`odd-inputs-synthesis.log`, and 84 lines of emoji, CJK, control characters, long
+  numbers, URLs and random Unicode through `--g2p-lines`): no crash; text with nothing English in
+  it yields no phonemes, which the server answers with a 400 (SERVER-SPEECH-PARAMS).
 
 ## Not settled
 

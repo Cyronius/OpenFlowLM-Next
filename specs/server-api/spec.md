@@ -582,6 +582,8 @@ clients read, does not; a chat request naming it is refused as not a chat model.
 
 **Verification (manual):** `oflm serve --tts 1 --ttsmodel llama3.2:1b` exits with
 `--ttsmodel llama3.2:1b is not a text-to-speech model`; `oflm run llama3.2:1b --tts 1` is refused.
+(2026-10-17, `serve-session.log`: all three refusals as written, plus `--ttsmodel` without
+`--tts 1` exiting with `--ttsmodel needs --tts 1`; a chat completion naming `kokoro:82m` is a 400.)
 
 ### SERVER-SPEECH-QUEUE: one synthesis at a time, in the NPU queue
 **Applies to:** openflowlm-next (`src/server/server.cpp` `requires_npu_access`)
@@ -594,3 +596,5 @@ speech request waits behind chat, embeddings and images, and they wait behind it
 
 **Verification (manual):** with a chat model loaded, send a long speech request and a chat
 request together: the log shows `NPU busy, request queued` for the second, and both answer 200.
+(2026-10-17, `serve-session.log`: checked with two long speech requests, no chat model loaded: the
+second was queued, both answered 200 with identical bytes. Speech beside chat was not run.)
