@@ -1,0 +1,64 @@
+{
+ "cases": [
+  {
+   "text": "Hello, world!",
+   "phonemes": "həlˈO, wˈɜɹld!"
+  },
+  {
+   "text": "The apple and the cat.",
+   "phonemes": "ði ˈæpᵊl ænd ðə kˈæt."
+  },
+  {
+   "text": "I walked to the park.",
+   "phonemes": "ˌI wˈɔkt tə ðə pˈɑɹk."
+  },
+  {
+   "text": "She walks to work; walking is good.",
+   "phonemes": "ʃˌi wˈɔks tə wˈɜɹk; wˈɔkɪŋ ɪz ɡˈʊd."
+  },
+  {
+   "text": "In 1984, I had 3 cats.",
+   "phonemes": "ɪn nˌIntˈin ˈATi fˈɔɹ, ˌI hæd θɹˈi kˈæts."
+  },
+  {
+   "text": "It costs $5.50, or 50% more.",
+   "phonemes": "ˌɪt kˈɔsts fˈIv dˈɑləɹz ænd fˈɪfti sˈɛnts, ɔɹ fˈɪfti pəɹsˈɛnt mˈɔɹ."
+  },
+  {
+   "text": "The 21st century began in 2001.",
+   "phonemes": "ðə twˈɛnti fˈɜɹst sˈɛnʧəɹi bəɡˈæn ɪn tˈu θˈWzᵊnd wˈʌn."
+  },
+  {
+   "text": "Pi is about 3.14.",
+   "phonemes": "pˈI ɪz əbˈWt θɹˈi pYnt wˈʌn fˈɔɹ."
+  },
+  {
+   "text": "NASA and the U.S. agreed.",
+   "phonemes": "nˈæsə ænd ðə jˌuˈɛs əɡɹˈid."
+  },
+  {
+   "text": "Zorblax is unknown.",
+   "phonemes": "ɪz ˌʌnnˈOn."
+  },
+  {
+   "text": "A well-known fact.",
+   "phonemes": "ɐ wˌɛlnˈOn fˈækt."
+  },
+  {
+   "text": "Don't stop—keep going...",
+   "phonemes": "dˈOnt stˈɑp—kˈip ɡˈOɪŋ..."
+  },
+  {
+   "text": "We met at 10 and left at 11:30.",
+   "phonemes": "wˌi mˈɛt æt tˈɛn ænd lˈɛft æt əlˈɛvᵊn θˈɜɹTi."
+  },
+  {
+   "text": "He paid £20 for 2 books (used).",
+   "phonemes": "hˌi pˈAd twˈɛnti pˈWndz fɔɹ tˈu bˈʊks (jˈuzd)."
+  }
+ ],
+ "spell": {
+  "Zorblax": "zˌiˌOˌɑɹbˌiˌɛlˌAˈɛks",
+  "Kubernetes": "kˌAjˌubˌiˌiˌɑɹˌɛnˌitˌiˌiˈɛs"
+ }
+}
