@@ -1188,6 +1188,10 @@ one kv head, the 12288-wide FFN), 0.999988 for all 35, same top 5 in order each 
 is "The capital of France is Paris." then `<turn|>`. Program memory: the fullest core is 14,512 B
 (global) and 14,352 B (sliding) of 16,384.
 
+**Result 2026-10-16 (`oflm serve`, E2B, installed by oflm-add as `gemma4-it-open:e2b`):** the server
+loads the GGUF on the open kernels and answers "The capital of France is Paris." (finish_reason stop);
+`oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context retention check included.
+
 **Result 2026-10-16 (the official container keeps the closed engine):** `oflm serve` on a stand-in
 directory holding the E4B kernel set, a `model.gguf` and a `model.q4nx` prints "not using ...
 open_kernels: it packs GGUF-direct and ... has no model.gguf (or also a model.q4nx)" and goes to the
