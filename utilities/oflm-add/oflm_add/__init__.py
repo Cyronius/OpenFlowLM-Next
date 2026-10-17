@@ -265,6 +265,7 @@ CONFIG_MODEL_FAMILIES = {
     "llama": "llama3",
     "gemma3": "gemma3",
     "gemma4": "gemma4e",
+    "gemma4_unified": "gemma4-12b",
     "phi4": "phi4",
     "granite": "granite",
     "hunyuan": "hunyuan",
@@ -1633,7 +1634,13 @@ def family_from_gguf_arch(gguf_source):
     arch = inv[0].get("general.architecture") if inv else None
     if not arch:
         return None
-    return GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+    family = GGUF_ARCH_FAMILIES.get(str(arch).strip().lower())
+    if family == "gemma4e" and not inv[0].get("gemma4.embedding_length_per_layer_input"):
+        # no per-layer inputs: only the 12B's shape is served; any other such Gemma 4 needs --family
+        kv = inv[0]
+        is_12b = (kv.get("gemma4.block_count"), kv.get("gemma4.embedding_length")) == (48, 3840)
+        return "gemma4-12b" if is_12b else None
+    return family
 
 
 def family_from_config_dict(cfg):

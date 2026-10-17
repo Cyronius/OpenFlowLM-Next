@@ -1550,7 +1550,7 @@ GEMMA4_GLOBAL_ROTARY = 0.25   # transformers' partial_rotary_factor for the full
 def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
     """llama.cpp's gemma4 keys. The global layers' rotated share is not a key: llama.cpp writes it as the
     `rope_freqs` tensor (1 for a rotated pair, 1e30 for the rest), which a caller may pass as
-    `gemma4.rope_freqs`; without it the family's 0.25 applies. K = V (no `attn_v`) likewise: `gemma4.attention.k_eq_v`."""
+    `gemma4.rope_freqs`; without it the family's 0.25 applies. K = V (no `attn_v`) likewise: `gemma4.attention.k_eq_v`, else assumed when the two kinds' kv-head counts differ."""
     a = md["general.architecture"]
 
     def k(name: str):

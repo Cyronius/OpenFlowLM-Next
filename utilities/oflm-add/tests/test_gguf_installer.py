@@ -570,6 +570,26 @@ def test_gemma4_12b_names_route_to_their_own_family_and_may_install_a_gguf():
     assert {"gemma4e", "gemma4-12b"} <= oflm_add.GGUF_CAPABLE_FAMILIES
 
 
+def test_gemma4_12b_content_fallbacks_route_to_its_family(tmp_path):
+    """Traces: OPEN-FAMILY-GEMMA4. A 12B under a name with no family prefix (bartowski's google_gemma-4-12b-...)."""
+    assert oflm_add.family_from_config_dict({"model_type": "gemma4_unified",
+                                             "architectures": ["Gemma4UnifiedForConditionalGeneration"]}) == "gemma4-12b"
+    assert oflm_add.family_from_config_dict({"model_type": "gemma4"}) == "gemma4e"
+
+    def gguf(name, ple, blocks, hidden):
+        p = tmp_path / name
+        p.write_bytes(_gguf_bytes([("general.architecture", (8, "gemma4")),
+                                   ("gemma4.block_count", (4, blocks)),
+                                   ("gemma4.embedding_length", (4, hidden)),
+                                   ("gemma4.embedding_length_per_layer_input", (4, ple))]))
+        return str(p)
+
+    assert oflm_add.family_from_gguf_arch(gguf("e4b.gguf", 256, 42, 2560)) == "gemma4e"
+    assert oflm_add.family_from_gguf_arch(gguf("12b.gguf", 0, 48, 3840)) == "gemma4-12b"
+    # a Gemma 4 without per-layer inputs at another shape has no kernels here: refuse, ask for --family
+    assert oflm_add.family_from_gguf_arch(gguf("other.gguf", 0, 60, 5376)) is None
+
+
 def test_a_gguf_install_is_registered_text_only():
     """The official gemma4-it entry advertises images and audio; a GGUF install carries the text model only."""
     base = {"name": "Gemma4-E4B-IT-NPU2", "vlm": True, "asr": True,
