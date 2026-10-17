@@ -121,6 +121,18 @@ all in WSL with the mlir-aie env, the new side a snapshot of the working tree ta
   `attn_pp_identical.sh`. That script compares whitespace-split words, not tokens, so a macro that
   expands to nothing between `e` and `)` reads as DIFFERENT (`e)` vs `e )`); give the knob its own
   `#if`'d signature instead. Run it on LF copies of both trees (`git archive` here yields CRLF).
+- Measured (2026-10-17): global kind fullest core 11,040 B of program memory, attention cores 41,744 B of
+  data memory; sliding 10,528 B and 62,736 B; the main cores 64,256 B (1,280 B free, the tightest).
+  Without `ATTN_QLOCAL` the global attention core is 66,320 B and aiecc stops with "allocated buffers
+  exceeded available memory" (its memory map prints `qs` at 32 KB).
+- The two kinds' position tables differ in row size (sliding 4096, global 2048), a first: the attnpos
+  patch must stride each kernel by the table its program binds (`Core`, after `load_kernel`), not by
+  `layout.ptab_row`. With the layout's row the first global layer hangs (ERT state 8) at position 1 and
+  position 0 works, because record 1 is read from record 2's offset. `utilities/ptab_strides.py` lists
+  every shipped kernel's table row against its layout's.
+- NPU result: corr 0.999997 / 0.999991 / 0.999997 after 5 / 6 / 12 layers (uncapped), 0.999987 for all
+  48 (capped), same top 5; greedy "The capital of France is Paris." Scripts that did it:
+  `C:\models\gemma4-12b\scripts\npu_12b.sh` and `compare_12b.sh` (references `ref12b.py`, `raw_heads.py`).
 
 ## The official container must not pick up these kernels
 

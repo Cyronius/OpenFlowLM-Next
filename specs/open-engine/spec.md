@@ -1206,6 +1206,23 @@ worst, same argmax.
 layers 0, 5, 6 and 11 (13 tokens; one kv head and K = V on the global pair, the layer scalars applied),
 4.5e-6 relative at worst, same argmax.
 
+**Result 2026-10-17 (probe, 12B):** both kinds link. Fullest core 11,040 B of program memory (global) and
+10,528 B (sliding); the attention cores use 41,744 B (global) and 62,736 B (sliding) of their 65,536 B of
+data memory, the main cores 64,256 B. Without `ATTN_QLOCAL` the global attention core needs 66,320 B and
+the build stops ("allocated buffers exceeded available memory"); without the og change the design
+generates no MLIR. E4B and E2B exported from the same tree match the sets that passed on the NPU, 12 of 12
+files each (instruction streams byte-identical, xclbins apart from build stamps).
+
+**Result 2026-10-17 (NPU, 12B, `open_qwen36_cli` on a directory holding only `model.gguf`, one 25-token
+chat prompt):** against the replica with the engine's q4_1 head: corr 0.999997 after 5 layers (sliding
+only), 0.999991 after 6 (the first global layer) and 0.999997 after 12, all three before the cap, and
+0.999987 for all 48 after it, same argmax and the same top 5 in order each time. The greedy answer is
+"The capital of France is Paris." then `<turn|>`. Against the exact Q6_K head the full model's corr is
+0.998 (same argmax, 4 of the top 5), the head re-quantization's cost as on the E-series. The first run
+hung on the first global layer's second token (ERT state 8, no standby in the event log): the attention
+patch strode the global kind's 2048-byte position table by the layout's 4096, so position 1 read record
+2, whose row count the stream did not carry.
+
 **Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
 soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split
 record and the full rotation); with `ATTN_INTFP` (bit-identical integer routines) and one shared RMS helper
