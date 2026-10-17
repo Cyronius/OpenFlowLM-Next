@@ -23,8 +23,26 @@ def transcribe(port, path, model):
         return json.loads(r.read().decode("utf-8")).get("text", "")
 
 
+ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen " \
+       "seventeen eighteen nineteen".split()
+TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+def spoken(n):
+    """Digits as words, so "5 o'clock" and "five o'clock" score the same; years as they are read."""
+    if n < 20:
+        return ONES[n]
+    if n < 100:
+        return TENS[n // 10] + ("" if n % 10 == 0 else " " + ONES[n % 10])
+    if 1100 <= n < 2100 and n % 100 and not 2000 <= n < 2010:
+        return spoken(n // 100) + " " + spoken(n % 100)
+    if n < 1000:
+        return ONES[n // 100] + " hundred" + ("" if n % 100 == 0 else " " + spoken(n % 100))
+    return spoken(n // 1000) + " thousand" + ("" if n % 1000 == 0 else " " + spoken(n % 1000))
+
+
 def words(t):
-    t = t.lower().replace("2024", "twenty twenty four")
+    t = re.sub(r"\d+", lambda m: " " + spoken(int(m.group())) + " ", t.lower().replace(",", ""))
     return re.sub(r"[^a-z' ]", " ", t).split()
 
 
@@ -45,9 +63,20 @@ def main():
     ap.add_argument("--text", required=True)
     ap.add_argument("--wav", action="append", required=True)
     ap.add_argument("--model", default="whisper-v3:turbo-q8_0")
+    ap.add_argument("--from-log", help="rescore the transcripts of an earlier run's log instead")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     lines = [l.strip() for l in open(args.text, encoding="utf-8") if l.strip()]
+    if args.from_log:
+        said = re.findall(r"^\s+\[(\d+)\] \d+/\d+ errors: (.*)$", open(args.from_log, encoding="utf-8").read(), re.M)
+        for k in range(0, len(said), len(lines)):
+            errs = total = 0
+            for i, text in said[k:k + len(lines)]:
+                e, n = wer(lines[int(i) - 1], text)
+                errs, total = errs + e, total + n
+                print(f"  [{i}] {e}/{n}: {text}")
+            print(f"  set {k // len(lines) + 1}: word error rate {errs}/{total} = {errs / total:.3f}")
+        return
     for _ in range(120):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{args.port}/api/version", timeout=5)
