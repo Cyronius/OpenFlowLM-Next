@@ -112,8 +112,8 @@ for either reason.
   has been measured (nothing ran under `dibs run --measure`).
 - Results 2026-10-16: E4B `oflm-test --llm` 5 of 5, `--tools` 14 of the 15 checks reached. E2B
   `oflm-test --llm` 5 of 5.
-- Garbled arithmetic in an answer ("$64 - $6", an answer that stops mid-sum) is the sampler, not the
-  kernels: `Gemma4e::load_model` sets frequency and presence penalties of 1.0 over the last 64 tokens,
+- Garbled arithmetic in an answer ("$64 - $6", an answer that stops mid-sum) points at the sampler
+  first: `Gemma4e::load_model` sets frequency and presence penalties of 1.0 over the last 64 tokens,
   which push down digits already written. Replay with `"frequency_penalty": 0, "presence_penalty": 0`
   in the request before suspecting the engine; the failing tool-loop request then answers right.
 - Images and audio: the open path refuses them, and `OFLM_GEMMA4_ENGINE=closed` cannot load a GGUF

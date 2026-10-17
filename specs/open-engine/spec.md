@@ -1191,11 +1191,11 @@ nullable schema). Stream: the 7 checks it reached pass, the time limit cutting i
 with garbled working that ran to the token limit. The miss: the non-stream loop's final answer at
 temperature 0.3 stopped after "$60.0 - $6."; greedily it reaches "$54.00" through "$64 - $6".
 
-The cause is the server's Gemma 4 sampler defaults, not the kernels: frequency and presence penalty 1.0
-each over the last 64 sampled tokens (`modeling_gemma4e.cpp`, the closed engine's too), which push down
-every digit the answer has already written. The same request with both penalties set to 0 answers
-"$60.00 - $6.00 = $54.00" greedily, and "$54.00" with clean working in two samples at 0.3, finish_reason
-stop each time. Over that loop's prompt (346 tokens as transformers renders it) the 42 layers match the
+The miss traces to the server's Gemma 4 sampler defaults rather than the kernels: frequency and presence
+penalty 1.0 each over the last 64 sampled tokens (`modeling_gemma4e.cpp`, the closed engine's too) push
+down every digit the answer has already written. On the same engine, the same request with both
+penalties at 0 answers "$60.00 - $6.00 = $54.00" greedily, and "$54.00" with clean working in two samples
+at 0.3, finish_reason stop each time (three tries of that one request, not a rerun of the category). Over that loop's prompt (346 tokens as transformers renders it) the 42 layers match the
 replica with the engine's q4_1 head to corr 0.999986, same top 5 in order; against the file's exact Q6_K
 head the logits differ more (corr 0.9988, top 5 reordered), the cost of the weights rule's head
 re-quantization.
