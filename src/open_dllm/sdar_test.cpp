@@ -1,4 +1,4 @@
-// Traces: OPEN-DLLM-SDAR (canonical spec: specs/open-engine/spec.md; plan: .claude/plans/diffusion-lm-support.md)
+// Traces: OPEN-DLLM-SDAR (plan: specs/open-engine/plans/diffusion-lm.md)
 // The SDAR policy against JetAstra/SDAR generate.py's own decode loop, run on a scripted
 // model by utilities/dllm-ref/ref_sdar.py:
 //   python utilities/dllm-ref/ref_sdar.py

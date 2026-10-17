@@ -1,7 +1,6 @@
 # Plan: diffusion language models on the open engine
 
-**Status:** in progress (branch `feat/dllm`). Design detail and measurements live in the
-worktree's `.claude/plans/diffusion-lm-support.md` and `dflash-verify-pass-probe.md`.
+**Status:** in progress. The policies below are built and tested; the engine side is planned.
 
 Two diffusion LMs, each a decode policy over passes of several token rows:
 - **SDAR-8B-Chat-b16:** Qwen3-8B shape; 16-token blocks with in-block bidirectional
@@ -10,6 +9,22 @@ Two diffusion LMs, each a decode policy over passes of several token rows:
 
 The policies are engine-independent (`src/open_dllm/`). The llama.cpp reference driver
 (`utilities/dllm-ref/`) runs them first; the open engine runs them later.
+
+## The loop a backend runs
+
+```
+policy->start(prompt);
+while (!policy->done()) {
+    Pass p = policy->next();
+    // run p.rows: write each row's K/V at .slot, RoPE at .pos, attention mask per p.attn
+    policy->feed(logits of p.logit_rows, vocab);
+    // drop every cache row at slot >= policy->keep()
+    // stream policy->take()
+}
+```
+
+For both policies a row's slot is >= `keep()` exactly when its position is, so a backend whose
+cache is keyed by position (llama.cpp) can trim by position.
 
 ## New requirements
 
@@ -66,8 +81,7 @@ possible outcome, seeded resampling, and block 32 / steps 32.
 - **OPEN-FAMILY-LLADA2MOE:** LLaDA2.2-mini on the open kernels.
 - **OPEN-DLLM-SERVE:** streaming through `oflm serve`.
 
-Their definitions and test categories are in the worktree plan. They are added here before
-their code lands.
+Each gets a definition and a test category here before its code lands.
 
 ## Spec merge
 

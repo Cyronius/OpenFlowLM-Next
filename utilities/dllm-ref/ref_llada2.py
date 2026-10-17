@@ -2,8 +2,8 @@
 """ref_llada2.py: LLaDA2.2-mini's own decode loop, driven by a scripted fake model.
 
 Writes specs/open-engine/tests/fixtures/dllm_llada2.json, which src/open_dllm/llada2_test.cpp
-replays against make_llada2(). Traces: OPEN-DLLM-LLADA2 (canonical spec:
-specs/open-engine/spec.md; plan: .claude/plans/diffusion-lm-support.md).
+replays against make_llada2(). Traces: OPEN-DLLM-LLADA2 (plan:
+specs/open-engine/plans/diffusion-lm.md).
 
 What runs is the reference's code, not a re-implementation of it. The eight methods of
 LLaDA2MoeModelLM the decode uses (generate, _joint_decode_block, _resample_to_escape_loop,

@@ -1,4 +1,4 @@
-// Traces: OPEN-DLLM-LLADA2 (canonical spec: specs/open-engine/spec.md; plan: .claude/plans/diffusion-lm-support.md)
+// Traces: OPEN-DLLM-LLADA2 (plan: specs/open-engine/plans/diffusion-lm.md)
 /// \file llada2_test.cpp
 /// \brief Replays specs/open-engine/tests/fixtures/dllm_llada2.json against make_llada2().
 ///

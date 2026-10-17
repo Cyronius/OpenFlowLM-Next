@@ -1,7 +1,6 @@
 """Pass-width probe: what a q4 pass over M rows costs against a pass over one.
 
-Phase 0 of the diffusion-LM plan (the worktree's .claude/plans/diffusion-lm-support.md
-and dflash-verify-pass-probe.md). It builds open_kernels/designs/gemm_q4 at several
+Phase 0 of the diffusion-LM plan (specs/open-engine/plans/diffusion-lm.md). It builds open_kernels/designs/gemm_q4 at several
 row counts for two shapes and times them through harness/run_kernel. Rounds are
 interleaved across configs, so drift on the box lands on every config alike.
 

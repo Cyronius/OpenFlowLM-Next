@@ -39,7 +39,7 @@ torch RNG and make_sdar's mt19937_64 never have to agree. The generator refuses 
 whose confidences sit within 1e-6 of tau or tie at a top-k cut, so the C++ side's double
 softmax cannot land on the other side of a decision.
 
-Plan: .claude/plans/diffusion-lm-support.md (Phase 4); spec: specs/open-engine/spec.md.
+Plan: specs/open-engine/plans/diffusion-lm.md.
 """
 import argparse
 import json

@@ -1,23 +1,5 @@
 /// \file policy.hpp
-/// \brief Diffusion-LM decode policies, independent of the engine that runs them.
-///
-/// A policy decides what each forward pass contains and what to do with its logits;
-/// a backend (the llama.cpp reference driver in utilities/dllm-ref, later the open
-/// engine) runs the passes. The loop a backend runs:
-///
-///     policy->start(prompt);
-///     while (!policy->done()) {
-///         Pass p = policy->next();
-///         run p.rows (write each row's K/V at p.rows[i].slot, RoPE at .pos, mask per p.attn)
-///         policy->feed(logits of p.logit_rows, vocab);
-///         drop every cache row at slot >= policy->keep();
-///         stream policy->take();
-///     }
-///
-/// For every policy here a row's slot is >= keep() exactly when its position is, so a
-/// backend whose cache is keyed by position (llama.cpp) can trim by position.
-///
-/// Plan: .claude/plans/diffusion-lm-support.md (worktree feat/dllm).
+/// \brief Diffusion-LM decode policies; the backend loop that drives them is in specs/open-engine/plans/diffusion-lm.md.
 #pragma once
 
 #include <cstddef>
@@ -29,8 +11,7 @@
 
 namespace open_dllm {
 
-/// One row of a pass. `slot` is the absolute cache row its K/V is written to; `pos` is
-/// the position its RoPE uses. The policies here keep them equal.
+/// One row of a pass: `slot` is the cache row its K/V goes to, `pos` its RoPE position.
 struct Row {
     int32_t token;
     int32_t pos;
@@ -90,11 +71,7 @@ void softmax(const float* logits, size_t n, std::vector<double>& probs);
 double entropy(const std::vector<double>& probs);
 size_t argmax(const float* logits, size_t n);
 
-/// One token from logits under `s`: greedy at temperature 0; otherwise temperature, then top-k
-/// (every token tied with the k-th is kept) and top-p (a token is kept while the
-/// probability mass before it is <= top_p, so the first is always kept), then a draw from
-/// rng. `prob_out` (optional) receives the drawn token's probability under the
-/// distribution it was drawn from.
+/// One token from logits: greedy at temperature 0, else temperature, top-k, top-p, then a draw.
 int32_t sample(const float* logits, size_t n, const Sampling& s, std::mt19937_64& rng,
                double* prob_out = nullptr);
 
