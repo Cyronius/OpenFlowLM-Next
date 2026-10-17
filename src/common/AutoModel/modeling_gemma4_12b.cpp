@@ -123,10 +123,9 @@ bool Gemma4_12B::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, 
     if (this->open_text_) {
         bool media = !input.images.empty() || !input.audios.empty();
         for (const auto& m : input.messages) media = media || m.contains("images") || m.contains("audios");
-        if (media) {
-            header_print("ERROR", "Gemma 4 12B on the open kernels is text only; for images and audio run the gemma4-it:12b tag (FLM's .q4nx container, closed engine)");
-            return false;
-        }
+        // thrown, not false: every caller reports false as "Max length reached", and the CLI then ends the chat
+        if (media)
+            throw request_error("Gemma 4 12B on the open kernels is text only; for images and audio run the gemma4-it:12b tag (FLM's .q4nx container, closed engine)");
         nlohmann::ordered_json messages = input.messages;
         if (messages.empty()) messages.push_back({{"role", "user"}, {"content", input.prompt}});
         std::vector<int> tokens = this->tokenizer->encode(this->apply_chat_template(messages, input.tools));
