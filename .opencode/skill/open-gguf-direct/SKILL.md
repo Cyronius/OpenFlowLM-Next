@@ -242,11 +242,13 @@ as `model.gguf` (see `open-dense-kernels/SKILL.md`) has its full kernel set.
   `ffn_norm` is HF's `post_attention_layernorm`. `GgufFile::resolve` decides by whether the
   file has `post_attention_norm`. Before this, every Gemma 3 GGUF ran with the two swapped.
 - **Float heads.** `std_perm_gguf` re-quantizes F16 / BF16 / F32 tensors as it does Q8_0
-  (Gemma's tied F16 embedding is its head).
+  (Gemma's tied F16 embedding is its head). The floats sit outside the `kq` union on purpose:
+  gguf-inspect's test reads the quant allowlist from that union and the guard after it.
 - **Padded pools (OPEN-PACK-PAD).** A `std_perm_gguf` op may carry `src_dim` / `src_rows`, the
   file tensor's own shape inside a wider / taller pool; the pad stays zero, and a file whose
-  shape the op misstates is refused. `embed_row` and `pack_norm` zero-extend into a wider
-  buffer. A `.q4nx` `std_perm` refuses a padded op.
+  shape the op misstates is refused. Without `src_rows` the file must hold the plan's rows
+  exactly; only the head may fall short, by less than one 64-row band. `embed_row` and
+  `pack_norm` zero-extend into a wider buffer. A `.q4nx` `std_perm` refuses a padded op.
 - **A padded set serves only a GGUF.** `Engine::find_kernels` declines a set whose q4nx view
   is padded (`Manifest::reads_gguf_only`) unless the model directory has a `model.gguf` and no
   `model.q4nx` (`Core::reads_gguf`, the same rule the Core loads by), so a `.q4nx` model under

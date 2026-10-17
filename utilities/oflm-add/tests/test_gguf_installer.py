@@ -66,8 +66,7 @@ def test_modelscope_selected_gguf_downloads_as_canonical_name(monkeypatch, tmp_p
 
 
 def test_gemma3_1b_gguf_resolves_to_the_text_only_entry():
-    """Traces: OPEN-FAMILY-GEMMA3. A Gemma 3 GGUF's name says gemma3, but the official list
-    registers the 1B (no vision tower) as gemma3-text; the 4B stays gemma3."""
+    """Traces: OPEN-FAMILY-GEMMA3. A gemma3 GGUF of the 1B's size takes the official gemma3-text entry; the 4B stays gemma3."""
     reg = {"models": {"gemma3": {
         "1b": {"name": "Gemma3-1B-NPU2", "size": 1000000000, "details": {"family": "gemma3-text"}},
         "4b": {"name": "Gemma3-4B-NPU2", "size": 4000000000, "details": {"family": "gemma3"}}}}}

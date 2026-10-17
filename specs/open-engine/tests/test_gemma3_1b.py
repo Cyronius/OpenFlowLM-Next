@@ -1,6 +1,5 @@
 # Traces: OPEN-FAMILY-GEMMA3, OPEN-PACK-PAD, OPEN-SPEC-DERIVE (canonical spec: specs/open-engine/spec.md)
-"""Gemma 3 1B: the spec its GGUF derives, and the zero-padded layout the dense recipe builds
-it at (hidden 1152 is 4.5 k-tiles of 256, so the pools and kernels run at 1280)."""
+"""Gemma 3 1B: the spec its GGUF derives, and the layout zero-padded from hidden 1152 to 1280."""
 from __future__ import annotations
 
 import dataclasses

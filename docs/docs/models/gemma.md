@@ -22,11 +22,13 @@ parent: Models
 oflm run gemma3:1b
 ```
 
-This tag runs on the closed engine. For the open kernels, install Google's QAT GGUF and run
-the tag `oflm-add` prints:
+This tag runs on the closed engine. For the open kernels, install Google's QAT GGUF. With
+`--tag gemma3:1b` it takes over that tag in your own registry (without `--tag` it is installed
+as `gemma-it:1b`):
 
 ```shell
-oflm-add google/gemma-3-1b-it-qat-q4_0-gguf
+oflm-add google/gemma-3-1b-it-qat-q4_0-gguf --tag gemma3:1b
+oflm run gemma3:1b
 ```
 
 ---

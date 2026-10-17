@@ -103,7 +103,7 @@ kernels that shipped.
 ### OPEN-SPEC-DERIVE: ModelSpec from a model's own metadata
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
 **Test category:** unit
-**Tests:** `tests/test_spec_derive.py`
+**Tests:** `tests/test_spec_derive.py`; the `real_vocab` clamp in `tests/test_gemma3_1b.py`
 
 `ModelSpec.from_hf_config` (the HF-style `config.json` OFLM ships) and
 `ModelSpec.from_gguf_metadata` (llama.cpp's key names) shall produce the
@@ -127,6 +127,7 @@ existed. `OPEN_KERNELS_FORCE_Q4_1=1` forces the fallback for an A/B.
 **Acceptance criteria:**
 - The 27B's `config.json` fields (+ the tokenizer's 248070 ids) → a spec equal to `recipes/specs/qwen36-35b-a3b.json`; `layer_types` from the list when present, else from `full_attention_interval`.
 - GGUF metadata for arch `qwen35moe` (or `qwen3next`) → the same hyperparameters (`real_vocab` = `vocab_size`, GGUF has no tokenizer-side count).
+- For every family, a tokenizer with more ids than the head has rows gives `real_vocab` = `vocab_size`: an id past the head can never be a logit (Gemma 3 1B's 262145 ids over 262144 rows; no shipped spec's hash moves).
 - HunYuan's `rope_scaling` (`type: dynamic`, an alpha) folds into ONE static base, `rope_theta * alpha^(d/(d-2))`, which is what a `hunyuan-dense` GGUF already carries in `rope.freq_base`; a `yarn` type, a factor or an mscale other than 1, `use_cla`, a bias or a MoE variant is refused by name.
 - `model_type: llama` → `SpecError` naming `model_type 'llama'`; `general.architecture: gemma3` likewise; a missing `linear_num_value_heads` / `qwen35moe.expert_count` → `SpecError` naming the key.
 - JSON round trip preserves the spec and its hash; an unknown field is refused.
@@ -1085,12 +1086,16 @@ this requirement:
   the swapped one by 52).
 - Its head is the tied F16 embedding, which the q4 pool cannot hold, so it is re-quantized to
   q4_1 at load with the same law as a Q8_0 head (`std_perm_gguf`). The 26 layers keep the
-  file's Q4_0 exactly.
+  file's Q4_0 exactly. Over 1024 tokens of `README.md` through the fp64 replica, the 4-bit
+  head's mean NLL is 3.4845 nats against 3.4860 for the F16 head; the argmax differs at 88
+  positions, 79 of them near-ties (`utilities/quant-compare/head_nll.py`, log
+  `.claude/plans/gemma3-1b-run/27-head-nll.log`).
 - The GGUF and the QAT checkpoint's own `config.json` disagree on the sliding window (1024
   against 512). The kernel set is built at 512, the window the model was trained with, and a
   model directory without a `config.json` is refused rather than run at the GGUF's 1024.
   The GGUF derivation also reads an f32 `1e-6` and a linear RoPE factor of 1 as the config's
-  own values, so both sources give the same `spec_hash`.
+  own values, so the two derivations agree in every field but the window (their `spec_hash`
+  differs by it).
 
 **Acceptance criteria (unit), 1B:** `tests/test_gemma3_1b.py`; the sandwich-norm names in
 `src/open_qwen36/gguf_pack_test.cpp`; the install resolving a `gemma3` GGUF of the 1B's size to
@@ -1102,20 +1107,23 @@ from the GGUF (`model/make_decode.py --gguf <file> --model-dir <dir with config.
 <prompt> --layers 2`, which writes `ref_ids.txt`); run `open_qwen36_cli --model <dir with
 model.gguf + config.json> --kernels <set> --layers 2 --ids <ref_ids> --prefill-logits
 --dump-logits <out>/y`; compare with `model/compare_decode.py`. Then the same over all 26
-layers, then `oflm-add google/gemma-3-1b-it-qat-q4_0-gguf`, `oflm serve gemma3:1b` (the load
-logs `Gemma 3 (text) on the open kernels`), and `oflm-test --llm --model gemma3:1b`.
+layers, then `oflm-add google/gemma-3-1b-it-qat-q4_0-gguf --tag gemma3:1b`, `oflm serve gemma3:1b`
+(the load logs `Gemma 3 (text) on the open kernels`), and `oflm-test --llm --model gemma3:1b`.
 
 **Result 2026-10-16 (Gemma 3 1B, `google/gemma-3-1b-it-qat-q4_0-gguf`, on the XDNA2 NPU):**
 against the fp64 reference written from the same GGUF (`model/gguf_model.py`), a 2-layer slice
 through `open_qwen36_cli` matched at all 8 positions (logits corr >= 0.999995, same argmax),
-and the full 26 layers matched at 25 of 26 positions (corr >= 0.99990, same argmax); the 26th
-is a near tie, a 0.019-logit gap between the reference's top two that our logits order the
-other way by 0.028. `oflm-add` installs the GGUF as `gemma3:1b` (family `gemma3-text`, the
-family's kernel set linked), `oflm serve` runs it on the open kernels, and `oflm-test --llm
+and the full 26 layers matched at 25 of 26 positions (corr >= 0.99990, same argmax); the miss,
+at position 17, is a near tie, a 0.019-logit gap between the reference's top two that our
+logits order the other way by 0.028. `oflm-add --tag gemma3:1b` installs the GGUF under that tag
+(family `gemma3-text`, the family's kernel set linked; without `--tag` it names it
+`gemma-it:1b`, which was not served), `oflm serve` runs it on the open kernels, and `oflm-test --llm
 --model gemma3:1b` passes 5 of 5 (two-turn chats, streamed and not, and the recall of a code
 from an earlier turn) with answers capped at 1024 tokens. The official `Gemma3-1B-NPU2`
-container stays on the closed engine (OPEN-PACK-PAD). Logs: `.claude/plans/gemma3-1b-run/`
-(15 slice, 16-17 full model, 13-14 serve and oflm-test, 21 and 24 the official container).
+container stays on the closed engine (OPEN-PACK-PAD). After the packer's row check
+(OPEN-PACK-PAD) the 26-layer run reproduced line for line and `oflm serve` loaded and answered.
+Logs: `.claude/plans/gemma3-1b-run/` (15 slice, 16-17 full model, 13-14 serve and oflm-test,
+21 and 24 the official container, 34-35 the rerun).
 
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
@@ -2017,18 +2025,22 @@ code sits behind `#if ATTN_KVH == 1` and the design's row walk is the old one at
 
 **Verification (manual), for the families that must not move:** generate the MLIR of every
 kernel set every `recipes/specs/*.json` builds from a `git archive` of the base commit and
-from the working tree (`utilities/mlir_equiv.py`) and diff them; preprocess every attention
-translation unit at every spec's own flags from both trees (`ALL_SPECS=1 OLD_DIR=<archive>
-utilities/attn_pp_identical.sh`). Identical MLIR plus identical preprocessed kernels is an
-identical xclbin.
+from the working tree (`utilities/mlir_equiv.py --designs all`) and diff them; preprocess every
+attention translation unit at every spec's own flags from both trees (`ALL_SPECS=1
+OLD_DIR=<archive> utilities/attn_pp_identical.sh`, which fails if any file does not
+preprocess). Identical MLIR plus identical preprocessed kernels is an identical xclbin.
 
-**Result 2026-10-16:** 73 kernel sets over the 15 shipped specs give identical MLIR, and every
-attention translation unit preprocesses identically at every shipped spec's flags (the logs
-are kept with the Gemma 3 1B bring-up). The one-kv-head kernels compile with Peano at Gemma 3
+**Result 2026-10-16, on the branch's final tree:** against a `git archive` of the base
+`99fe7e4d`, all 500 kernel sets the 15 shipped specs build give identical MLIR (367 for the
+dense and LFM2 specs, 133 for the MoE and Qwen3.5 specs, their layer images included; the
+1B's five sets are new), all 176 attention translation units preprocess identically at every
+shipped spec's flags, and so do the norm sources without `LN_DIV`. The first run, during the
+bring-up, covered 73 sets and predated the final commits, and its preprocessing script would
+have reported success even without a compiler; both tools now fail loudly. The one-kv-head kernels compile with Peano at Gemma 3
 1B's flags; on hardware they are OPEN-FAMILY-GEMMA3's 1B result. As a built-bytes check, the
 Gemma 3 4B `dx` set exported from the tree with this and the padding change matches the base
 commit's export under `--check` (instruction stream byte-identical, xclbin differing only in
-its build stamps).
+its build stamps). Logs: `.claude/plans/gemma3-1b-run/` 28-31b.
 
 ### OPEN-ROPE-YARN: YaRN inverse frequencies and its attention factor
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`)
@@ -2308,7 +2320,8 @@ at the model's own width.
 - `pad_width(2880, 8) == 3072`, and no width between 2880 and 3072 satisfies the band
   law, so 3072 really is the smallest.
 - `pad_width(w, cores_for(spec)) == w` for the hidden, dense intermediate, q width and
-  kv width of every spec in `recipes/specs/` -- the pad moves no shipped family.
+  kv width of every spec in `recipes/specs/` -- the pad moves no shipped family. The one
+  exception is `gemma3-1b.json`, built zero-padded on purpose (OPEN-PACK-PAD).
 - `cores_for` on gpt-oss-20b's own widths is 1, and 8 once hidden and the expert width
   are padded to 3072.
 - `band_bytes(2880)` raises naming the chunk rule; `band_bytes(3072) == 122880`.
@@ -2361,7 +2374,10 @@ exactly nothing:
 - **The pools.** A padded projection's pack op names the GGUF tensor's own shape (`src_dim`
   for its columns, `src_rows` for its rows). `std_perm_gguf` packs the real blocks exactly
   and leaves every scale, min and code of the pad at zero, so a padded weight reads as +0.
-  The file must hold exactly the shape the op names, or the pack is refused. A `.q4nx`
+  The file must hold exactly the shape the op names (an op without `src_rows` names the pool's
+  own rows), or the pack is refused, whether the file is short or long. The one allowance is
+  the head: the plan rounds the vocabulary up to whole 64-row bands, so a head tensor may hold
+  fewer rows than its plan by less than one band, and those rows pack as zero. A `.q4nx`
   container cannot be padded: `std_perm` refuses a padded op by name.
 - **The activations.** The residual is the padded width. The embedding row is zero-extended
   into it (`GgufFile::embed_row`, the GGUF side of OPEN-EMBED-STRIDE), a norm weight narrower
@@ -2380,8 +2396,11 @@ exactly nothing:
   without this FLM's own `Gemma3-1B-NPU2` container, which ran on the closed DLL before, would
   pick the open set and fail to load.
 
-The block-prefill route is not built for a padded spec (its host chain normalises by the
-buffer width); prefill runs through `step()`.
+Prefill runs through `step()`, one token at a time. No dense family's GGUF view has a
+block-prefill route (`programs()` emits none for the f32-scale pool, whose chunks the block
+GEMMs cannot read), and `gemm_route` refuses the 1B three more times over: its position record
+is two elements, it has one kv head (both are `dx_attn.py` design limits), and its widths are
+padded (the host chain normalises by the buffer width).
 
 **Acceptance criteria (unit):**
 - Gemma 3 1B gives `widths == (4, 1280, 6912)`; every shipped dense spec keeps its own widths,
@@ -2392,6 +2411,9 @@ buffer width); prefill runs through `step()`.
 - A Q4_0 source of 96 x 288 packed into a 128 x 512 pool reads back bit-exactly where it
   exists and as +0 everywhere else, over a dirty destination; a plan that misstates the
   file's rows is refused.
+- Without `src_rows`, a file with fewer or more rows than the plan is refused, naming both
+  shapes; a head 32 rows short of its plan packs with those rows +0, and one a whole 64-row
+  band short is refused (`gguf_pack_test`).
 - An F16 source whose blocks are exactly q4_1 at fp16 scales re-quantizes back exactly, padded
   columns zero (Gemma 3's tied F16 embedding is the head).
 - `embed_row` zero-extends to a wider buffer and refuses a narrower one; `pack_norm` likewise.
