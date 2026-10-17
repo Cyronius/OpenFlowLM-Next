@@ -1068,8 +1068,9 @@ kernel set is installed for their model, and honour `OFLM_GEMMA_ENGINE=open|clos
 (family `gemma3-text`, e.g. `gemma3:1b`). Verify with `oflm serve <tag>` on a model
 that has `open_kernels/` installed: the load logs `Gemma 3 on the open kernels (<dir>)`
 or `Gemma 3 (text) on the open kernels (<dir>)`, and `OFLM_GEMMA_ENGINE=closed`
-restores the `gemma_npu` / `gemma_text_npu` DLL. Images always need the closed
-engine -- the open one has no vision path.
+restores the `gemma_npu` / `gemma_text_npu` DLL. Images take the open engine when the model
+directory holds `mmproj.gguf` (OPEN-VISION-GEMMA3); without it an image is refused by name on the
+open engine, and only `OFLM_GEMMA_ENGINE=closed` sends it to the closed one.
 
 **Result 2026-09-05 (Gemma3-4B):** slice logits corr 0.999998 / 0.999998, same argmax and top-5, residual corr 1.000000 every layer; identical through the engine; a finite step at position 1103; a coherent two-sentence answer ending in `<end_of_turn>` at token 43 (96 ms/token). Details: `.claude/plans/open-kernels-phase-d-gemma3.md`.
 
@@ -3104,6 +3105,68 @@ features 1.00000000 at 4.46e-07, 8.80e-06 and 7.84e-06; the one-block-early cont
 0.6866. The C++ port against that numpy reference on an 8 x 12 grid -- merged
 1.00000000 / 4.48e-06, features 1.00000000 at 3.07e-07, 1.05e-06 and 7.17e-07. Nine
 tests, eight of which need neither the 830 MB container nor the 3.9 GB upstream shard.
+
+### OPEN-VISION-GEMMA3: Gemma 3 images on the open engine
+**Applies to:** openflowlm-next (`src/open_qwen36/vision/vit.cpp`, `bidir_block.hpp`, `core.cpp`, `engine.cpp`,
+`cli.cpp`, `open_kernels/harness/stream_patch.hpp`, `utilities/oflm-add`)
+**Test category:** unit for the deterministic parts (below); the image through the NPU and `oflm serve` is manual
+
+A Gemma 3 model loaded from a GGUF (`model.gguf`) shall take images on the open engine when its
+vision tower sits beside it as `mmproj.gguf`, llama.cpp's projector file. Without that file an image
+is refused with a message naming it and `OFLM_GEMMA_ENGINE=closed`; it is never handed to the closed
+DLL behind the user's back. The load and every image log which engine and which file ran.
+
+**The tower.** SigLIP read from the mmproj as shipped: F16 / BF16 linears kept in their own 16-bit
+type and widened inside the matmul, F32 kept as F32, anything else refused (an 8-bit projector
+names the 16-bit file to install). The geometry comes from the `clip.vision.*` keys and is checked
+against the tensor shapes and the tensor count (439 for the 4B). The two MLP matrices are told apart
+by their shapes, because converters disagree on the names: Google's and the older ggml-org files call
+SigLIP's first MLP matrix `ffn_down`, the newer ggml-org, unsloth and mradermacher files `ffn_up`.
+Then Gemma 3's projector: the 64 x 64 patch grid averaged in 4 x 4 cells to 256 tokens, the
+soft-embedding RMSNorm (the file stores `1 + w`), and `mm.input_projection`, stored `[hidden, 2560]`
+and applied as `y = x W`. The rows enter the language model unscaled, where transformers'
+`masked_scatter` puts them.
+
+**The mask.** Each image's 256 tokens attend to each other both ways and to everything before the
+image causally (inside the sliding window on the local layers); text stays causal -- transformers'
+`create_masks_for_vision_model`. The GGUF kernel set has no batched prefill route and the dense layer
+is one fused dispatch, so the block runs through the decode kernel, layer by layer, twice per token:
+pass A writes every token's K/V, pass B reads all of them (`bidir_block.hpp`; derivation in
+`plans/archive/gemma3-images.md`). Before each pass-B token the host copies one 4 KB cache row so that
+the rows the fill reads hold every image token but the query's own exactly once; the rows end in
+natural order. Each dispatch's four `attnpos` words are set apart (`attn_apply_rows`), and the block's
+position records carry its row counts while it runs and are restored after. The last layer runs once,
+in order, with natural drains. Cost: `(2 (L - 1) + 1) N` single-layer dispatches for N image tokens.
+
+**Acceptance criteria (unit):**
+- `bidir_block_test` (ctest `OPEN-VISION-GEMMA3-MASK`): `attn_apply` writes the same words as before
+  `attn_apply_rows` existed at every position below 3000, windows 0 / 512 / 1024, row blocks 0 / 1 / 2 / 4;
+  replaying the schedule on a model of the cache rows, every kept dispatch reads each other image row
+  exactly once and the rows end in natural order (blocks of 1, 2, 3, 7 and 256 at positions 0, 5, 900,
+  1100, global and 1024-row local layers); a 256-token layer is 511 dispatches and 255 row copies.
+- `vit_test --siglip` (ctest `OPEN-VISION-GEMMA3-TOWER-up` / `-down`): a small random SigLIP and Gemma 3
+  projector built by transformers and written as an mmproj GGUF in each naming convention
+  (`open_kernels/model/gemma3_vision_ref.py tiny`): tower and projected rows at per-row cosine > 0.99999
+  and max error < 1e-3 of max.
+- `utilities/oflm-add/tests/test_gguf_installer.py`: a projector is never installed as the model (a
+  `.mmproj-Q8_0.gguf` would otherwise win in a repo with no 4-bit file); the F16 projector is preferred
+  over BF16 and F32 and a quantized one is refused by name; an installed `mmproj.gguf` marks the entry
+  `vlm`; a template that does not read `message['images']` is detected; the official entry's repo id
+  fills in `{hf_owner}`.
+
+**Procedure (manual):**
+1. `gemma3_vision_ref.py tower --hf <QAT checkpoint> --image <896 px image> --fixture FX`, then
+   `vit_test --siglip <mmproj> FX`: the real tower against transformers in fp32 on the app's bf16 pixels.
+2. `gemma3_vision_ref.py logits` (transformers, bf16) and `replica_gemma3_image.py --mask bidir` /
+   `--mask causal` (fp64, from the GGUF the way the engine packs it, the image rows injected) on the
+   same prompt ids (`<start_of_image>`, 256 soft tokens, `<end_of_image>`, a question).
+3. `open_qwen36_cli --model <dir with model.gguf + config.json> --kernels <4B set> --ids-file IDS
+   --embeds FX/ref.bin --prefill-logits --dump-logits OUT/y` against the replica's `ref_logits_p*.bin`,
+   with and without `--causal-image`: the both-ways run must match the both-ways replica much more
+   closely than the causal one does. Then `--image FX/pixels.bin --mmproj <file>` for the tower in the
+   loop.
+4. `oflm-add <gguf repo> --tag gemma3:4b`, `oflm serve gemma3:4b`, one image request, then
+   `oflm-test --vision --model gemma3:4b`.
 
 ### OPEN-FAMILY-LFM2: LFM2 replaces attention with a short convolution in most layers
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `families.py`)

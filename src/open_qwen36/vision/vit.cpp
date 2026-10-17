@@ -1,7 +1,10 @@
 #include "open_qwen36/vision/vit.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -526,6 +529,127 @@ void attention(const VitConfig& cfg, const float* qkv, int n, const std::vector<
                     float acc[128] = {};
                     for (int t = 0; t < m; ++t)
                         axpy_f32(acc, vh + static_cast<size_t>(t) * HD, sr[t] * inv, HD);
+                    for (int d = 0; d < HD; ++d) orow[d] = acc[d];
+                }
+            }
+    }
+}
+
+#if defined(OFLM_VIT_AVX2)
+/// Scores of 4 queries against 16 keys: kt is one head's [HD][n] keys, q four rows of HD.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
+void scores4x16_avx2(const float* const q[4], const float* kt, int n, int HD, int j, float* const s[4]) {
+    __m256 a[4][2];
+    for (int r = 0; r < 4; ++r) a[r][0] = a[r][1] = _mm256_setzero_ps();
+    for (int d = 0; d < HD; ++d) {
+        const float* kr = kt + static_cast<size_t>(d) * n + j;
+        const __m256 k0 = _mm256_loadu_ps(kr), k1 = _mm256_loadu_ps(kr + 8);
+        for (int r = 0; r < 4; ++r) {
+            const __m256 b = _mm256_set1_ps(q[r][d]);
+            a[r][0] = _mm256_fmadd_ps(b, k0, a[r][0]);
+            a[r][1] = _mm256_fmadd_ps(b, k1, a[r][1]);
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        _mm256_storeu_ps(s[r] + j, a[r][0]);
+        _mm256_storeu_ps(s[r] + j + 8, a[r][1]);
+    }
+}
+
+/// One query's output: sum over keys of p[t] * v[t], HD a multiple of 8 up to 128, accumulated in registers.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
+void pv_avx2(const float* p, float inv, const float* v, int m, int HD, float* out) {
+    __m256 a[16];
+    const int nv = HD / 8;
+    for (int c = 0; c < nv; ++c) a[c] = _mm256_setzero_ps();
+    for (int t = 0; t < m; ++t) {
+        const __m256 b = _mm256_set1_ps(p[t] * inv);
+        const float* vr = v + static_cast<size_t>(t) * HD;
+        for (int c = 0; c < nv; ++c) a[c] = _mm256_fmadd_ps(b, _mm256_loadu_ps(vr + 8 * c), a[c]);
+    }
+    for (int c = 0; c < nv; ++c) _mm256_storeu_ps(out + 8 * c, a[c]);
+}
+#endif
+
+/// Full attention with no rotary embedding over a long sequence (Siglip's 4096 patches). The keys are
+/// laid [head][dim][key] so a tile of scores accumulates in registers over the head dim, and each
+/// query's output does too; the scalar path is attention()'s arithmetic.
+void attention_full(const VitConfig& cfg, const float* qkv, int n, float* o) {
+    const int NH = cfg.heads, HD = cfg.head_dim, H = cfg.hidden;
+    const size_t row = static_cast<size_t>(3) * H;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+#if defined(OFLM_VIT_AVX2)
+    static const bool avx2 = have_avx2();
+    const bool vec = avx2 && HD % 8 == 0 && HD <= 128;
+#else
+    const bool vec = false;
+#endif
+    std::vector<float> q(static_cast<size_t>(NH) * n * HD), kt(q.size()), v(q.size());
+#pragma omp parallel for schedule(static)
+    for (int t = 0; t < n; ++t)
+        for (int h = 0; h < NH; ++h)
+            for (int i = 0; i < HD; ++i) {
+                q[(static_cast<size_t>(h) * n + t) * HD + i] = qkv[t * row + h * HD + i];
+                kt[(static_cast<size_t>(h) * HD + i) * n + t] = qkv[t * row + H + h * HD + i];
+                v[(static_cast<size_t>(h) * n + t) * HD + i] = qkv[t * row + 2 * H + h * HD + i];
+            }
+    const int QB = 32, nqb = (n + QB - 1) / QB;
+#pragma omp parallel
+    {
+        std::vector<float> sc(static_cast<size_t>(QB) * n);
+        // one flat loop: MSVC's OpenMP ignores collapse, which would leave only NH threads working
+#pragma omp for schedule(dynamic, 1)
+        for (int wi = 0; wi < NH * nqb; ++wi) {
+                const int h = wi / nqb, qb = wi % nqb;
+                const int q0 = qb * QB, qc = std::min(QB, n - q0);
+                const float* qh = q.data() + static_cast<size_t>(h) * n * HD;
+                const float* kh = kt.data() + static_cast<size_t>(h) * HD * n;
+                const float* vh = v.data() + static_cast<size_t>(h) * n * HD;
+                int i = 0;
+#if defined(OFLM_VIT_AVX2)
+                if (vec)
+                    for (; i + 4 <= qc; i += 4) {
+                        const float* qr[4];
+                        float* sr[4];
+                        for (int r = 0; r < 4; ++r) {
+                            qr[r] = qh + static_cast<size_t>(q0 + i + r) * HD;
+                            sr[r] = sc.data() + static_cast<size_t>(i + r) * n;
+                        }
+                        int j = 0;
+                        for (; j + 16 <= n; j += 16) scores4x16_avx2(qr, kh, n, HD, j, sr);
+                        for (; j < n; ++j)
+                            for (int r = 0; r < 4; ++r) {
+                                float a = 0;
+                                for (int d = 0; d < HD; ++d) a += qr[r][d] * kh[static_cast<size_t>(d) * n + j];
+                                sr[r][j] = a;
+                            }
+                    }
+#endif
+                for (; i < qc; ++i) {
+                    const float* qr = qh + static_cast<size_t>(q0 + i) * HD;
+                    float* sr = sc.data() + static_cast<size_t>(i) * n;
+                    for (int j = 0; j < n; ++j) {
+                        float a = 0;
+                        for (int d = 0; d < HD; ++d) a += qr[d] * kh[static_cast<size_t>(d) * n + j];
+                        sr[j] = a;
+                    }
+                }
+                for (i = 0; i < qc; ++i) {
+                    float* sr = sc.data() + static_cast<size_t>(i) * n;
+                    float mx = -1e30f;
+                    for (int j = 0; j < n; ++j) mx = std::max(mx, sr[j] *= scale);
+                    float sum = 0;
+                    for (int j = 0; j < n; ++j) { sr[j] = std::exp(sr[j] - mx); sum += sr[j]; }
+                    float* orow = o + static_cast<size_t>(q0 + i) * H + h * HD;
+#if defined(OFLM_VIT_AVX2)
+                    if (vec) { pv_avx2(sr, 1.0f / sum, vh, n, HD, orow); continue; }
+#endif
+                    float acc[128] = {};
+                    for (int j = 0; j < n; ++j) axpy_f32(acc, vh + static_cast<size_t>(j) * HD, sr[j] / sum, HD);
                     for (int d = 0; d < HD; ++d) orow[d] = acc[d];
                 }
             }
@@ -1268,17 +1392,18 @@ std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, con
     std::vector<float> x(static_cast<size_t>(n) * H);
     linear(patches, n, w.patch, x.data());
     for (size_t i = 0; i < x.size(); ++i) x[i] += w.pos[i];
-    // SigLIP has no rotary embedding: identity tables make attention()'s rotation exact
-    const std::vector<float> cs(static_cast<size_t>(n) * cfg.head_dim, 1.0f), sn(cs.size(), 0.0f);
     std::vector<float> hn(x.size()), qkv(static_cast<size_t>(n) * 3 * H), att(x.size()), tmp(x.size());
     std::vector<float> ff(static_cast<size_t>(n) * cfg.inter);
-    const std::vector<int> whole = {0, n};
+    double t_att = 0, t_rest = 0;
     for (const VitBlock& B : w.blocks) {
+        const auto t0 = std::chrono::steady_clock::now();
         layer_norm(x.data(), n, H, B.ln1_w.data(), B.ln1_b.data(), cfg.eps, hn.data());
         linear(hn.data(), n, B.q, qkv.data(), 3 * H);
         linear(hn.data(), n, B.k, qkv.data() + H, 3 * H);
         linear(hn.data(), n, B.v, qkv.data() + 2 * H, 3 * H);
-        attention(cfg, qkv.data(), n, cs, sn, whole, att.data());
+        const auto t1 = std::chrono::steady_clock::now();
+        attention_full(cfg, qkv.data(), n, att.data());
+        const auto t2 = std::chrono::steady_clock::now();
         linear(att.data(), n, B.proj, tmp.data());
         for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
         layer_norm(x.data(), n, H, B.ln2_w.data(), B.ln2_b.data(), cfg.eps, hn.data());
@@ -1287,7 +1412,12 @@ std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, con
         for (int i = 0; i < static_cast<int>(ff.size()); ++i) ff[i] = gelu_tanh(ff[i]);
         linear(ff.data(), n, B.fc2, tmp.data());
         for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
+        t_att += std::chrono::duration<double>(t2 - t1).count();
+        t_rest += std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count() +
+                  std::chrono::duration<double>(t1 - t0).count();
     }
+    if (std::getenv("OFLM_VIT_TIMING"))
+        std::fprintf(stderr, "vit: siglip attention %.2f s, the rest of the blocks %.2f s\n", t_att, t_rest);
     layer_norm(x.data(), n, H, w.post_ln_w.data(), w.post_ln_b.data(), cfg.eps, hn.data());
     if (tower) *tower = hn;
     // Gemma 3's projector: pool the patch grid by `pool`, RMSNorm (the file stores 1 + w), project
