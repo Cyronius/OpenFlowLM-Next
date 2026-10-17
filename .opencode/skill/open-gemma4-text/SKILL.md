@@ -117,6 +117,10 @@ for either reason.
   which push down digits already written. Replay with `"frequency_penalty": 0, "presence_penalty": 0`
   in the request before suspecting the engine; the failing tool-loop request then answers right.
 - Images and audio: the open path refuses them, and `OFLM_GEMMA4_ENGINE=closed` cannot load a GGUF
-  install. They need a curated `gemma4-it` tag (FLM's `.q4nx` container).
+  install. They need a curated `gemma4-it` tag (FLM's `.q4nx` container). The refusal is a
+  `request_error`: the client gets 400 "Invalid request" and the reason is in the server log.
+- Run a server session as one script under `dibs run npu -- bash <script>`: on this box a `dibs hold`
+  taken in one Bash call did not reliably outlive that call, and one taken in a background call could
+  not be released from a later one.
 - Never rewrite a shell script while a bash instance is still running it: bash reads scripts as it
   goes, and a half-read old instance ran the new text, restarted a server and overwrote its logs.

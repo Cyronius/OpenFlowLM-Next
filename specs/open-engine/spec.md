@@ -1224,6 +1224,11 @@ tokenizer_config.json, registers `gemma-e:2b` text only, links the official xclb
 set by its spec hash; `oflm serve gemma-e:2b` runs it on the open kernels and answers "The capital of
 France is Paris." (finish_reason stop).
 
+**Result 2026-10-17 (`oflm serve` after the review's rebuild):** E4B (`gemma4-it-open:e4b`) and the E2B hub
+install (`gemma-e:2b`) answer "The capital of France is Paris."; an image sent to E4B comes back as the
+400 "Invalid request" body with the reason in the server log, and the next text request answers the
+same. Before the refusal was a `request_error` the client got "Max length reached!".
+
 **Result 2026-10-16 (the official container keeps the closed engine):** `oflm serve` on a stand-in
 directory holding the E4B kernel set, a `model.gguf` and a `model.q4nx` prints "not using ...
 open_kernels: it packs GGUF-direct and ... has no model.gguf (or also a model.q4nx)" and goes to the
