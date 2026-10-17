@@ -11,9 +11,7 @@ layers -- with these changes, every one a property of the family:
 - E2B doubles the FFN width in those KV-shared layers;
 - each layer ends with a per-layer input gated into the residual and a per-layer scalar, and the logits are
   soft-capped -- all three on the host, from the manifest's `ple`, `layer_scalar` and `logit_softcap`;
-- the 12B has no KV sharing and no per-layer inputs (the scalar and the soft cap stay), and its global
-  layers have their own kv-head count (one) and no v projection: v is the raw k projection, before the k
-  norm and RoPE (`attention_k_eq_v`), so the pack plan streams `attn_k` into the v slot too.
+- the 12B has neither KV sharing nor per-layer inputs, and its global layers have one kv head and no attn_v (K = V).
 
 GGUF only (Google ships the QAT Q4_0 file; there is no q4nx container), so every pool is GGUF-direct. The
 pools are the bf16-scale 5120-byte chunk (`std_perm_gguf` narrows the fp16 block scales at pack time), not

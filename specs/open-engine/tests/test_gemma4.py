@@ -311,8 +311,7 @@ def test_12b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, g12):
     ("local", 256, 256, 8, 4096, 8192, 4096, 2, False), ("global", 512, 128, 1, 2048, 2048, 2048, 4, True)])
 def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row, og_elems,
                            qlocal):
-    """The global kind's 16 KB attention output is 4 x elements, wider than the main cores' 2-deep x fifo, and
-    an all-heads q store would be 32 KB, so each attention core keeps its own 4 heads (ATTN_QLOCAL)."""
+    """The global kind's og is 4 x elements (the fifo holds 2) and its all-heads q store would be 32 KB."""
     monkeypatch.setenv("G4_PART", part)
     R = G4.recipe(g12)
     G, L = R.geo, R.layout

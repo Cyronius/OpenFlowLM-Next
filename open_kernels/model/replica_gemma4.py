@@ -18,9 +18,7 @@ RoPE: sliding layers rotate the whole 256-wide head (pairs (i, i + 128), theta 1
 pairs (i, i + 256) for i < 64 only, at theta^(-2i/512) -- transformers' `proportional` type, which llama.cpp
 writes as rope_freqs (1 for the 64 rotated pairs, 1e30 for the rest).
 
-The 12B: no per-layer inputs and no KV sharing; its global layers have their own kv-head count (the GGUF's
-head_count_kv is per layer) and no attn_v: V is the raw k projection, before k_norm and RoPE, then the
-weightless norm (attention_k_eq_v).
+The 12B's global layers have no attn_v: V is the raw k projection, before k_norm and RoPE (attention_k_eq_v).
 
     python replica_gemma4.py <model.gguf> --ids 2,818,5279 [--layers 6] [--out ref.npz]
 """

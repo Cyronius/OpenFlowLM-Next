@@ -9,9 +9,7 @@ the math.
 
     python gemma4_transformers_check.py <model.gguf> [--ids 2,105,...] [--layers 0,5,24,29]   (E2B: --layers 0,4,15,19)
 
-The 12B (`--layers 0,5,6,11`: two sliding and two global layers, no sharing) is built as its own class,
-Gemma4UnifiedForCausalLM (`gemma4_unified`, transformers 5.10+): no per-layer inputs, one kv head and
-`attention_k_eq_v` on the global layers.
+The 12B (`--layers 0,5,6,11`) is transformers' own Gemma4UnifiedForCausalLM (5.10+).
 """
 from __future__ import annotations
 

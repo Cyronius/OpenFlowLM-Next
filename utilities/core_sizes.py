@@ -2,8 +2,7 @@
 
     python utilities/core_sizes.py <build_dir> [--tiles 2_3,3_3,4_3,5_3] [--symbols] [--data]
 
-`--data` adds each core's data memory: the buffers and stack the link script places in the core's own
-64 KB, plus the ELF's .data / .rodata / .bss, which the linker puts in what the buffers leave.
+`--data` adds each core's data memory: its buffers and stack plus the ELF's .data / .rodata / .bss.
 
 An AIE core has 16,384 bytes of program memory and the build fails late -- inside
 `_XAie_LoadProgMemSection` -- when a core's `.text` passes it, so the number to watch is
@@ -26,8 +25,7 @@ DATA_MEM = 65536
 
 
 def data_used(ld_script: str, secs: dict[str, int]) -> int:
-    """Bytes of the core's own data memory in use: everything below the link script's `data` region
-    (buffers and stack) plus the sections the linker places in that region."""
+    """Bytes of the core's 64 KB in use: below the link script's `data` region, plus what is placed in it."""
     import re
     m = re.search(r"data \(!RX\) : ORIGIN = (0x[0-9A-Fa-f]+), LENGTH = (0x[0-9A-Fa-f]+)", ld_script)
     if not m:

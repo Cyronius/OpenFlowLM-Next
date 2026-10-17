@@ -1481,10 +1481,8 @@ def _gemma4_layer_types(kinds: list[str], shared: int) -> tuple[str, ...]:
 
 def _gemma4_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
     """Gemma 4 text: Gemma 3's dense layer plus 512-wide global heads with proportional RoPE, unscaled
-    attention with a weightless v norm and a final logit softcap. The E-series add KV sharing across the
-    last layers and per-layer inputs; the 12B (`gemma4_unified`) has neither, and its global layers have
-    their own kv-head count and no v projection (`attention_k_eq_v`: v is the raw k projection, which
-    transformers honours only together with num_global_key_value_heads). The 26B MoE is not this recipe."""
+    attention with a weightless v norm and a final logit softcap; the E-series add KV sharing and per-layer
+    inputs, the 12B its K = V global layers. The 26B MoE is not this recipe."""
     tc = cfg.get("text_config", cfg)
     n = _need(tc, "num_hidden_layers")
     if tc.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
@@ -1542,8 +1540,7 @@ def _gemma4_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
 
 
 def _gemma4u_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
-    """The 12B's `gemma4_unified` config: Gemma 4's text layer. Its own builder only so hf_model_types keeps
-    the E-series kernel sets naming exactly the model types they were built for."""
+    """The 12B's `gemma4_unified`; its own builder so the E-series sets keep naming only their model types."""
     return _gemma4_hf(cfg, real_vocab)
 
 
@@ -1553,9 +1550,7 @@ GEMMA4_GLOBAL_ROTARY = 0.25   # transformers' partial_rotary_factor for the full
 def _gemma4_gguf(md: Mapping[str, Any]) -> ModelSpec:
     """llama.cpp's gemma4 keys. The global layers' rotated share is not a key: llama.cpp writes it as the
     `rope_freqs` tensor (1 for a rotated pair, 1e30 for the rest), which a caller may pass as
-    `gemma4.rope_freqs`; without it the family's 0.25 applies. K = V is not a key either: the file simply
-    has no `attn_v` on those layers, which a caller may pass as `gemma4.attention.k_eq_v`; without it, a
-    global kv-head count of its own implies it (transformers honours one only with attention_k_eq_v)."""
+    `gemma4.rope_freqs`; without it the family's 0.25 applies. K = V (no `attn_v`) likewise: `gemma4.attention.k_eq_v`."""
     a = md["general.architecture"]
 
     def k(name: str):
