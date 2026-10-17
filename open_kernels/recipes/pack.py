@@ -178,13 +178,22 @@ def requant_q4_1(chunks) -> np.ndarray:
     code = np.ascontiguousarray(src[:, 512:]).view(np.int8)                          # [n, 8192]
     v = (code[:, _CODE_IDX].astype(np.float32)
          * sc[:, _META_IDX].astype(np.float32)).reshape(n, BLOCK, NBLOCK, BLOCK)
+    return requant_values_q4_1(v)
+
+
+def requant_values_q4_1(v) -> np.ndarray:
+    """f32 values [n, 32 rows, 8 blocks, 32 lanes] -> [n, 5120] q4_1 chunk bytes by
+    `requant_q4_1`'s law (pools.cpp `requant_block_q4_1`); a GGUF's re-quantized tensors take it too."""
+    v = np.asarray(v, np.float32)
+    n = v.shape[0]
     mn = v.min(-1)
     mx = v.max(-1)
     m_u = _bf16_floor(mn)
     m = _bf16_to_f32(m_u).astype(np.float32)
     d_u = _bf16_ceil(((mx - m).astype(np.float32) / np.float32(15)).astype(np.float32))
     d = _bf16_to_f32(d_u).astype(np.float32)
-    inv = np.where(d > np.float32(0), np.float32(1) / d, np.float32(0)).astype(np.float32)
+    with np.errstate(divide="ignore"):
+        inv = np.where(d > np.float32(0), np.float32(1) / d, np.float32(0)).astype(np.float32)
     t = ((v - m[..., None]).astype(np.float32) * inv[..., None]).astype(np.float32) + np.float32(0.5)
     nib = np.clip(t.astype(np.int32), 0, 15).astype(np.uint8)
     out = np.zeros((n, CH), np.uint8)

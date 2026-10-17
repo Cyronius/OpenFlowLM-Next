@@ -42,7 +42,7 @@ if %errorlevel% neq 0 goto :testfail
 echo [open_qwen36] gguf_pack_test
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /bigobj ^
    /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   gguf_pack_test.cpp gguf_file.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\gguf_pack_test.exe /Fo:out\
+   gguf_pack_test.cpp gguf_file.cpp gguf_view.cpp pools.cpp manifest.cpp q4nx_file.cpp /Fe:out\gguf_pack_test.exe /Fo:out\
 if errorlevel 1 goto :clfail
 set "WHICH=gguf_pack_test"
 out\gguf_pack_test.exe
@@ -65,7 +65,7 @@ REM C:\dev\XRT source checkout (no XRT build step run in it) never produces,
 REM and cl fails with C1083 before ever reaching this file's own code.
 cl /nologo /EHsc /O2 /MD /std:c++17 /Zc:__cplusplus /D_CRT_SECURE_NO_WARNINGS /DDISABLE_ABI_CHECK=1 /bigobj /openmp /arch:AVX2 ^
    /I "%XRT_INCLUDE_DIR%" /I ".." /I "..\include" /I "..\..\open_kernels\harness" ^
-   q4nx_file.cpp gguf_file.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
+   q4nx_file.cpp gguf_file.cpp gguf_view.cpp pools.cpp manifest.cpp block_host.cpp core.cpp cli.cpp "%XRT_LIB_DIR%\xrt_coreutil.lib" ^
    /Fe:out\open_qwen36_cli.exe /Fo:out\ ^
    /link /DELAYLOAD:VCOMP140.DLL delayimp.lib
 if errorlevel 1 goto :clfail

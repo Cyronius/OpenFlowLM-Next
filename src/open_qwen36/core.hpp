@@ -43,6 +43,7 @@
 
 #include "open_qwen36/block_host.hpp"
 #include "open_qwen36/gguf_file.hpp"
+#include "open_qwen36/gguf_view.hpp"
 #include "open_qwen36/manifest.hpp"
 #include "open_qwen36/pools.hpp"
 #include "open_qwen36/q4nx_file.hpp"
@@ -303,6 +304,7 @@ private:
     Manifest man_;
     const Manifest* w_ = nullptr;              ///< the weights view (man_ or man_.gguf.get())
     bool gguf_ = false;                        ///< the weights are a GGUF (model.gguf)
+    bool view_ = false;                        ///< ... read through its family's q4nx view (OPEN-GGUF-Q4NX-VIEW)
     std::unique_ptr<WeightFile> file_;
     int nl_ = 0;
     std::vector<const LayerType*> types_;      ///< per layer

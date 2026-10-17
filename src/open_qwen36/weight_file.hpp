@@ -83,6 +83,11 @@ public:
     virtual void bf16_row(const std::string& name, size_t row, size_t dim, float* out) const = 0;
     /// Release the mapping's resident pages after the pools are packed.
     virtual void drop_pages() = 0;
+    /// The q4nx chunk size `name` is stored in (5120 q4_1, 8704 q8, ...); 0 when it is not chunked.
+    virtual size_t chunk_bytes(const std::string& name) const {
+        (void)name;
+        return 0;
+    }
 };
 
 }  // namespace open_qwen36

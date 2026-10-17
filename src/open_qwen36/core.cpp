@@ -161,27 +161,6 @@ void Core::apply_thread_budget() const {
     if (omp_threads_ > 0 && omp_get_max_threads() != omp_threads_) omp_set_num_threads(omp_threads_);
 }
 
-nlohmann::json derive_config(const GgufFile& g) {
-    const std::string arch = g.kv_str("general.architecture");
-    auto u = [&](const std::string& k) { return g.kv_u64(arch + "." + k); };
-    nlohmann::json c;
-    c["model_type"] = arch;
-    c["hidden_size"] = u("embedding_length");
-    c["num_hidden_layers"] = u("block_count");
-    if (g.kv_has(arch + ".vocab_size"))
-        c["vocab_size"] = u("vocab_size");
-    else
-        c["vocab_size"] = g.tensor("token_embd.weight").dims.at(1);
-    c["num_attention_heads"] = u("attention.head_count");
-    c["num_key_value_heads"] = u("attention.head_count_kv");
-    c["intermediate_size"] = u("feed_forward_length");
-    if (g.kv_has(arch + ".attention.key_length")) c["head_dim"] = g.kv_u64(arch + ".attention.key_length");
-    else c["head_dim"] = u("embedding_length") / u("attention.head_count");
-    if (g.kv_has(arch + ".attention.sliding_window"))
-        c["sliding_window"] = g.kv_u64(arch + ".attention.sliding_window");
-    return c;
-}
-
 void Core::log(const std::string& s) const {
     if (cfg_.verbose) std::fprintf(stderr, "open_qwen36: %s\n", s.c_str());
 }
@@ -216,33 +195,51 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     if (!have_q4nx && !have_gguf)
         throw std::runtime_error("open_qwen36: neither model.q4nx nor model.gguf in " + cfg_.model_dir);
     gguf_ = have_gguf && !have_q4nx;
-    w_ = gguf_ ? man_.gguf.get() : &man_;
-    if (gguf_ && !w_)
-        throw std::runtime_error("open_qwen36: model.gguf needs the kernel set's GGUF-direct build "
-                                 "(manifest.json has no gguf section; re-export the kernels)");
+    if (gguf_ && !man_.gguf) {
+        // OPEN-GGUF-Q4NX-VIEW: no f32-scale twin, so the kernel set's own plan reads the GGUF as a q4nx container
+        auto g = std::make_unique<GgufFile>((md / "model.gguf").string());
+        const std::string arch = g->kv_str("general.architecture");
+        if (!GgufQ4nxView::supports(arch))
+            throw std::runtime_error("open_qwen36: model.gguf (" + arch + ") needs the kernel set's GGUF-direct build "
+                                     "(manifest.json has no gguf section; re-export the kernels)");
+        file_ = std::make_unique<GgufQ4nxView>(std::move(g));
+        view_ = true;
+    } else if (gguf_) {
+        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
+    }
+    w_ = gguf_ && !view_ ? man_.gguf.get() : &man_;
     // ---- the model's config: from the model dir when it ships one, else
     // derived from the GGUF metadata (the shapes the manifest checks are all
     // there); anything GGUF does not carry is refused with its name.
-    if (gguf_)
-        file_ = std::make_unique<GgufFile>((md / "model.gguf").string());
     nlohmann::json j;
     std::ifstream cf(md / "config.json");
-    // #24: config.json is optional for a GGUF -- the metadata carries it.
     if (cf) {
         j = nlohmann::json::parse(cf, nullptr, false);
         if (!j.is_object()) throw std::runtime_error("open_qwen36: bad config.json in " + cfg_.model_dir);
-        if (gguf_) {
-            const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
-            for (const auto& [key, value] : derived.items())
-                if (!j.contains(key)) j[key] = value;
-        }
-    } else if (gguf_) {
-        j = derive_config(*static_cast<GgufFile*>(file_.get()));
-        log("config.json absent; derived from the GGUF metadata");
-    } else {
-        throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
-    w_->check_model(j, md.filename().string());
+    if (view_) {
+        // the GGUF describes the weights it holds; a wrapper's config.json (a VLM's) may not
+        const auto derived = derive_config(static_cast<GgufQ4nxView*>(file_.get())->gguf());
+        w_->check_model(derived, md.filename().string());
+        if (!j.is_object()) j = nlohmann::json::object();
+        for (const auto& [key, value] : derived.items()) j[key] = value;
+        log("config checked against the GGUF metadata (q4nx view)");
+    } else {
+        // #24: config.json is optional for a GGUF -- the metadata carries it.
+        if (cf) {
+            if (gguf_) {
+                const auto derived = derive_config(*static_cast<GgufFile*>(file_.get()));
+                for (const auto& [key, value] : derived.items())
+                    if (!j.contains(key)) j[key] = value;
+            }
+        } else if (gguf_) {
+            j = derive_config(*static_cast<GgufFile*>(file_.get()));
+            log("config.json absent; derived from the GGUF metadata");
+        } else {
+            throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
+        }
+        w_->check_model(j, md.filename().string());
+    }
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.
     image_token_id_ = j.value("image_token_id", -1);
@@ -625,10 +622,9 @@ for (const PackOp& o : gw.pack) bytes = std::max<size_t>(bytes, o.dst + pools::o
                 // file, by the names the consts plan carries (no consts layout knowledge here)
                 const GemmBlockProgram& gb = lt.gemm_block;
                 HostConsts& h = hc_[l];
-                auto* qf = dynamic_cast<Q4nxFile*>(file_.get());
-                if (!qf)
+                if (gguf_ && !view_)
                     throw std::runtime_error("open_qwen36: GGUF-direct block prefill is not implemented for MoE models");
-                auto bf = [&](const char* suffix) { return qf->bf16(const_tensor(lt, suffix, l)); };
+                auto bf = [&](const char* suffix) { return file_->bf16(const_tensor(lt, suffix, l)); };
                 auto want = [&](const std::vector<float>& v, size_t n, const char* what) {
                     if (v.size() != n)
                         throw std::runtime_error("open_qwen36: layer " + std::to_string(l) + ": " + what + " has " +

@@ -63,7 +63,7 @@ public:
     size_t chunk_bytes() const { return chunk_bytes_; }
     /// The quantized chunk size `name` is stored in: its last shape dimension for an
     /// I8 tensor (5120 = q4_1, 8704 = q8), 0 when the tensor is not quantized.
-    size_t chunk_bytes(const std::string& name) const;
+    size_t chunk_bytes(const std::string& name) const override;
     const std::string& path() const { return path_; }
     /// How many tensors the header lists, so a loader can say when a container holds more
     /// than it read rather than silently ignoring the rest.

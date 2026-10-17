@@ -118,11 +118,80 @@ def quant_for(spec: ModelSpec, model_dir: Path):
 
 
 def spec_from_model_dir(model_dir: Path) -> ModelSpec:
+    model_dir = Path(model_dir)
+    gguf = model_dir / "model.gguf"
+    if gguf.is_file() and not (model_dir / "model.q4nx").is_file():
+        kv, _ = read_gguf_header(gguf, types=False)
+        if kv.get("general.architecture") in GGUF_VIEW_ARCHS:
+            return spec_from_gguf(gguf, real_vocab=tokenizer_vocab(model_dir / "tokenizer.json"),
+                                  model=model_dir.name)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     rv = tokenizer_vocab(model_dir / "tokenizer.json")
     spec = ModelSpec.from_hf_config(cfg, real_vocab=rv)
     spec = dataclasses.replace(spec, quant=quant_for(spec, Path(model_dir)))
     spec.extra["model"] = Path(model_dir).name
+    return spec
+
+
+# GGUF architectures the engine reads through a q4nx view of the file (src/open_qwen36/gguf_view.cpp),
+# so their spec comes from the GGUF itself (OPEN-GGUF-QWEN35-SPEC): a wrapper's config.json, like
+# MiniCPM-V's, need not describe the tower the weights are for.
+GGUF_VIEW_ARCHS = ("qwen35",)
+_GGUF_TYPES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1",
+               10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 30: "BF16"}
+
+
+def read_gguf_header(path: Path, types: bool = True):
+    """(metadata, {tensor name: ggml type name}) from a GGUF's header; no weight byte is read."""
+    fmt = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+    with open(path, "rb") as f:
+        if f.read(4) != b"GGUF":
+            raise ValueError(f"{path}: not a GGUF file")
+        ver, nt, nkv = struct.unpack("<IQQ", f.read(20))
+
+        def rd_str():
+            (n,) = struct.unpack("<Q", f.read(8))
+            return f.read(n).decode("utf-8", "replace")
+
+        def rd_val(t):
+            if t == 8:
+                return rd_str()
+            if t == 9:
+                et, n = struct.unpack("<IQ", f.read(12))
+                return [rd_val(et) for _ in range(n)]
+            return struct.unpack(fmt[t], f.read(struct.calcsize(fmt[t])))[0]
+
+        kv = {}
+        for _ in range(nkv):
+            k = rd_str()
+            (t,) = struct.unpack("<I", f.read(4))
+            kv[k] = rd_val(t)
+        tensors = {}
+        if types:
+            for _ in range(nt):
+                name = rd_str()
+                (nd,) = struct.unpack("<I", f.read(4))
+                f.read(8 * nd)
+                ty, _off = struct.unpack("<IQ", f.read(12))
+                tensors[name] = _GGUF_TYPES.get(ty, f"type{ty}")
+    return kv, tensors
+
+
+def spec_from_gguf(path: Path, real_vocab: int | None = None, model: str | None = None) -> ModelSpec:
+    """The spec a GGUF derives (OPEN-GGUF-QWEN35-SPEC): shape from its metadata, the per-role
+    weight format from its tensor types (a Q8_0 role streams at q8 where the family can), the real
+    vocabulary from the model's tokenizer.json when one is at hand."""
+    from .spec import quant_map_from_gguf_types
+    kv, types = read_gguf_header(path)
+    spec = ModelSpec.from_gguf_metadata(kv)
+    if real_vocab is not None:
+        spec = dataclasses.replace(spec, real_vocab=real_vocab)
+    if not os.environ.get("OPEN_KERNELS_FORCE_Q4_1"):
+        from .families import for_spec
+        can = getattr(for_spec(spec), "Q8_ROLES", frozenset())
+        m = {r: f for r, f in quant_map_from_gguf_types(spec.family, types).items() if r in can}
+        spec = dataclasses.replace(spec, quant=narrow_to_buildable(spec, m, can) or "q4_1")
+    spec.extra["model"] = model or Path(path).parent.name
     return spec
 
 

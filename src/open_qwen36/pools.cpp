@@ -146,6 +146,34 @@ uint16_t bf16_ceil(float x) {
     return static_cast<uint16_t>((u >> 31) ? (u >> 16) : ((u + 0xFFFFu) >> 16));
 }
 
+}  // namespace
+
+uint16_t bf16_ceil_bits(float x) { return bf16_ceil(x); }
+
+void requant_block_q4_1(const float* v, uint16_t* d_out, uint16_t* m_out, uint8_t* q) {
+    float mn = v[0], mx = v[0];
+    for (unsigned i = 1; i < 32; ++i) {
+        if (v[i] < mn) mn = v[i];
+        if (v[i] > mx) mx = v[i];
+    }
+    const uint16_t mu = bf16_floor(mn);
+    const float mf = bf16_to_f32(mu);
+    const uint16_t du = bf16_ceil((mx - mf) / 15.0f);
+    const float d = bf16_to_f32(du);
+    const float inv = d > 0.0f ? 1.0f / d : 0.0f;
+    for (unsigned i = 0; i < 32; ++i) {
+        const float t = (v[i] - mf) * inv;
+        int c = static_cast<int>(t + 0.5f);
+        if (c < 0) c = 0;
+        if (c > 15) c = 15;
+        q[i] = static_cast<uint8_t>(c);
+    }
+    *d_out = du;
+    *m_out = mu;
+}
+
+namespace {
+
 /// f32 -> bf16, round to nearest even. The directed roundings above make a re-quantized
 /// block's range cover its source; a Q4_K scale is not a range end but a value being
 /// re-expressed, so it takes the nearest bf16.
@@ -178,7 +206,7 @@ std::string chunk_guess(size_t ch) {
 /// which, so the signal is the mins: a real q4_1 tensor does not have 256 exactly-zero
 /// ones, because a min is a block's own minimum. recipes/pack.py is_signed_q4 has the
 /// same rule, and the replica reads through it, so the two cannot disagree.
-bool signed_q4(const Q4nxFile& m, const std::string& name) {
+bool signed_q4(const WeightFile& m, const std::string& name) {
     const uint8_t* p = raw(m, name, Q4_CHUNK) + 512;
     for (unsigned i = 0; i < 256; ++i) {
         uint16_t mn;
@@ -190,11 +218,10 @@ bool signed_q4(const Q4nxFile& m, const std::string& name) {
 
 const uint8_t* q4_source(const WeightFile& m, const std::string& name, size_t chunk0, size_t nch, size_t ch,
                          std::vector<uint8_t>& tmp) {
-    // q4_1 / q8 / Q4_K chunks only come from a q4nx container (GGUF goes through std_perm_gguf).
-    const auto* q = dynamic_cast<const Q4nxFile*>(&m);
-    if (!q) fail(name + " is not in a q4nx container; only std_perm_gguf packs GGUF tensors");
-    const size_t src_ch = q->chunk_bytes(name);
-    if (src_ch == Q4_CHUNK && ch == Q4_CHUNK && signed_q4(*q, name)) {
+    const size_t src_ch = m.chunk_bytes(name);
+    if (!src_ch)
+        fail(name + " is not in q4nx chunks; a GGUF is read through std_perm_gguf or its family's q4nx view");
+    if (src_ch == Q4_CHUNK && ch == Q4_CHUNK && signed_q4(m, name)) {
         const uint8_t* src = raw(m, name, (chunk0 + nch) * Q4_CHUNK) + chunk0 * Q4_CHUNK;
         tmp.resize(nch * Q4_CHUNK);
         q4_0_to_q4_1_chunks(src, nch, tmp.data());
@@ -353,30 +380,15 @@ void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst) {
                 std::memcpy(&sh, s + 2 * meta, 2);
                 const float scale = bf16_to_f32(sh);
                 float v[32];
-                float mn = 0.0f, mx = 0.0f;
-                for (unsigned i = 0; i < 32; ++i) {
-                    v[i] = static_cast<float>(code[code_index(r, b, i)]) * scale;
-                    if (i == 0) {
-                        mn = mx = v[0];
-                    } else {
-                        if (v[i] < mn) mn = v[i];
-                        if (v[i] > mx) mx = v[i];
-                    }
-                }
-                const uint16_t mu = bf16_floor(mn);
-                const float mf = bf16_to_f32(mu);
-                const uint16_t du = bf16_ceil((mx - mf) / 15.0f);
-                const float d = bf16_to_f32(du);
-                const float inv = d > 0.0f ? 1.0f / d : 0.0f;
+                for (unsigned i = 0; i < 32; ++i) v[i] = static_cast<float>(code[code_index(r, b, i)]) * scale;
+                uint16_t du, mu;
+                uint8_t q[32];
+                requant_block_q4_1(v, &du, &mu, q);
                 std::memcpy(o + 2 * meta, &du, 2);        // d[256]
                 std::memcpy(o + 512 + 2 * meta, &mu, 2);  // m[256]
                 for (unsigned i = 0; i < 32; ++i) {
-                    const float t = (v[i] - mf) * inv;
-                    int q = static_cast<int>(t + 0.5f);
-                    if (q < 0) q = 0;
-                    if (q > 15) q = 15;
                     const unsigned p = code_index(r, b, i);
-                    nib[p >> 1] |= static_cast<uint8_t>((p & 1) ? (q << 4) : q);
+                    nib[p >> 1] |= static_cast<uint8_t>((p & 1) ? (q[i] << 4) : q[i]);
                 }
             }
         }
@@ -454,9 +466,7 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         const uint8_t* src = nullptr;
         if (!op.split.empty()) {
             // one half of a q8 projection's exact q4_1 split (split_q4_1_chunks)
-            const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
-            if (!q4) fail("std_perm " + name + " split " + op.split + ": only a q4nx container stores q8 chunks to split");
-            if (q4->chunk_bytes(name) != Q8_CHUNK || ch != Q4_CHUNK)
+            if (m.chunk_bytes(name) != Q8_CHUNK || ch != Q4_CHUNK)
                 fail("std_perm " + name + " split " + op.split + ": the source must be q8 and the pool q4_1");
             const uint8_t* q8 = raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK;
             tmp.resize(op.nch * Q4_CHUNK);
@@ -487,9 +497,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
             fail("std_fuse " + name + ": the container is " + std::to_string(op.src_dim) +
                  " wide and the pool only " + std::to_string(op.in_dim) + "; a pool narrower than "
                  "the container would drop columns");
-        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
-        if (!q4) fail(name + ": std_fuse reads a q4nx container's supertile raster");
-        const size_t src_ch = q4->chunk_bytes(name);
+        if (!dynamic_cast<const Q4nxFile*>(&m)) fail(name + ": std_fuse reads a q4nx container's supertile raster");
+        const size_t src_ch = m.chunk_bytes(name);
         if (src_ch != Q4_HALF)
             fail(name + ": std_fuse reads " + std::to_string(Q4_HALF) + "-byte chunks (32 rows x "
                  "128 columns) and the container stores it in " + std::to_string(src_ch) + "-byte ones");
@@ -626,13 +635,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         bounds(op, op_bytes(op, ch), dst_bytes);
         const size_t rows = op.nch / ncol * 32;
         uint16_t* out = reinterpret_cast<uint16_t*>(dst + op.dst);
-        // q8 / q4_1 SOURCE chunks only exist in a q4nx container (a GGUF tensor
-        // goes through std_perm_gguf), so resolve the chunk size through the
-        // concrete type. apply() takes WeightFile& so one path serves both
-        // containers; this op is q4nx-only.
-        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
-        if (!q4) fail("bf16_gemm " + name + " is not in a q4nx container; only std_perm_gguf packs GGUF tensors");
-        if (q4->chunk_bytes(name) == Q8_CHUNK && op.via != "q4_1") {
+        if (!m.chunk_bytes(name))
+            fail("bf16_gemm " + name + " is not in q4nx chunks; a GGUF is read through its family's q4nx view");
+        if (m.chunk_bytes(name) == Q8_CHUNK && op.via != "q4_1") {
             bf16_gemm_pack(raw(m, name, (op.chunk0 + op.nch) * Q8_CHUNK) + op.chunk0 * Q8_CHUNK, true, rows, op.in_dim, out);
         } else {
             std::vector<uint8_t> tmp;
@@ -647,9 +652,8 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
         if (op.nch % 2) fail("q8_perm " + name + ": " + std::to_string(op.nch) +
                              " half-tiles is not a whole number of chunks");
         bounds(op, op.nch * ch, dst_bytes);
-        const auto* q4 = dynamic_cast<const Q4nxFile*>(&m);
-        if (!q4) fail(name + ": q8_perm requires a q4nx container");
-        const size_t src_ch = q4->chunk_bytes(name);
+        const size_t src_ch = m.chunk_bytes(name);
+        if (!src_ch) fail(name + ": q8_perm reads q4nx chunks (a q4nx container, or a GGUF's q4nx view)");
         if (src_ch != Q8_CHUNK)
             fail(name + ": the kernel set streams this projection at q8 (" + std::to_string(Q8_CHUNK) +
                  "-byte chunks) but the container stores it in " + std::to_string(src_ch) +

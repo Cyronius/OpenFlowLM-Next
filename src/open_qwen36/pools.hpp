@@ -71,6 +71,9 @@ void apply(const PackOp& op, const WeightFile& m, int layer, uint8_t* dst, size_
 /// its reading. `recipes/pack.py requant_q4_1` is the same arithmetic in NumPy; pools_test
 /// and tests/test_qwen35.py check the two on the same vectors.
 void requant_q4_1_chunks(const uint8_t* src, size_t nch, uint8_t* dst);
+/// That law for one 32-value block of f32 values: bf16 d, bf16 m and the 32 nibbles.
+void requant_block_q4_1(const float* v, uint16_t* d, uint16_t* m, uint8_t* q);
+uint16_t bf16_ceil_bits(float x);
 /// `nch` q8 chunks -> `nch` q4_1 chunks holding one HALF of an exact split: with each code
 /// v = 16 * hi + lo (hi = v >> 4 in [-8, 7], lo = v & 15), the "hi" chunk reads
 /// d = 16 * scale, m = -128 * scale, nibble hi + 8 and the "lo" chunk d = scale, m = 0,

@@ -473,11 +473,44 @@ def _qwen35_gguf(md: Mapping[str, Any]) -> ModelSpec:
     for bad in ("expert_count", "expert_feed_forward_length"):
         if md.get(f"{a}.{bad}"):
             raise SpecError(f"{a}: {bad} says this is the MoE variant (architecture qwen35moe)")
+    # a trailing MTP block is speculative-decode scaffolding, not a layer (src/open_qwen36 gguf_view.cpp)
+    n = int(k("block_count")) - int(md.get(f"{a}.nextn_predict_layers", 0))
     base = _qwen36moe_gguf({**md, f"{a}.expert_count": 0, f"{a}.expert_used_count": 0,
-                            f"{a}.expert_feed_forward_length": 0})
+                            f"{a}.expert_feed_forward_length": 0, f"{a}.block_count": n})
     d = base.to_dict()
-    d.update(family="qwen35", intermediate=k("feed_forward_length"))
+    rows = d["vocab"]
+    # OPEN-GGUF-QWEN35-SPEC: the head pads to whole 256 rows (248320 for every Qwen3.5 / 3.6 vocabulary,
+    # trimmed or not), so a fine-tune that resizes the vocabulary keeps the family's lm_head kernel
+    d.update(family="qwen35", intermediate=k("feed_forward_length"), vocab=-(-rows // 256) * 256,
+             real_vocab=gguf_real_vocab(md, rows), norm_eps=_f32_shortest(d["norm_eps"]))
     return ModelSpec.from_dict(d)
+
+
+_PAD_TOKEN = re.compile(r"^\[PAD\d+\]$")
+
+
+def gguf_real_vocab(md: Mapping[str, Any], rows: int) -> int:
+    """The ids a GGUF's tokenizer really has: llama.cpp pads `tokenizer.ggml.tokens` to the
+    embedding's rows with `[PAD<id>]` entries, which are not tokens."""
+    toks = md.get("tokenizer.ggml.tokens")
+    if not isinstance(toks, (list, tuple)):
+        return rows
+    n = len(toks)
+    while n and _PAD_TOKEN.match(str(toks[n - 1])):
+        n -= 1
+    return n
+
+
+def _f32_shortest(x: float) -> float:
+    """A GGUF stores floats as f32: 1e-6 comes back 9.99999997e-07. The shortest decimal that is
+    the same f32 is what config.json says, and so what the spec of the same model hashes with."""
+    import struct
+    want = struct.pack("<f", x)
+    for p in range(1, 10):
+        s = float(f"{x:.{p}g}")
+        if struct.pack("<f", s) == want:
+            return s
+    return float(x)
 
 
 def _qwen3_hf(cfg: Mapping[str, Any], real_vocab: int | None) -> ModelSpec:
