@@ -42,7 +42,7 @@ its own and a separate export (`recipes/specs/minicpm-v-4.7-1b.json`); whether t
 
 ```
 python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/minicpm-v-4.7-1b.json
-#   -> src/xclbins/MiniCPM-V-4.7-1B-GGUF/open_kernels (41 kernels, the 0.8B q4_1 set's)
+#   -> src/xclbins/MiniCPM-V-4.7-1B-gguf/open_kernels (41 kernels, the 0.8B q4_1 set's)
 ```
 
 ## Install and serve
