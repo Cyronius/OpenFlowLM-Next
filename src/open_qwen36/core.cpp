@@ -252,6 +252,16 @@ Core::Core(const CoreConfig& cfg, xrt::device* dev) : cfg_(cfg) {
     } else {
         throw std::runtime_error("open_qwen36: no config.json in " + cfg_.model_dir);
     }
+    if (gguf_ && j.contains("vocab_size") && w_->hf_config_check.contains("vocab_size")) {
+        // a converter that trimmed the checkpoint's vocabulary padding leaves the head the file's own token count
+        const auto& g = *static_cast<GgufFile*>(file_.get());
+        const uint64_t have = j["vocab_size"].get<uint64_t>(), want = w_->hf_config_check["vocab_size"].get<uint64_t>();
+        if (have < want && have == g.kv_array_len("tokenizer.ggml.tokens") && have == g.tensor("token_embd.weight").dims.at(1)) {
+            log("the GGUF's vocabulary is " + std::to_string(have) + " of the kernel set's " + std::to_string(want) +
+                " rows (its converter trimmed the padding)");
+            j["vocab_size"] = want;
+        }
+    }
     w_->check_model(j, md.filename().string());
     // The VLM bits: the image token the app expands per merged patch, and how the
     // rotary pairs split over (t, h, w). Absent on text-only models.

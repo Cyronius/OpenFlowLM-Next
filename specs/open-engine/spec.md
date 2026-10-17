@@ -2417,9 +2417,10 @@ padded (the host chain normalises by the buffer width).
   band short is refused (`gguf_pack_test`) -- unless it holds exactly the file's own vocabulary
   (`tokenizer.ggml.tokens`), which packs with the rest +0: Google's Gemma 3 4B GGUF stores 262144
   of the checkpoint's 262208 rows, its converter having trimmed the padding. The engine then
-  never samples an id past the file's head (`Core::real_vocab`), and a multimodal `config.json`'s
-  `text_config` supplies the language model's keys before the GGUF metadata does
-  (OPEN-VISION-GEMMA3).
+  never samples an id past the file's head (`Core::real_vocab`); a multimodal `config.json`'s
+  `text_config` supplies the language model's keys before the GGUF metadata does; and a vocabulary
+  that is the file's own token count and embedding rows but short of the kernel set's passes the
+  config check as the kernel set's (OPEN-VISION-GEMMA3).
 - An F16 source whose blocks are exactly q4_1 at fp16 scales re-quantizes back exactly, padded
   columns zero (Gemma 3's tied F16 embedding is the head).
 - `embed_row` zero-extends to a wider buffer and refuses a narrower one; `pack_norm` likewise.
