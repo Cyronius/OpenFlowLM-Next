@@ -187,6 +187,23 @@ static void test_f16_weights(std::mt19937& g) {
     set_weight_dtype(DType::F32);
 }
 
+static void test_snake(std::mt19937& g) {
+    const int c = 5, t = 1003;
+    const auto x = randv(g, (size_t)c * t, 3.f);
+    const std::vector<float> alpha{0.1f, 0.7f, 1.f, 3.3f, 25.f};
+    std::vector<float> y(x.size()), term(x.size());
+    snake(x.data(), c, t, alpha.data(), y.data());
+    std::vector<double> want(x.size());
+    for (int ch = 0; ch < c; ++ch)
+        for (int j = 0; j < t; ++j) {
+            const size_t i = (size_t)ch * t + j;
+            const double s = std::sin((double)(alpha[ch] * x[i]));
+            want[i] = s * s / alpha[ch];
+            term[i] = y[i] - x[i];
+        }
+    expect("snake's sin^2 term (vector sin, |a x| to 250)", term, want, 1e-5);
+}
+
 static void test_stft(std::mt19937& g) {
     const int len = 600;
     const auto x = randv(g, (size_t)len, 0.3f);
@@ -287,6 +304,7 @@ int main(int argc, char** argv) {
     test_conv(g);
     test_conv_transpose(g);
     test_lstm(g);
+    test_snake(g);
     test_stft(g);
     test_f16_weights(g);
     const std::string fx = (std::filesystem::path(argc > 1 ? argv[1] : "testdata") / "blocks.safetensors").string();

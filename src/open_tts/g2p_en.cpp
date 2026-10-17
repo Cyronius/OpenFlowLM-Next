@@ -385,12 +385,20 @@ std::string num2words_year(long long v) {
 
 namespace {
 
+// re.split(r'[^a-z]+', s): a run of separators splits once, so only the ends can be empty.
 std::vector<std::string> split_words(const std::string& s) {
     std::vector<std::string> out;
     std::string cur;
+    bool in_sep = false;
     for (char c : s) {
-        if (c >= 'a' && c <= 'z') cur.push_back(c);
-        else { out.push_back(cur); cur.clear(); }
+        if (c >= 'a' && c <= 'z') {
+            cur.push_back(c);
+            in_sep = false;
+        } else if (!in_sep) {
+            out.push_back(cur);
+            cur.clear();
+            in_sep = true;
+        }
     }
     out.push_back(cur);
     return out;
@@ -984,6 +992,13 @@ std::vector<Tok> tokenize(const u32& text, const Lexicon& lex) {
         } else if (t.text == U("I")) t.tag = "PRP";
         else if (lower(t.text) == U("in") || lower(t.text) == U("vs") || lower(t.text) == U("vs.")) t.tag = "IN";
         else if (lower(t.text) == U("used") && k + 1 < out.size() && lower(out[k + 1].text) == U("to")) t.tag = "VBD";
+        else if (lower(t.text) == U("that")) {
+            // a subject or determiner after it makes "that" a conjunction or relative (unstressed)
+            static const std::set<u32> clause = {U("i"), U("you"), U("he"), U("she"), U("it"), U("we"), U("they"),
+                                                 U("the"), U("a"), U("an"), U("there"), U("this"), U("my"),
+                                                 U("your"), U("his"), U("her"), U("our"), U("their")};
+            t.tag = (k + 1 < out.size() && clause.count(lower(out[k + 1].text))) ? "IN" : "DT";
+        }
     }
     return out;
 }

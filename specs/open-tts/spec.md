@@ -37,13 +37,18 @@ safetensors conversion instead: `kokoro-v1_0.safetensors` or `model.safetensors`
 row `i` of dim 0, which for a transposed conv is the *input* channel. A `config.json` that is not
 v1.0's geometry is refused, because the forward pass is written for that geometry.
 
-The weights are held as f32 on the host (328 MB). The memory rule's "never f32" is about device
-memory; the host GEMM computes in f32 and a 16-bit copy would add a widening step to every
-product for no gain in what the engine computes.
+The matrix weights (every conv, transposed conv, linear and LSTM matrix: 99.7% of the
+parameters) are held in 16 bits, the weights rule for small engines: IEEE f16, rounded to nearest
+after the fold, 164 MB. The GEMM widens them to f32 as it packs them, and all arithmetic is f32.
+f16 rather than bf16 because a host engine has no bf16 hardware to match, and f16 keeps three
+more mantissa bits in the same memory. Embeddings, norms, biases and the Snake alphas stay f32.
+`OFLM_TTS_WEIGHTS=f32` holds everything in f32, for the parity check.
 
 **Acceptance criteria:**
 - Every weight-normed block in OPEN-TTS-BLOCKS loads from `weight_g`/`weight_v` and matches
   PyTorch, so the fold is checked wherever it is used (ops_test).
+- f16 storage rounds to nearest even, keeps 65504, 2^-14 and 2^-24 exact, and a conv or linear
+  with f16 weights equals a float64 product of the same rounded weights within 1e-5 (ops_test).
 - A tensor of the wrong size is refused naming it.
 - Manual: the chosen conversion's 548 tensors equal hexgrad's `.pth` bit for bit
   (`verify_sources.py`, see "Sources" below).
@@ -106,8 +111,12 @@ through the engine's loaders and runs the engine's forward code.
    L2 error and cosine against the dump: `bert`, `d_en`, `pred.d`, the float durations, `pred.F0`,
    `pred.N`, `t_en`, `dec.x`, the harmonic source, the generator's stages, `conv_post` and the
    waveform; then the generator alone on the reference's inputs.
-3. Pass: integer durations identical, every block before the generator within 1e-4, and the
-   waveform within 1e-2. (Measured values: see "Results".)
+3. Pass, with `OFLM_TTS_WEIGHTS=f32`: integer durations identical, every block before the
+   generator within 1e-5, and the generator on the reference's inputs within 1e-3. The free
+   run's waveform is compared by log-mel distance (`utilities/kokoro-ref/mel_distance.py`)
+   against the reference's own run-to-run spread (another noise seed), not sample by sample:
+   the harmonic source integrates F0 into phase, so F0's float32 rounding becomes a phase
+   drift that grows along the utterance. (Measured values: see "Results".)
 
 ### OPEN-TTS-NOISE: a request repeats exactly
 **Applies to:** openflowlm-next (`src/open_tts/kokoro.cpp` `harmonic_source`, `src/open_tts/ops.cpp` `Gaussian`)
@@ -199,7 +208,37 @@ checked are bit-identical to hexgrad's `.pth`/`.pt` (Results).
 
 ## Results
 
-(filled in as measured)
+Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/` (gitignored).
+
+- **Sources** (`verify-mlx-vs-original.log`): all 548 tensors of `mlx-community/Kokoro-82M-bf16`'s
+  `kokoro-v1_0.safetensors` equal hexgrad's `kokoro-v1_0.pth` bit for bit (81,763,410
+  parameters, all F32), and so do the three voices compared (af_heart, am_adam, bf_emma).
+- **Blocks** (`ops_test.log`): every OPEN-TTS-OPS and OPEN-TTS-BLOCKS case passes; against
+  PyTorch the f32 blocks are within 5e-7 relative L2, the harmonic source within 3e-8; with f16
+  weights the blocks are within 3e-4.
+- **Whole model**, one sentence (112 tokens, 7.15 s, af_heart, seed 1234), against `ref_kokoro.py`
+  on hexgrad's `.pth` (`check-f32-vs-ref.log`, `check-f16-vs-ref-f32.log`):
+  - f32 weights: the integer durations are identical (112 of 112); PL-BERT 2.0e-6, the duration
+    encoder 1.6e-6, F0 3.7e-7, energy 1.8e-7, text encoder 2.5e-7, decoder output 4.2e-7
+    (relative L2). The generator alone, on the reference's inputs, gives the waveform within
+    2.0e-4. The free run's waveform is within 1.5e-2 (36 dB SNR); the difference enters at the
+    harmonic source, whose phase integrates F0 (2.8e-3 there from F0's 3.7e-7).
+  - f16 weights (the default): durations identical again; blocks within about 6e-4.
+- **How it sounds**, log-mel distance to the f32 reference (`mel-distance-ref-sentence.log`;
+  mean |dB| over voiced frames): the engine with f32 weights 0.10 dB; with f16 weights 0.46 dB;
+  PyTorch itself with f16-rounded weights 0.48 dB; PyTorch with another noise seed 0.48 dB. So
+  16-bit weights move the audio about as much as Kokoro's own noise does from one run to the
+  next, in PyTorch as much as here.
+- **Noise off is the worse comparison** (`check-f32-vs-ref-noiseoff.log`, waveform within 9e-2):
+  without the noise an unvoiced stretch of the source is a constant, the STFT phase of a
+  near-zero bin is undefined, and the two implementations' rounding picks different angles.
+- **Phonemizer** (`g2p_test.log`, `g2p-agreement-2.log`): the 14 misaki cases are exact. On a
+  36-line mixed corpus (chat, news, prose, numbers, names, tech; 470 words) 32 lines are
+  identical to misaki 0.9.4 with spaCy and 99.2% of the phoneme words agree. The four
+  differences are all the tagger's: `that` as a determiner (twice), `restart` as a noun, and the
+  `-` of `-m` read as a dash. Unknown words: 34 (7.2% of the words), exactly misaki's count, all
+  names (Siobhan, Nguyen, Saoirse, Kilimanjaro, Xiaomi, Tchaikovsky...) and tech terms
+  (Kubernetes, Redis, nginx, softmax, tokenizer, PostgreSQL, pytest).
 
 ## Not settled
 

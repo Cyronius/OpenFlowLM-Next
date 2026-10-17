@@ -42,6 +42,7 @@ public:
     G2PResult phonemize(const std::string& text, bool british);
 
     const Kokoro& model() const { return *model_; }
+    void set_noise_seed(uint64_t seed) { noise_seed_ = seed; }
 
 private:
     const Voice& voice(const std::string& name);
@@ -53,6 +54,7 @@ private:
     std::map<std::string, Voice> voice_cache_;
     std::unique_ptr<EnglishG2P> g2p_[2];
     std::mutex mu_;
+    uint64_t noise_seed_ = kDefaultNoiseSeed;
 };
 
 // Kokoro takes at most 510 phonemes per call; longer text splits where KPipeline's

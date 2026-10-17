@@ -574,13 +574,42 @@ void leaky_relu(float* x, int64_t n, float slope) {
         if (!(x[i] > 0.f)) x[i] = x[i] * slope;
 }
 
+#if defined(__AVX2__)
+// SLEEF's sinf (3.5 ulp): Cody-Waite reduction by pi in four parts, then an odd polynomial.
+static inline __m256 sin8(__m256 x) {
+    const __m256 k = _mm256_round_ps(_mm256_mul_ps(x, _mm256_set1_ps(0.318309886183790671538f)),
+                                     _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m256 r = _mm256_fnmadd_ps(k, _mm256_set1_ps(3.140625f), x);
+    r = _mm256_fnmadd_ps(k, _mm256_set1_ps(0.0009670257568359375f), r);
+    r = _mm256_fnmadd_ps(k, _mm256_set1_ps(6.2771141529083251953e-07f), r);
+    r = _mm256_fnmadd_ps(k, _mm256_set1_ps(1.2154201256553420762e-10f), r);
+    const __m256 s = _mm256_mul_ps(r, r);
+    __m256 u = _mm256_set1_ps(2.6083159809786593541503e-06f);
+    u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.0001981069071916863322258f));
+    u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(0.00833307858556509017944336f));
+    u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.166666597127914428710938f));
+    u = _mm256_fmadd_ps(_mm256_mul_ps(s, u), r, r);
+    const __m256i odd = _mm256_slli_epi32(_mm256_cvtps_epi32(k), 31);
+    return _mm256_xor_ps(u, _mm256_castsi256_ps(odd));
+}
+#endif
+
 void snake(const float* x, int c, int t, const float* alpha, float* y) {
 #pragma omp parallel for if ((long long)c * t > 50000)
     for (int ch = 0; ch < c; ++ch) {
         const float a = alpha[ch], ia = 1.f / a;
         const float* xr = x + (size_t)ch * t;
         float* yr = y + (size_t)ch * t;
-        for (int j = 0; j < t; ++j) {
+        int j = 0;
+#if defined(__AVX2__)
+        const __m256 av = _mm256_set1_ps(a), iav = _mm256_set1_ps(ia);
+        for (; j + 8 <= t; j += 8) {
+            const __m256 xv = _mm256_loadu_ps(xr + j);
+            const __m256 s = sin8(_mm256_mul_ps(av, xv));
+            _mm256_storeu_ps(yr + j, _mm256_add_ps(xv, _mm256_mul_ps(iav, _mm256_mul_ps(s, s))));
+        }
+#endif
+        for (; j < t; ++j) {
             const float s = std::sin(a * xr[j]);
             yr[j] = xr[j] + ia * (s * s);
         }

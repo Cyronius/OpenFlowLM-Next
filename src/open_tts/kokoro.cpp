@@ -2,7 +2,10 @@
 #include "kokoro.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -486,6 +489,20 @@ std::vector<float> Kokoro::albert(const std::vector<int>& ids) const {
     return x;
 }
 
+namespace {
+// OFLM_TTS_PROFILE=1 prints each stage's host wall clock, to find where a synthesis spends its time.
+struct Laps {
+    bool on = std::getenv("OFLM_TTS_PROFILE") != nullptr;
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    void lap(const char* what) {
+        if (!on) return;
+        const auto now = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "[open_tts] %-16s %8.1f ms\n", what, std::chrono::duration<double, std::milli>(now - t).count());
+        t = now;
+    }
+};
+}  // namespace
+
 std::vector<float> Kokoro::harmonic_source(const std::vector<float>& f0, uint64_t noise_seed) const {
     const int up = cfg_.upsample_rates[0] * cfg_.upsample_rates[1] * cfg_.hop;
     float w9[9];
@@ -496,11 +513,14 @@ std::vector<float> Kokoro::harmonic_source(const std::vector<float>& f0, uint64_
 std::vector<float> Kokoro::generator(const std::vector<float>& xin, int t, const float* style,
                                      const std::vector<float>& f0, uint64_t noise_seed, Trace* tr,
                                      const std::vector<float>* har_source) const {
+    Laps laps;
     const std::vector<float> src = har_source ? *har_source : harmonic_source(f0, noise_seed);
     if (tr) tr->put("gen.har_source", src);
+    laps.lap("source");
     std::vector<float> mag, ph;
     int frames = 0;
     stft_mag_phase(src.data(), (int)src.size(), cfg_.n_fft, cfg_.hop, mag, ph, frames);
+    laps.lap("stft");
     const int nb = cfg_.n_fft / 2 + 1;
     std::vector<float> har((size_t)2 * nb * frames);
     std::memcpy(har.data(), mag.data(), mag.size() * sizeof(float));
@@ -538,6 +558,7 @@ std::vector<float> Kokoro::generator(const std::vector<float>& xin, int t, const
         for (size_t q = 0; q < acc.size(); ++q) acc[q] = acc[q] / 3.f;
         x.swap(acc);
         if (tr) tr->put("gen.stage" + std::to_string(i), x);
+        laps.lap(i ? "gen stage 1" : "gen stage 0");
     }
     leaky_relu(x.data(), (int64_t)x.size(), 0.01f);
     std::vector<float> post = conv_post_(x, tt);
@@ -547,7 +568,9 @@ std::vector<float> Kokoro::generator(const std::vector<float>& xin, int t, const
         spec[j] = std::exp(post[j]);
         phase[j] = std::sin(post[spec.size() + j]);
     }
-    return istft(spec.data(), phase.data(), tt, cfg_.n_fft, cfg_.hop);
+    std::vector<float> audio = istft(spec.data(), phase.data(), tt, cfg_.n_fft, cfg_.hop);
+    laps.lap("post + istft");
+    return audio;
 }
 
 std::vector<float> Kokoro::synthesize(const std::vector<int>& ids, const float* style, float speed,
@@ -559,11 +582,13 @@ std::vector<float> Kokoro::synthesize(const std::vector<int>& ids, const float* 
         if (id < 0 || id >= cfg_.n_token) throw std::runtime_error("Kokoro: token id out of range");
     const float* s_dec = style;
     const float* s_pro = style + S;
+    Laps laps;
 
     const std::vector<float> bert = albert(ids);
     if (tr) tr->put("bert", bert);
     const std::vector<float> d_en = bert_encoder_(bert, T);   // [T][H]
     if (tr) tr->put("d_en", d_en);
+    laps.lap("albert");
 
     std::vector<float> cur((size_t)T * (H + S));
     auto cat_style = [&](const std::vector<float>& a) {
@@ -619,6 +644,7 @@ std::vector<float> Kokoro::synthesize(const std::vector<int>& ids, const float* 
     std::vector<int> tok((size_t)F);
     for (int t = 0, f = 0; t < T; ++t)
         for (int r = 0; r < dur[(size_t)t]; ++r) tok[(size_t)f++] = t;
+    laps.lap("durations");
 
     // F0 and energy, from the shared LSTM over the frame-expanded d
     std::vector<float> en((size_t)F * (H + S));
@@ -636,6 +662,7 @@ std::vector<float> Kokoro::synthesize(const std::vector<int>& ids, const float* 
     }
     f0 = f0_proj_(f0, tf);   // [2F]
     nn = n_proj_(nn, tn);
+    laps.lap("F0 and energy");
     if (tr) {
         tr->put("pred.F0", f0);
         tr->put("pred.N", nn);
@@ -682,6 +709,7 @@ std::vector<float> Kokoro::synthesize(const std::vector<int>& ids, const float* 
         if (decode_[i].upsample) res = false;
     }
     if (tr) tr->put("dec.x", x);
+    laps.lap("text enc + decoder");
     std::vector<float> audio = generator(x, tx, s_dec, f0, noise_seed, tr);
     if (tr) tr->put("audio", audio);
     return audio;

@@ -44,7 +44,13 @@ void report(const char* name, const std::vector<float>& mine, const std::vector<
                 mine.size() == ref.size() ? "  " : "!!", s.rel_l2, s.max_abs, s.max_ref, s.cos);
 }
 
-int check(const std::string& model_dir, const std::string& ref_path) {
+void write_wav(const std::string& path, const std::vector<float>& audio) {
+    std::ofstream out(path, std::ios::binary);
+    const std::string w = encode_wav(audio);
+    out.write(w.data(), (std::streamsize)w.size());
+}
+
+int check(const std::string& model_dir, const std::string& ref_path, const std::string& out_wav) {
     Kokoro model(model_dir);
     SafetensorsFile ref(ref_path);
     std::vector<int> ids;
@@ -58,8 +64,9 @@ int check(const std::string& model_dir, const std::string& ref_path) {
     Trace tr;
     std::vector<int> dur;
     auto t0 = std::chrono::steady_clock::now();
-    model.synthesize(ids, style.data(), speed, seed, &tr, &dur);
+    const std::vector<float> free_audio = model.synthesize(ids, style.data(), speed, seed, &tr, &dur);
     auto t1 = std::chrono::steady_clock::now();
+    if (!out_wav.empty()) write_wav(out_wav, free_audio);
     std::vector<int> rdur;
     for (float v : ref.f32("pred.dur")) rdur.push_back((int)v);
     int differ = 0;
@@ -113,14 +120,21 @@ int main(int argc, char** argv) {
     }
     try {
         const std::string dir = a["--model"];
-        if (a.count("--check")) return check(dir, a["--check"]);
+        if (a.count("--check")) return check(dir, a["--check"], a.count("--out") ? a["--out"] : "");
         TtsEngine tts(dir);
+        if (a.count("--seed")) tts.set_noise_seed(std::stoull(a["--seed"]));
         const std::string voice = a.count("--voice") ? a["--voice"] : "af_heart";
         const bool british = !voice.empty() && voice[0] == 'b';
         if (a.count("--g2p")) {
             G2PResult r = tts.phonemize(a["--g2p"], british);
             std::cout << r.phonemes << "\n";
             for (auto& u : r.unknown) std::cout << "unknown: " << u << "\n";
+            return 0;
+        }
+        if (a.count("--g2p-chunks")) {
+            const G2PResult r = tts.phonemize(read_file(a["--g2p-chunks"]), british);
+            for (const auto& c : chunk_phonemes(utf8_to_u32(r.phonemes)))
+                std::cout << c.size() << "\t" << u32_to_utf8(c) << "\n";
             return 0;
         }
         if (a.count("--g2p-lines")) {
@@ -154,11 +168,7 @@ int main(int argc, char** argv) {
         for (auto& u : info.unknown) std::cout << "unknown: " << u << "\n";
         std::printf("audio %.2f s, synthesis %.3f s (best of %d), real-time factor %.3f\n", secs, best, reps,
                     secs > 0 ? best / secs : 0.0);
-        if (a.count("--out")) {
-            std::ofstream out(a["--out"], std::ios::binary);
-            const std::string w = encode_wav(audio);
-            out.write(w.data(), (std::streamsize)w.size());
-        }
+        if (a.count("--out")) write_wav(a["--out"], audio);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

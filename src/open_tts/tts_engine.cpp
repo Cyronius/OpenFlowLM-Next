@@ -74,7 +74,7 @@ std::vector<float> TtsEngine::run_chunk(const std::string& ps, const Voice& v, f
     }
     ids.push_back(0);
     if (ids.size() <= 2) return {};
-    return model_->synthesize(ids, v.row_for((int)u.size()), speed, kDefaultNoiseSeed);
+    return model_->synthesize(ids, v.row_for((int)u.size()), speed, noise_seed_);
 }
 
 std::vector<float> TtsEngine::speak_phonemes(const std::string& ps, const std::string& name, float speed) {
