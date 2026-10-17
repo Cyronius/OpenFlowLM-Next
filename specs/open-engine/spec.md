@@ -1075,7 +1075,7 @@ engine -- the open one has no vision path.
 **Result 2026-09-06 (Gemma3-4B-Text-NPU2, medgemma-1.5-4b-it-NPU2, Translategemma-4B-Instruct-NPU2):** three fine-tunes whose specs are identical to Gemma3-4B's in every field but `extra` -- step 2 logits corr 0.999998-0.999999 at both positions, same argmax, residual corr 1.000000 in all six layers (maxrel <= 6.1e-4); step 3 identical through the engine, request 2 reproduced request 1; a finite step at position 1101 through the window path for each; step 4 a coherent answer ending in `<end_of_turn>` at tokens 43 / 62 / 27. Each model's own export is byte-identical to `src/xclbins/Gemma3-4B-NPU2/open_kernels` (3/3 `insts.bin`, xclbins stamps only, manifests differing only in `spec.extra.model` and `build_key`), and the same slice passed against that directory directly first. medgemma's top-5 reorders in slots 2-4 at position 1 on a 0.02-logit tie, identically through harness and engine. Gemma3-4B-Text reproduces the reference model's answer token for token. Details: `.claude/plans/p0-p1-results.md`.
 
 ### OPEN-FAMILY-GEMMA4: Gemma 4 E4B / E2B / 12B (text) on the dense recipe
-**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `src/common/AutoModel/modeling_gemma4_12b.cpp`, `utilities/oflm-add`)
+**Applies to:** openflowlm-next (`open_kernels/recipes/gemma4.py`, `dense.py`, `spec.py`, `catalogue.py`, `designs/dense/dx.py`, `designs/attn/attn.h`, `designs/attn/attn_step_new.cc`, `designs/attn/attn_q.cc`, `src/open_qwen36/`, `src/common/AutoModel/modeling_gemma4e.cpp`, `src/common/AutoModel/modeling_gemma4_12b.cpp`, `utilities/oflm-add`)
 **Verification:** test (derivation, KV-sharing layout, tensor names, kind geometry, manifest: `tests/test_gemma4.py`; the manifest reader: `src/open_qwen36/manifest_test.cpp`, its fixture kept current by `tests/test_manifest_fixture.py`; the install's token ids: `utilities/oflm-add/tests/test_gguf_installer.py`) and manual (the hardware passes below)
 
 Google's Gemma 4 E-series GGUFs (`gemma-4-E4B_q4_0-it.gguf`, `gemma-4-E2B_q4_0-it.gguf`, QAT Q4_0) shall
@@ -1117,6 +1117,10 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   plan streams `attn_k` into the v slot as well, and the attention kernel's v path does the rest. The
   layer output scalar is applied on the host after every layer without the per-layer-input stage.
   The `gemma4-12b` adapter selects the open engine the same way, text only.
+- The 12B's global kind needs two design knobs, both off for every other build: each attention core
+  keeps only its own four heads' q (`ATTN_QLOCAL`; all 16 heads of 512 would take 32 KB of the core's
+  64 KB), and the main cores take the 16 KB attention output one x element at a time (it is four
+  elements, and their x fifo holds two).
 
 **Acceptance criteria (unit):**
 - The GGUF metadata and transformers' config derive the same ModelSpec (same hash): E4B is 42
@@ -1144,7 +1148,9 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
   shared layer. The global kind's v projection reads `attn_k` (the file has no `attn_v` for those
   layers); the manifest has no `ple` stage but keeps `layer_scalar`; its config check names
   `num_global_key_value_heads` and `attention_k_eq_v` and accepts the `gemma4_unified` model types,
-  while the E-series' checks and model types are unchanged.
+  while the E-series' checks and model types are unchanged. Its global kind (four attention cores of
+  four heads, RB 1) keeps only its own heads' q and takes its four og elements one at a time; no
+  E-series kind and no other shipped spec does either.
 - The MoE block and bidirectional attention over text (`use_bidirectional_attention: "all"`) are
   refused by name; `"vision"` (image tokens only) is accepted for text decode.
 - The E4B manifest reads GGUF-only (`Manifest::reads_gguf_only`, `manifest_test`); none of the other
@@ -1173,6 +1179,15 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
    "not using ... it packs GGUF-direct" and does not start the open engine.
+6. The 12B: step 1 with `--layers 0,5,6,11` (two sliding and two K = V global layers), which builds
+   transformers' own `Gemma4UnifiedForCausalLM`; step 2 with `--spec recipes/specs/gemma4-12b.json --only
+   dx_local,dx_global` and `utilities/core_sizes.py <build dir> --data` (program and data memory per
+   core); step 3 with 5-, 6- and 12-layer slices (sliding only, then through the first and the second
+   global layer) and the full 48, the CLI pointed at a directory holding only `model.gguf` (so the
+   config is derived from the GGUF). Short slices saturate the soft cap (their top logits are all 30), so
+   they run on a copy of the set whose manifest has `logit_softcap: 0` and are compared with the
+   replica's uncapped head; the full model is compared after the cap. Step 4 with the GGUF beside
+   google/gemma-4-12B-it's text files.
 
 Steps 3 and 4 are also the regression checks for two load fixes with no unit test (the GGUF config
 derivation and the adapter sit in XRT-linked code): on E2B, step 3 stops at load unless `derive_config`
@@ -1183,6 +1198,10 @@ crashes on the first token unless the adapter lifts `text_config` (the sampler g
 fp32 transformers to 8.8e-7 relative at worst (every layer, the final norm, the soft-capped logits),
 same argmax. E2B (layers 0, 4, 15, 19: one kv head, the 12288-wide FFN in the shared pair): 1.2e-6 at
 worst, same argmax.
+
+**Result 2026-10-16 (replica, 12B):** against transformers 5.14.1's `Gemma4UnifiedForCausalLM` in fp32 on
+layers 0, 5, 6 and 11 (13 tokens; one kv head and K = V on the global pair, the layer scalars applied),
+4.5e-6 relative at worst, same argmax.
 
 **Result 2026-10-16 (probe, E4B):** all four kinds link inside program memory and L1. With compiler-rt's
 soft float the own-cache kinds were over by 288 B (global, head dim 512) and 368 B (sliding: the split

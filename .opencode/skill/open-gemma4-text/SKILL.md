@@ -47,6 +47,8 @@ OPEN_KERNELS_UNVALIDATED=1 python export_qwen36_kernels.py --spec recipes/specs/
 python ../utilities/core_sizes.py designs/dense/build_gemma4_h2560_global      # program memory per core
 ```
 
+12B: `--spec recipes/specs/gemma4-12b.json --only dx_local,dx_global,ln,lm_head_q4` (two kinds, build dirs
+`build_gemma4_h3840_*`); `core_sizes.py <dir> --data` adds each core's data memory.
 E2B: `--spec recipes/specs/gemma4-e2b.json`, build dirs `build_gemma4_h1536_*`. About 8 minutes at `-j 2`
 (the global kinds take ~200 s each); the exporter prints each set's fullest core. Export straight into
 the installed model's `open_kernels` dir and pass that dir to `oflm-add --open-kernels` ("already in
@@ -84,6 +86,41 @@ all in WSL with the mlir-aie env, the new side a snapshot of the working tree ta
   replica with the q4_1 head, same top 5; greedy "The capital of France is Paris." The slice run:
   `open_qwen36_cli --model <dir> --kernels <set> --layers N --ids ... --dump-logits <prefix>`, then
   `model/compare_gemma4.py <prefix>_t0.bin <replica.npz> --key npu_logits_lN`.
+
+## The 12B (no per-layer inputs, K = V global layers)
+
+- Source: Google's `google/gemma-4-12B-it-qat-q4_0-gguf` (`gemma-4-12b-it-qat-q4_0.gguf`): every layer
+  projection Q4_0, the tied head Q6_K. Survey (2026-10-16, headers by range request): unsloth's Q4_0 / Q4_1,
+  bartowski's Q4_0 / Q4_1 (24 `attn_q` at Q6_K), ggml-org's Q4_0 (Q8_0 head), lmstudio's QAT Q4_0 (Google's
+  layout) and unsloth's QAT "UD-Q4_K_XL" (Q4_0 layers AND a Q4_0 head, despite the name).
+- Config: `gemma4_unified` (transformers 5.10+, `Gemma4UnifiedForCausalLM`): 48 layers, 3840 / 15360,
+  16 heads over 8 kv (sliding, 256 wide, window 1024) and over ONE kv head on the global layers
+  (5, 11, ..., 47; 512 wide, a quarter rotated), `attention_k_eq_v`, no per-layer inputs, no KV sharing.
+- The GGUF lists `head_count_kv` per layer (8 ... 1 ...) and has no `attn_v` on the global layers; there
+  is no K = V key. `derive_config` (core.cpp) reads both kinds' kv counts off the `attn_k` widths.
+- K = V: v is the RAW k projection (before k_norm and RoPE), then the weightless v norm (transformers and
+  llama.cpp agree), so the cache still holds two tensors. The pack plan streams `attn_k` into the global
+  kind's v slot; nothing in the design changes.
+- `layer_output_scale` exists on every layer; without per-layer inputs the engine applies it alone
+  (`ple_layer`'s scalar-only path), which turns the dispatch queue-ahead off as it does for the E-series.
+- The 12B is family `gemma4-12b` (the curated adapter, `modeling_gemma4_12b.cpp`); oflm-add routes
+  `gemma4-12b` / `gemma-4-12b` directories there before the E-series' `gemma4` prefix.
+- The template's generation prompt ends with an empty thought block (`<|channel>thought\n<channel|>`); the
+  open path prefills it as written.
+- Short slices saturate the soft cap (after 6 or 12 layers the top logits are all 30.0): compare them
+  before the cap, with a copy of the set whose manifest says `logit_softcap: 0`.
+- The global kind (16 heads of 512, one kv head) needs two knobs no other build takes:
+  - `ATTN_QLOCAL` (attn.h, `DenseGeometry.QLOCAL`): each of the 4 attention cores keeps only its own 4
+    heads' q. Every core used to keep all 16 (2 x 16 x 512 bf16 = 32 KB); with E2B's measured buffers
+    (45,856 B for (512, 8, 1), its link map) that is over 64 KB. On only when the all-heads store would
+    pass 16 KB (`QSTORE_FIT`).
+  - og (16 KB = 4 x elements) is wider than the main cores' 2-deep x fifo, and the as-is design does not
+    even generate MLIR ("Number of elements to acquire 4 must be smaller than depth 2"); dx.py takes it
+    one element at a time when `OG_ELEMS > X_DEPTH`, as it already does for h.
+- Proving the knobs moved nothing: `mlir_equiv.py` (85 of 85 shipped sets identical) and
+  `attn_pp_identical.sh`. That script compares whitespace-split words, not tokens, so a macro that
+  expands to nothing between `e` and `)` reads as DIFFERENT (`e)` vs `e )`); give the knob its own
+  `#if`'d signature instead. Run it on LF copies of both trees (`git archive` here yields CRLF).
 
 ## The official container must not pick up these kernels
 
