@@ -8,7 +8,9 @@
 /// Also covers GgufFile::embed_row (Q8_0) and pack_norm's f32 -> bf16.
 ///
 ///     cmake -S . -B build && cmake --build build && ctest --test-dir build
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -259,6 +261,15 @@ uint32_t f32_bits(float f) {
     return u;
 }
 
+float bf16f(uint16_t b) {
+    const uint32_t u = static_cast<uint32_t>(b) << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+uint16_t bf16_up(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? (b == 0x8000 ? 0x0001 : b - 1) : b + 1); }
+uint16_t bf16_down(uint16_t b) { return static_cast<uint16_t>((b & 0x8000) ? b + 1 : (b == 0 ? 0x8001 : b - 1)); }
+
 }  // namespace
 
 int main() {
@@ -353,9 +364,7 @@ int main() {
         std::printf("%s std_perm_gguf Q4_0 (%zu values differ)\n", bad0 ? "FAIL" : "ok", bad0);
         if (bad0) return 1;
 
-        // The bf16-scale pool (5120 B chunks, recipes/gemma4.py): the same codes byte for byte, and
-        // scales that are exactly the kernel's RNE narrowing of the f32 pool's -- so the GEMV reads the
-        // same numbers from either (open_kernels/gguf_scale_width.py). Q4_1 and Q4_0 both.
+        // OPEN-GGUF-BF16-POOL: the 5120 B pool holds the f32 pool's codes and the kernel's RNE narrowing of its scales
         for (const auto* src : {&g, &g0}) {
             std::vector<uint8_t> wide(static_cast<size_t>(op.nch) * 6144, 0), narrow(static_cast<size_t>(op.nch) * 5120, 0);
             pools::apply(op, *src, 0, wide.data(), wide.size(), 6144);
@@ -378,6 +387,45 @@ int main() {
                         badn ? "FAIL" : "ok", src == &g ? "Q4_1" : "Q4_0", badn);
             if (badn) return 1;
         }
+    }
+
+    // OPEN-GGUF-BF16-POOL: a re-quantized Q8_0 block's [m, m + 15 d] covers it and each code is the nearest level
+    {
+        const Blocks mm8 = make_blocks(64, 512, "Q8_0", rng);
+        GgufFile g8(write_gguf(dir, mm8, emb, norm));
+        std::vector<uint8_t> p8(static_cast<size_t>(op.nch) * 5120, 0);
+        pools::apply(op, g8, 0, p8.data(), p8.size(), 5120);
+        size_t bad8 = 0, blocks = 0;
+        for (size_t c = 0; c < op.nch; ++c) {
+            const uint8_t* n = p8.data() + c * 5120;
+            const size_t rows0 = 64 * (c / 4) + 32 * (c % 2), cols0 = 256 * ((c % 4) / 2);
+            for (size_t r = 0; r < 32; ++r)
+                for (size_t kb = 0; kb < 8; ++kb, ++blocks) {
+                    const float* v = mm8.values.data() + (rows0 + r) * mm8.cols + cols0 + kb * 32;
+                    float lo = v[0], hi = v[0];
+                    for (size_t i = 0; i < 32; ++i) {
+                        lo = std::min(lo, v[i]);
+                        hi = std::max(hi, v[i]);
+                    }
+                    uint16_t du, mu;
+                    std::memcpy(&du, n + 2 * (kb * 32 + r), 2);
+                    std::memcpy(&mu, n + 512 + 2 * (kb * 32 + r), 2);
+                    const float mf = bf16f(mu), df = bf16f(du), step = (hi - mf) / 15.0f;
+                    bool ok = mf <= lo && bf16f(bf16_up(mu)) > lo && df >= step && bf16f(bf16_down(du)) < step &&
+                              mf + 15.0f * df >= hi - 1e-6f * std::fabs(hi);
+                    for (size_t i = 0; i < 32 && ok; ++i) {
+                        const size_t p = (r / 16) * 4096 + (kb * 32 + i) * 16 + (r % 16);
+                        const uint8_t byte = n[1024 + (p >> 1)];
+                        const float got = static_cast<float>((p & 1) ? byte >> 4 : byte & 0xF) * df + mf;
+                        ok = std::fabs(got - v[i]) <= 0.5f * df * (1.0f + 1e-5f);
+                    }
+                    if (!ok && bad8++ < 5)
+                        std::printf("  chunk %zu r=%zu kb=%zu: m %.9g d %.9g over [%.9g, %.9g]\n", c, r, kb, mf, df, lo, hi);
+                }
+        }
+        std::printf("%s std_perm_gguf bf16 pool, Q8_0 re-quantized (%zu of %zu blocks break the law)\n",
+                    bad8 ? "FAIL" : "ok", bad8, blocks);
+        if (bad8) return 1;
     }
 
     // ---- pack_norm: f32 -> bf16 (RNE)
