@@ -1,4 +1,4 @@
-# Traces: SERVER-SPEECH, SERVER-SPEECH-PARAMS, SERVER-SPEECH-VOICES, SERVER-SPEECH-LOAD (canonical spec: specs/server-api/spec.md)
+# Traces: SERVER-SPEECH, SERVER-SPEECH-PARAMS, SERVER-SPEECH-VOICES, SERVER-SPEECH-LOAD, SERVER-SPEECH-ENCODE (canonical spec: specs/server-api/spec.md)
 # Needs `oflm serve --tts 1` at OFLM_TEST_BASE_URL (default localhost:52625) with kokoro:82m installed by oflm-add.
 import json
 import os
@@ -76,9 +76,10 @@ def test_speed_shortens():
 @pytest.mark.parametrize("fields,param,code", [
     ({"input": None}, "input", "missing_required_parameter"),
     ({"input": "   "}, "input", "invalid_value"),
+    ({"input": "中文字符"}, "input", "invalid_value"),
     ({"voice": "no_such_voice"}, "voice", "invalid_value"),
     ({"response_format": "mp3"}, "response_format", "not_implemented"),
-    ({"response_format": "opus"}, "response_format", "not_implemented"),
+    ({"response_format": "ogg"}, "response_format", "invalid_value"),
     ({"speed": 5}, "speed", "invalid_value"),
     ({"stream_format": "sse"}, "stream_format", "not_implemented"),
     ({"model": "tts-1"}, "model", "model_not_found"),
@@ -90,6 +91,22 @@ def test_refusals_name_the_field(fields, param, code):
     assert status == 400, raw[:300]
     assert err.get("param") == param and err.get("code") == code, err
     assert _speech()[0] == 200, "a refusal must leave the server serving"
+
+
+def _adts(d):
+    return len(d) > 1 and d[0] == 0xFF and (d[1] & 0xF0) == 0xF0
+
+
+@pytest.mark.parametrize("fmt,ctype,looks_right", [
+    ("flac", "audio/flac", lambda d: d[:4] == b"fLaC"),
+    ("opus", "audio/ogg", lambda d: d[:4] == b"OggS" and b"OpusHead" in d[:100]),
+    ("aac", "audio/aac", _adts),
+])
+def test_encoded_formats(fmt, ctype, looks_right):
+    status, got, data = _speech(response_format=fmt)
+    assert status == 200, data[:300]
+    assert ctype in got
+    assert looks_right(data) and len(data) > 1000, data[:16]
 
 
 def test_unknown_voice_lists_the_voices():

@@ -259,8 +259,8 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
 
 ## Not settled
 
-- mp3, opus, aac and flac output: refused (SERVER-SPEECH-PARAMS). The bundled FFmpeg has no mp3
-  encoder; its built-in opus, aac and flac encoders are not wired to the endpoint.
+- mp3 output: refused (SERVER-SPEECH-PARAMS). FFmpeg has no mp3 encoder of its own and the bundled
+  build carries no LAME; opus, aac and flac go through FFmpeg's own encoders (SERVER-SPEECH-ENCODE).
 - Words with per-tag pronunciations always take the DEFAULT reading; a tagger would fix read/
   live/lead-type heteronyms.
 - Other languages: misaki's other G2Ps (Japanese, Mandarin, ...) are separate ports.

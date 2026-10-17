@@ -628,7 +628,7 @@ inline bool is_binary_body(const json& j) {
 struct SpeechRequest {
     std::string input;
     std::string voice;
-    std::string response_format = "wav";   ///< "wav" | "pcm"
+    std::string response_format = "wav";   ///< wav, pcm, flac, aac or opus
     double speed = 1.0;
     std::vector<std::string> ignored;      ///< accepted and ignored, for the log line
 };
@@ -657,13 +657,9 @@ inline json speech_request(const json& req, SpeechRequest& out) {
         const std::string f = v.get<std::string>();
         if (f == "mp3")
             return invalid_param("response_format", "response_format mp3 is not available: the bundled FFmpeg "
-                                 "is built without an mp3 encoder. Use wav or pcm (24 kHz, 16-bit mono).",
-                                 "not_implemented");
-        if (f == "opus" || f == "aac" || f == "flac")
-            return invalid_param("response_format", "response_format " + f + " is not implemented in this "
-                                 "server yet. Use wav or pcm (24 kHz, 16-bit mono).", "not_implemented");
-        if (f != "wav" && f != "pcm")
-            return invalid_param("response_format", "response_format must be wav or pcm.");
+                                 "has no mp3 encoder. Use opus, aac, flac, wav or pcm.", "not_implemented");
+        if (f != "wav" && f != "pcm" && f != "flac" && f != "aac" && f != "opus")
+            return invalid_param("response_format", "response_format must be one of opus, aac, flac, wav or pcm.");
         out.response_format = f;
     }
     if (has("speed")) {

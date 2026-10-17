@@ -2166,6 +2166,8 @@ class SpeechTask(BaseTestTask):
                         naming the field.
       S6 Round trip     With a Whisper model loaded as well (--asr 1), the speech transcribes
                         back to the sentence (word error rate, SOFT-FAIL above 0.25).
+      S7 Formats        flac, opus and aac come back in their containers (fLaC, Ogg with an
+                        OpusHead, ADTS).
 
     Talks raw HTTP: the body is audio, and for S5 the status is the assertion.
     """
@@ -2270,6 +2272,18 @@ class SpeechTask(BaseTestTask):
             notes.append(f"{what} -> 400 {err.get('code')}")
         return ("PASS", "; ".join(notes)), 400, ""
 
+    def _probe_formats(self):
+        notes = []
+        for fmt, ctype, looks_right in (
+                ("flac", "audio/flac", lambda d: d[:4] == b"fLaC"),
+                ("opus", "audio/ogg", lambda d: d[:4] == b"OggS" and b"OpusHead" in d[:100]),
+                ("aac", "audio/aac", lambda d: len(d) > 1 and d[0] == 0xFF and (d[1] & 0xF0) == 0xF0)):
+            status, got, data = self._speech(response_format=fmt)
+            if status != 200 or ctype not in got or not looks_right(data):
+                return ("FAIL", f"{fmt}: HTTP {status}, Content-Type {got}, {len(data)} bytes"), status, ""
+            notes.append(f"{fmt} {len(data)} B")
+        return ("PASS", ", ".join(notes)), 200, ""
+
     @staticmethod
     def _wer(ref: str, hyp: str) -> float:
         norm = lambda t: re.sub(r"[^a-z' ]", " ", t.lower()).split()
@@ -2308,7 +2322,8 @@ class SpeechTask(BaseTestTask):
             print(f"\n=== Starting Speech Tests ({self.model_tag}, voice {self.voice}) ===")
             for check, fn in (("S1 Speaks", self._probe_speaks), ("S2 Repeats", self._probe_repeats),
                               ("S3 Raw PCM", self._probe_pcm), ("S4 Speed", self._probe_speed),
-                              ("S5 Refuses", self._probe_refuses), ("S6 Round trip", self._probe_round_trip)):
+                              ("S5 Refuses", self._probe_refuses), ("S6 Round trip", self._probe_round_trip),
+                              ("S7 Formats", self._probe_formats)):
                 try:
                     verdict, status, note = fn()
                     self.record(verdict, f"{self.model_tag} / {check}")

@@ -27,6 +27,7 @@
 #include "open_diffusion/prompt.hpp"
 #include "open_diffusion/reference.hpp"
 #include "open_tts/tts_engine.hpp"
+#include "audio/audio_encoder.hpp"
 #include "tokenizer/tokenizer.hpp"
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
@@ -2036,18 +2037,26 @@ void RestHandler::handle_openai_audio_speech(const json& request,
         open_tts::SpeakInfo info;
         const std::vector<float> audio = this->tts_engine->speak(sp.input, voice, (float)sp.speed, &info);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (!info.unknown.empty()) {
-            std::string u;
-            for (const auto& w : info.unknown) u += (u.empty() ? "" : ", ") + w;
-            header_print("OFLM", "speech: words not in the lexicon: " + u);
+        std::string unknown;
+        for (size_t i = 0; i < info.unknown.size() && i < 8; ++i) unknown += (i ? ", " : "") + info.unknown[i];
+        if (info.unknown.size() > 8) unknown += ", ...";
+        if (!unknown.empty()) header_print("OFLM", "speech: words not in the lexicon: " + unknown);
+        if (audio.empty()) {
+            send_response(openai_compat::invalid_param("input", "input has nothing the English phonemizer can say" +
+                                                       (unknown.empty() ? std::string(".") : " (not in the lexicon: " + unknown + ").")));
+            return;
         }
-        std::printf("[oflm] speech: %.2f s of audio in %zu chunk(s), voice %s, host wall clock %.0f ms\n",
-                    info.seconds, info.chunks.size(), voice.c_str(), ms);
+        std::printf("[oflm] speech: %.2f s of audio in %zu chunk(s), voice %s, %s, host wall clock %.0f ms\n",
+                    info.seconds, info.chunks.size(), voice.c_str(), sp.response_format.c_str(), ms);
         std::fflush(stdout);
         if (sp.response_format == "pcm")
             send_response(openai_compat::binary_body(open_tts::encode_pcm16(audio), "audio/pcm"));
-        else
+        else if (sp.response_format == "wav")
             send_response(openai_compat::binary_body(open_tts::encode_wav(audio), "audio/wav"));
+        else
+            send_response(openai_compat::binary_body(
+                audio_encode::encode_mono(audio, open_tts::kSampleRate, sp.response_format),
+                audio_encode::content_type(sp.response_format)));
     }
     catch (const std::exception& e) {
         send_response(exception_error("handle_openai_audio_speech", e));

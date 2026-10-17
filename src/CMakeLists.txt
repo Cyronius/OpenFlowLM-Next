@@ -1516,6 +1516,22 @@ foreach(_t ops g2p)
     add_test(NAME open_tts_${_t} COMMAND open_tts_${_t}_test "${CMAKE_CURRENT_SOURCE_DIR}/open_tts/testdata")
 endforeach()
 
+# SERVER-SPEECH-ENCODE: flac, aac and opus through the bundled FFmpeg; skipped where FFmpeg is linked by hand.
+if(FFMPEG_LIBRARIES AND NOT FFMPEG_BUILT_FROM_SOURCE AND (VCPKG_TOOLCHAIN OR NOT WIN32))
+    add_executable(audio_encoder_test common/audio/audio_encoder_test.cpp common/audio/audio_encoder.cpp
+                   common/audio/audio_reader.cpp)
+    target_include_directories(audio_encoder_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" ${FFMPEG_INCLUDE_DIRS})
+    if(TARGET PkgConfig::FFMPEG)
+        target_link_libraries(audio_encoder_test PRIVATE PkgConfig::FFMPEG)
+    else()
+        target_link_libraries(audio_encoder_test PRIVATE ${FFMPEG_LIBRARIES})
+    endif()
+    if(MSVC)
+        target_compile_options(audio_encoder_test PRIVATE /EHsc /utf-8)
+    endif()
+    add_test(NAME audio_encoder COMMAND audio_encoder_test)
+endif()
+
 # src/test holds two kinds of tests. The per-model NPU ones need a device and
 # the prebuilt engine libraries, so they are built standalone and are NOT added
 # here. The host-only ones (device registry, npu_platform helpers, downloader

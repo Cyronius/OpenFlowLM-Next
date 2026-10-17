@@ -740,10 +740,10 @@ static void test_speech_request() {
 
     ok(run(with({{"response_format", "pcm"}})).is_null() && r.response_format == "pcm", "pcm is accepted");
     ok(run(with({{"response_format", nullptr}})).is_null() && r.response_format == "wav", "null is omitted");
-    for (const char* f : {"mp3", "opus", "aac", "flac"}) {
-        const json e = refused(with({{"response_format", f}}), "response_format", std::string("format ") + f);
-        eq(e["error"]["code"].get<std::string>(), "not_implemented", std::string(f) + " is named as not implemented");
-    }
+    const json mp3 = refused(with({{"response_format", "mp3"}}), "response_format", "format mp3");
+    eq(mp3["error"]["code"].get<std::string>(), "not_implemented", "mp3 is named as not implemented");
+    for (const char* f : {"opus", "aac", "flac"})
+        ok(run(with({{"response_format", f}})).is_null() && r.response_format == f, std::string(f) + " is accepted");
     refused(with({{"response_format", "ogg"}}), "response_format", "format ogg");
     ok(run(with({{"speed", 0.25}})).is_null() && r.speed == 0.25, "speed 0.25");
     ok(run(with({{"speed", 4}})).is_null() && r.speed == 4.0, "speed 4 (an integer)");

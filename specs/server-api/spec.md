@@ -487,7 +487,9 @@ request rules are one pure function, `openai_compat::speech_request()`, unit-tes
 
 The response body is the file itself, not JSON: a RIFF WAV (24 kHz, mono, 16-bit PCM) with
 `Content-Type: audio/wav`, or with `response_format: "pcm"` the same samples without the header
-(`audio/pcm`, little-endian), as OpenAI's `pcm` is. WAV is the default where OpenAI's is mp3,
+(`audio/pcm`, little-endian), as OpenAI's `pcm` is. `flac` (`audio/flac`, lossless 16-bit at
+24 kHz), `aac` (`audio/aac`, ADTS at 24 kHz) and `opus` (`audio/ogg`, Opus in Ogg at 48 kHz) are
+encoded by the bundled FFmpeg (SERVER-SPEECH-ENCODE). WAV is the default where OpenAI's is mp3,
 because this build has no mp3 encoder. The responder sends a handler's
 `openai_compat::binary_body()` as raw bytes with its content type; every other response stays
 JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
@@ -498,6 +500,8 @@ JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
 - The same request twice gives identical bytes; `response_format: "pcm"` gives exactly the WAV's
   bytes after its 44-byte header.
 - `speed: 2.0` gives audio at most 0.8 of the length `speed: 1.0` gives.
+- `response_format` `flac`, `opus` and `aac` return 200 with `audio/flac` (starting `fLaC`),
+  `audio/ogg` (`OggS` and an `OpusHead`) and `audio/aac` (an ADTS sync word).
 
 ### SERVER-SPEECH-PARAMS: OpenAI's fields, and a refused one names itself
 **Applies to:** openflowlm-next (`src/server/openai_compat.hpp`)
@@ -506,12 +510,13 @@ JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
 `specs/server-api/tests/test_speech_api.py` (on the wire)
 
 - `input`: required, a string with text in it, at most 4096 characters (OpenAI's limit; counted
-  in characters, not bytes).
+  in characters, not bytes). An input the English phonemizer can say nothing of (only Chinese
+  characters, say, or only emoji) is a 400 `invalid_value` on `input` naming the words it could
+  not read, not an empty file (`handle_openai_audio_speech`, checked on the wire).
 - `voice`: required, a string (SERVER-SPEECH-VOICES says which).
-- `response_format`: `wav` (default) or `pcm`. `mp3` is 400 `not_implemented`: the bundled
-  FFmpeg (vcpkg's port, features avcodec/avformat/swresample and no LAME) has no mp3 encoder.
-  `opus`, `aac` and `flac` are 400 `not_implemented` too: FFmpeg's built-in encoders could
-  provide them, but the encode path is not written. Anything else is 400 `invalid_value`.
+- `response_format`: `wav` (default), `pcm`, `flac`, `aac` or `opus`. `mp3` is 400
+  `not_implemented`: the bundled FFmpeg (vcpkg's port, features avcodec/avformat/swresample and no
+  LAME) has no mp3 encoder. Anything else is 400 `invalid_value`.
 - `speed`: a number in [0.25, 4.0], default 1, OpenAI's range.
 - `stream_format`: `audio` (the whole file) is accepted, `sse` is 400 `not_implemented`.
 - `instructions`: a string, accepted and ignored with a log line: Kokoro takes none.
@@ -519,8 +524,25 @@ JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
   ignored.
 
 **Acceptance criteria:** each of the above, as `test_speech_request` asserts them: a 400 whose
-`param` names the field, `code` `not_implemented` for the formats and `sse`, and acceptance at the
-edges (4096 characters, 4096 two-byte characters, speed 0.25 and 4).
+`param` names the field, `code` `not_implemented` for mp3 and `sse`, acceptance of opus, aac and
+flac, and acceptance at the edges (4096 characters, 4096 two-byte characters, speed 0.25 and 4).
+
+### SERVER-SPEECH-ENCODE: flac, aac and opus through the bundled FFmpeg
+**Applies to:** openflowlm-next (`src/common/audio/audio_encoder.cpp`)
+**Verification:** test
+**Test:** `src/common/audio/audio_encoder_test.cpp` (CTest `audio_encoder`)
+
+`audio_encode::encode_mono` encodes mono float samples in memory with FFmpeg's own encoders and
+muxers, so no library is added: FLAC in a FLAC stream at the input's rate (16-bit), AAC-LC in ADTS
+at the input's rate (64 kbit/s), and Opus in Ogg at 48 kHz (64 kbit/s, resampled by swresample;
+FFmpeg's Opus encoder is marked experimental, so it is opened with `FF_COMPLIANCE_EXPERIMENTAL`).
+A fixed-frame encoder's last frame is padded with silence. mp3 is not offered.
+
+**Acceptance criteria:**
+- flac, decoded by FFmpeg, gives the input's samples within 16-bit rounding (2/32768), same length.
+- aac and opus, decoded, correlate above 0.95 with the input at the codec's delay; opus keeps the
+  length within 0.1 s.
+- Zero samples still give a valid stream; `supported("mp3")` is false.
 
 ### SERVER-SPEECH-VOICES: the installed English voices, by Kokoro's name or OpenAI's
 **Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/open_tts/tts_engine.cpp`)
