@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from .tasks import (LLMTask, EmbeddingTask, AudioTask, VisionTask, ToolCallingTask,
-                    ApiConformanceTask, TranscriptionTask)
+                    ApiConformanceTask, TranscriptionTask, RerankTask)
 
 SUITE_NAMES = ("llm", "embedding", "audio", "vision", "tools", "api")
 # Suites that need a chat model loaded; embedding is the odd one out.
@@ -89,6 +89,9 @@ def main():
                              "finish_reason, request isolation, stream parity)")
     parser.add_argument('--all', action='store_true',
                         help="Run all suites except embedding (which stays exclusive)")
+    parser.add_argument('--rerank', action='store_true',
+                        help="Run reranker tests against POST /v1/rerank (a server started with "
+                             "--rerankmodel <tag>); combines with any other suite, and --all leaves it out")
     parser.add_argument('--gen-lim', type=int, default=-1, help="Maximum number of tokens to generate")
     parser.add_argument('--temp', '--temperature', type=float, default=0.3, metavar='TEMP',
                         help="Sampling temperature for chat-based tests (e.g. 0.7). "
@@ -114,7 +117,7 @@ def main():
     if note:
         print(note + "\n")
 
-    if not any(suites.values()):
+    if not any(suites.values()) and not args.rerank:
         parser.print_help()
         return 0
 
@@ -173,6 +176,10 @@ def run_suites(args, baseurl, suites, model_filter, results):
 
     if suites["api"]:
         results.append(ApiConformanceTask(baseurl, args.backend_os, model_filter=model_filter).run())
+
+    # A reranker loads beside any chat or embedding model, so this suite needs no exclusivity rule.
+    if getattr(args, "rerank", False):
+        results.append(RerankTask(baseurl, args.backend_os, model_filter=model_filter).run())
 
 
 if __name__ == "__main__":

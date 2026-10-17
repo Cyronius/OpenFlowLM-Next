@@ -423,7 +423,7 @@ E7 Batch Reference
         "bge-base:en-v1.5", "bge-small:en-v1.5", "bge-large:en-v1.5",
         "all-minilm:l6-v2", "nomic-embed-text:v1.5", "gte-multilingual:base",
         # a decoder LLM on the open kernels (OpenLlmEmbedding), served by --embeddingmodel
-        "qwen3-embedding:0.6b",
+        "qwen3-embedding:0.6b", "qwen3-embedding:4b",
     ]
     DEFAULT_EMBED_MODEL = "embed-gemma:300m"
 
@@ -966,6 +966,215 @@ E7 Batch Reference
                 print(f"Finished testing model: {model_id}")
         print(f"\nEmbedding tests complete. Saved to {self.csv_filename}")
         return self.result
+
+
+class RerankTask(BaseTestTask):
+    """
+    Tests rerankers through POST /v1/rerank (the Cohere / Jina shape), against a
+    server started with `--rerankmodel <tag>`.
+
+      R1 Response Structure      A list of results, one per document, each with
+                                 an index and a relevance score in [0, 1].
+      R2 Relevance Ordering      The document that answers the query ranks
+                                 first, whichever position it was sent in.
+      R3 Sorted By Score         Results come back best first.
+      R4 Repeatability           The same request scores the same every time.
+      R5 Document Independence   A document scores the same alone as beside
+                                 others: nothing carries over between documents.
+      R6 Top N                   top_n keeps the best n, and a top_n past the
+                                 count keeps all.
+      R7 Model Identity          A model the server cannot have loaded is
+                                 refused; an accepted request reports the model
+                                 that answered.
+      R8 Request Validation      A body with no query, or documents that are not
+                                 a list, is a 400 with an OpenAI-shaped error.
+    """
+
+    SUITE_NAME = "rerank"
+    RERANK_MODELS = ["qwen3-reranker:0.6b", "qwen3-reranker:4b"]
+    BEIJING = "The capital of China is Beijing."
+    GRAVITY = ("Gravity is a force that attracts two bodies towards each other. It gives weight to "
+               "physical objects and is responsible for the movement of planets around the sun.")
+    # (query, documents, the index that must rank first); the answer sits at both positions.
+    RELEVANCE_CASES = [
+        ("What is the capital of China?", [GRAVITY, BEIJING], 1),
+        ("Explain gravity", [GRAVITY, BEIJING], 0),
+    ]
+    REPEAT_COUNT = 3
+    SCORE_TOLERANCE = 1e-4
+    IMPOSSIBLE_MODEL = "oflm-test-no-such-reranker"
+    CHECK_NAMES = [
+        "R1 Response Structure",
+        "R2 Relevance Ordering",
+        "R3 Sorted By Score",
+        "R4 Repeatability",
+        "R5 Document Independence",
+        "R6 Top N",
+        "R7 Model Identity",
+        "R8 Request Validation",
+    ]
+
+    def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
+        super().__init__(base_url, backend_os, model_filter=model_filter)
+        self.models = [m for m in self.models if m in self.RERANK_MODELS]
+        self.csv_filename = self.get_csv_filename("rerank")
+
+    def _rerank(self, model_id: str | None, query, documents, **extra):
+        """One POST /rerank; returns (status, body, text)."""
+        body = {"query": query, "documents": documents, **extra}
+        if model_id is not None:
+            body["model"] = model_id
+        return self._post_json("/rerank", body)
+
+    @staticmethod
+    def _scores_by_index(body) -> dict[int, float]:
+        return {r["index"]: r["relevance_score"] for r in body["results"]}
+
+    # -------------------------------------------------------------- checks
+
+    def _check_response_structure(self, model_id: str):
+        docs = [self.GRAVITY, self.BEIJING]
+        status, body, text = self._rerank(model_id, self.RELEVANCE_CASES[0][0], docs, return_documents=True)
+        if status != 200 or not isinstance(body, dict):
+            return ("FAIL", f"HTTP {status}: {text[:160]}")
+        if body.get("object") != "list":
+            return ("FAIL", f"expected object 'list', got {body.get('object')!r}")
+        results = body.get("results")
+        if not isinstance(results, list) or len(results) != len(docs):
+            return ("FAIL", f"expected {len(docs)} results, got {results!r:.160}")
+        for r in results:
+            index, score = r.get("index"), r.get("relevance_score")
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(docs):
+                return ("FAIL", f"result index {index!r} is not a document position")
+            if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0.0 <= score <= 1.0:
+                return ("FAIL", f"relevance_score {score!r} is not a number in [0, 1]")
+            if (r.get("document") or {}).get("text") != docs[index]:
+                return ("FAIL", f"return_documents: result {index} does not carry its text")
+        if sorted(r["index"] for r in results) != list(range(len(docs))):
+            return ("FAIL", f"indexes {[r['index'] for r in results]} are not one per document")
+        return ("PASS", f"{len(results)} results, scores in [0, 1], texts returned")
+
+    def _check_relevance_ordering(self, model_id: str):
+        seen = []
+        for query, docs, want in self.RELEVANCE_CASES:
+            status, body, text = self._rerank(model_id, query, docs)
+            if status != 200:
+                return ("FAIL", f"'{query}': HTTP {status}: {text[:160]}")
+            first = body["results"][0]["index"]
+            if first != want:
+                return ("FAIL", f"'{query}': document {first} ranked first, document {want} answers it "
+                                f"(results {body['results']})")
+            seen.append(f"'{query}' -> {want} ({body['results'][0]['relevance_score']:.4f})")
+        return ("PASS", "the answering document first at both positions: " + "; ".join(seen))
+
+    def _check_sorted(self, model_id: str):
+        status, body, text = self._rerank(model_id, self.RELEVANCE_CASES[0][0],
+                                          [self.GRAVITY, self.BEIJING, "Paris is in France."])
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {text[:160]}")
+        scores = [r["relevance_score"] for r in body["results"]]
+        if any(a < b for a, b in zip(scores, scores[1:])):
+            return ("FAIL", f"scores are not best first: {scores}")
+        return ("PASS", f"best first: {[round(s, 6) for s in scores]}")
+
+    def _check_repeatability(self, model_id: str):
+        query, docs, _ = self.RELEVANCE_CASES[0]
+        draws = []
+        for _ in range(self.REPEAT_COUNT):
+            status, body, text = self._rerank(model_id, query, docs)
+            if status != 200:
+                return ("FAIL", f"HTTP {status}: {text[:160]}")
+            draws.append(self._scores_by_index(body))
+        worst = max(abs(d[i] - draws[0][i]) for d in draws[1:] for i in draws[0])
+        if worst > self.SCORE_TOLERANCE:
+            return ("FAIL", f"{self.REPEAT_COUNT} draws of one request differ by up to {worst:.6f}")
+        how = "bit-identical" if worst == 0.0 else f"not bit-identical, max |d| {worst:.2e}"
+        return ("PASS", f"{self.REPEAT_COUNT} draws agree ({how})")
+
+    def _check_document_independence(self, model_id: str):
+        query = self.RELEVANCE_CASES[0][0]
+        status, body, text = self._rerank(model_id, query, [self.GRAVITY, self.BEIJING])
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {text[:160]}")
+        together = self._scores_by_index(body)[1]
+        status, body, text = self._rerank(model_id, query, [self.BEIJING])
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {text[:160]}")
+        alone = self._scores_by_index(body)[0]
+        if abs(alone - together) > self.SCORE_TOLERANCE:
+            return ("FAIL", f"the Beijing document scores {together:.6f} after another document and "
+                            f"{alone:.6f} alone: state carries over between documents")
+        return ("PASS", f"{alone:.6f} alone, {together:.6f} beside another document")
+
+    def _check_top_n(self, model_id: str):
+        query, docs, want = self.RELEVANCE_CASES[0]
+        status, body, text = self._rerank(model_id, query, docs, top_n=1)
+        if status != 200:
+            return ("FAIL", f"top_n 1: HTTP {status}: {text[:160]}")
+        if [r["index"] for r in body["results"]] != [want]:
+            return ("FAIL", f"top_n 1 returned {body['results']}, expected only document {want}")
+        status, body, text = self._rerank(model_id, query, docs, top_n=len(docs) + 3)
+        if status != 200 or len(body["results"]) != len(docs):
+            return ("FAIL", f"top_n past the count: HTTP {status}, {text[:160]}")
+        return ("PASS", "top_n 1 keeps the best; a larger top_n keeps all")
+
+    def _check_model_identity(self, model_id: str):
+        status, body, text = self._rerank(self.IMPOSSIBLE_MODEL, "q", ["a"])
+        if status < 400:
+            return ("FAIL", f"a request for '{self.IMPOSSIBLE_MODEL}' was answered with HTTP {status}, "
+                            f"reported as {(body or {}).get('model')!r}: some other model's scores "
+                            f"under the requested name")
+        status, body, text = self._rerank(model_id, "q", ["a"])
+        if status != 200:
+            return ("FAIL", f"a request for '{model_id}' itself: HTTP {status}: {text[:160]}")
+        reported = body.get("model")
+        if reported != model_id:
+            return ("SOFT-FAIL", f"requested '{model_id}', response reports {reported!r}")
+        return ("PASS", f"unknown model refused with HTTP 4xx; '{model_id}' served and reported as itself")
+
+    def _check_request_validation(self, model_id: str):
+        for label, body in (("no query", {"model": model_id, "documents": ["a"]}),
+                            ("documents as a string", {"model": model_id, "query": "q", "documents": "a"})):
+            status, reply, text = self._post_json("/rerank", body)
+            if status != 400:
+                return ("FAIL", f"{label}: HTTP {status}, expected 400: {text[:160]}")
+            code, error_type, _ = self._error_fields(reply)
+            if not code or not error_type:
+                return ("SOFT-FAIL", f"{label}: HTTP 400, but not an OpenAI-shaped error: {text[:160]}")
+        return ("PASS", "a missing query and a non-list documents are each a 400 with an error code")
+
+    def _run_check(self, writer, model_id, check_name, check):
+        try:
+            result = check()
+            verdict, detail = result
+            self.record(result, f"{model_id} / {check_name}")
+            writer.writerow([model_id, check_name, f"{verdict}: {detail}"])
+            print(f"  {check_name}: {verdict} ({detail})")
+        except Exception as e:
+            print(f"  {check_name}: ERROR ({e})")
+            self.record(f"ERROR: {e}", f"{model_id} / {check_name}")
+            writer.writerow([model_id, check_name, f"ERROR: {e}"])
+
+    def run(self):
+        print("\n=== Starting Rerank Tests ===")
+        print(f"Models found: {len(self.models)}")
+        if not self.models:
+            print("No reranker found. Start the server with `--rerankmodel <tag>` and pass --model <tag>.")
+            return self.result
+        checks = [self._check_response_structure, self._check_relevance_ordering, self._check_sorted,
+                  self._check_repeatability, self._check_document_independence, self._check_top_n,
+                  self._check_model_identity, self._check_request_validation]
+        with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Model", "Check", "Check Result"])
+            for i, model_id in enumerate(self.models, 1):
+                print(f"\n--- Testing reranker ({i}/{len(self.models)}): {model_id} ---")
+                for name, check in zip(self.CHECK_NAMES, checks):
+                    self._run_check(writer, model_id, name, lambda c=check: c(model_id))
+                print(f"Finished testing model: {model_id}")
+        print(f"\nRerank tests complete. Saved to {self.csv_filename}")
+        return self.result
+
 
 class AudioTask(BaseTestTask):
     SUITE_NAME = "audio"

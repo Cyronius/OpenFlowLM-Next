@@ -567,10 +567,13 @@ endpoint holds the NPU lock like `/v1/embeddings`.
 
 **Verification (manual):** the card's example -- "What is the capital of China?" against its two
 documents -- ranks the Beijing document first, and every score is within 0.02 of the CPU
-reference's (transformers, fp32, the official safetensors).
+reference's (transformers, fp32, the official safetensors); `oflm-test --rerank --model
+qwen3-reranker:0.6b` passes (its R1-R8 checks are unit-tested against a fake server in
+`utilities/oflm-test/tests/test_rerank_checks.py`).
 
 **Result 2026-10-17: PASS** (mradermacher's i1-Q4_1 file). The Beijing document ranks first at
 0.99931 (fp32 0.99950), the gravity document scores 0.0000036 (fp32 0.0000050), and "Explain
 gravity" with `top_n: 1` keeps the gravity document at 0.99850 (fp32 0.99936). A body with no
 `query`, a numeric document and another model's tag are each refused with 400 naming the field or
-the loaded model.
+the loaded model. `oflm-test --rerank`: 8 PASS; repeat draws and a document scored alone against
+beside another were bit-identical.

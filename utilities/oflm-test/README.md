@@ -8,6 +8,7 @@ oflm-test is designed to thoroughly test OpenFlowLM's API compatibility and mode
 
 - **LLM Tests**: Language model inference in both streaming and non-streaming modes, checked for the things a client depends on: non-empty content, a `finish_reason`, the right model name, sane `usage` counts and context carried across turns
 - **Embedding Tests**: Text embedding validation (structure, determinism, batching, dimensionality, semantic ordering, model identity, task prompts) with automated check verdicts. Runs exclusively on a server loaded with only an embed model (`oflm serve -e 1`, or `oflm serve <llm> --embed 1 --embeddingmodel <tag>` for a tag served by the `open_npue` backend).
+- **Rerank Tests** (`--rerank`): `POST /v1/rerank` on a server started with `--rerankmodel <tag>`: structure, the answering document ranked first, order, repeatability, documents scored independently, `top_n`, model identity and request validation
 - **Audio Tests**: Audio understanding via chat completions, with a bundled music clip
 - **Vision Tests**: Vision-Language Model (VLM) tests with multi-image support and automated response checking
 - **Tool Calling Tests**: Function/tool-calling across seven escalating complexity levels, in streaming and non-streaming modes
@@ -77,6 +78,7 @@ oflm-test --audio                  # Audio tests only
 oflm-test --vision                 # Vision tests only
 oflm-test --tools                  # Tool-calling tests only
 oflm-test --api                    # Server conformance tests only
+oflm-test --rerank --model qwen3-reranker:0.6b   # Reranker tests (server started with --rerankmodel)
 
 # Target a specific model (instead of all available models)
 oflm-test --llm --model gemma3:4b
@@ -305,6 +307,22 @@ For E7 the CSV also carries one row per draw (`E7 … (draw N/30)`) with the **f
 Because this suite is exclusive, only an embedding model is loaded on the server (`oflm serve -e 1`) — no full model is required.
 
 **Output:** `embedding_results_v{version}_{timestamp}.csv`
+
+### Rerank Tests
+Tests a reranker through `POST /v1/rerank` (the Cohere / Jina shape: `query`, `documents`, `top_n`, `return_documents`). Start the server with `--rerankmodel <tag>` (for example `oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b`) and run `oflm-test --rerank --model <tag>`. A reranker loads beside a chat or embedding model, so `--rerank` combines with any other suite; `--all` leaves it out.
+
+| Check | Verdicts | What it asserts |
+|---|---|---|
+| R1 Response Structure | PASS / FAIL | A `list` with one result per document, each an index and a relevance score in [0, 1], and the text when `return_documents` is set |
+| R2 Relevance Ordering | PASS / FAIL | The document that answers the query ranks first, whether it was sent first or second |
+| R3 Sorted By Score | PASS / FAIL | Results come back best first |
+| R4 Repeatability | PASS / FAIL | Three draws of one request agree within 1e-4 (the detail says whether they were bit-identical) |
+| R5 Document Independence | PASS / FAIL | A document scores the same alone as after another document, so no state carries over between them |
+| R6 Top N | PASS / FAIL | `top_n: 1` keeps only the best; a `top_n` past the count keeps all |
+| R7 Model Identity | PASS / SOFT-FAIL / FAIL | A model the server cannot have loaded is refused; an accepted request reports the model that answered |
+| R8 Request Validation | PASS / SOFT-FAIL / FAIL | No `query`, or `documents` that is not a list, is a 400 with an OpenAI-shaped error |
+
+**Output:** `rerank_results_v{version}.csv`
 
 ### Tool Calling Tests
 Tests OpenAI-compatible function/tool-calling across seven escalating complexity levels. Each level runs in both **non-streaming** and **streaming** mode.
