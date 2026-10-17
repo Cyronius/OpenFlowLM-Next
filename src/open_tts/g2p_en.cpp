@@ -81,6 +81,25 @@ char32_t upper_c(char32_t c) {
     if (c < 0x80) return (c >= 'a' && c <= 'z') ? c - 32 : c;
     return c < 0x10000 ? (char32_t)std::towupper((wint_t)c) : c;
 }
+// Latin-1 and Latin Extended-A letters (U+00C0..U+017F) without their accents, for spelling unknown words.
+const char* const LATIN_FOLD[0x180 - 0xC0] = {
+    "A", "A", "A", "A", "A", "A", "AE", "C", "E", "E", "E", "E", "I", "I", "I", "I",
+    "D", "N", "O", "O", "O", "O", "O", "", "O", "U", "U", "U", "U", "Y", "TH", "SS",
+    "A", "A", "A", "A", "A", "A", "AE", "C", "E", "E", "E", "E", "I", "I", "I", "I",
+    "D", "N", "O", "O", "O", "O", "O", "", "O", "U", "U", "U", "U", "Y", "TH", "Y",
+    "A", "A", "A", "A", "A", "A", "C", "C", "C", "C", "C", "C", "C", "C", "D", "D",
+    "D", "D", "E", "E", "E", "E", "E", "E", "E", "E", "E", "E", "G", "G", "G", "G",
+    "G", "G", "G", "G", "H", "H", "H", "H", "I", "I", "I", "I", "I", "I", "I", "I",
+    "I", "I", "IJ", "IJ", "J", "J", "K", "K", "K", "L", "L", "L", "L", "L", "L", "L",
+    "L", "L", "L", "N", "N", "N", "N", "N", "N", "N", "N", "N", "O", "O", "O", "O",
+    "O", "O", "OE", "OE", "R", "R", "R", "R", "R", "R", "S", "S", "S", "S", "S", "S",
+    "S", "S", "T", "T", "T", "T", "T", "T", "U", "U", "U", "U", "U", "U", "U", "U",
+    "U", "U", "U", "U", "W", "W", "Y", "Y", "Y", "Z", "Z", "Z", "Z", "Z", "Z", "S",
+};
+u32 fold_latin(char32_t c) {
+    if (c >= 0xC0 && c < 0x180) return utf8_to_u32(LATIN_FOLD[c - 0xC0]);
+    return u32(1, upper_c(c));
+}
 u32 lower(const u32& s) { u32 r = s; for (auto& c : r) c = lower_c(c); return r; }
 u32 upper(const u32& s) { u32 r = s; for (auto& c : r) c = upper_c(c); return r; }
 u32 capitalize(const u32& s) {
@@ -434,9 +453,13 @@ public:
         u32 ps;
         for (char32_t c : word) {
             if (!is_letter(c)) continue;
-            auto it = golds_.find(u32(1, upper_c(c)));
-            if (it == golds_.end() || it->second.table) return {std::nullopt, std::nullopt};
-            ps += it->second.ps;
+            const u32 letters = fold_latin(c);
+            if (letters.empty()) return {std::nullopt, std::nullopt};
+            for (char32_t l : letters) {
+                auto it = golds_.find(u32(1, l));
+                if (it == golds_.end() || it->second.table) return {std::nullopt, std::nullopt};
+                ps += it->second.ps;
+            }
         }
         ps = apply_stress(ps, 0.0);
         const size_t at = ps.rfind(SECONDARY);

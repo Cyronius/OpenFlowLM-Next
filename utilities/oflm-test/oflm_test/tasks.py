@@ -2178,7 +2178,8 @@ class SpeechTask(BaseTestTask):
     def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
         super().__init__(base_url, backend_os, model_filter=model_filter)
         self.csv_filename = self.get_csv_filename("speech")
-        self.model_tag = (model_filter or ["kokoro:82m"])[0]
+        # --model is shared with the chat suites, so only a Kokoro tag in it names the speech model
+        self.model_tag = next((m for m in (model_filter or []) if m.startswith("kokoro")), "kokoro:82m")
         self.voice = "af_heart"
 
     def _speech(self, **fields):
@@ -2296,6 +2297,14 @@ class SpeechTask(BaseTestTask):
                 prev, d[j] = d[j], cur
         return d[len(h)] / max(len(r), 1)
 
+    @staticmethod
+    def _is_no_asr(body: bytes) -> bool:
+        try:
+            error = json.loads(body.decode("utf-8")).get("error") or {}
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            return False
+        return isinstance(error, dict) and error.get("code") == "model_not_found"
+
     def _probe_round_trip(self):
         wav = getattr(self, "_wav_bytes", None)
         if not wav:
@@ -2308,9 +2317,14 @@ class SpeechTask(BaseTestTask):
                                          headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
         try:
             with urllib.request.urlopen(request, timeout=600) as response:
-                said = json.loads(response.read().decode("utf-8")).get("text", "")
+                raw = response.read()
+            if self._is_no_asr(raw):
+                return ("SKIPPED", "no speech recognition here; start with --asr 1 too"), 200, ""
+            said = json.loads(raw.decode("utf-8")).get("text", "")
         except urllib.error.HTTPError as e:
-            return ("SKIPPED", f"no speech recognition here (HTTP {e.code}); start with --asr 1 too"), e.code, ""
+            if self._is_no_asr(e.read()):
+                return ("SKIPPED", f"no speech recognition here (HTTP {e.code}); start with --asr 1 too"), e.code, ""
+            return ("FAIL", f"transcription failed (HTTP {e.code})"), e.code, ""
         wer = self._wer(self.SENTENCE, said)
         verdict = "PASS" if wer <= 0.25 else "SOFT-FAIL"
         return (verdict, f"WER {wer:.2f}: {said.strip()[:120]}"), 200, said[:200]

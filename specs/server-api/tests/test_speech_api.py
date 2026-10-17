@@ -67,6 +67,12 @@ def test_same_request_same_bytes_and_pcm_is_the_wav_body():
     assert pcm == a[44:]
 
 
+def test_accented_unknown_words_are_spelled_not_refused():
+    status, ctype, wav = _speech(input="naïve résumé")
+    assert status == 200 and "audio/wav" in ctype, wav[:300]
+    assert len(wav) > 44 + 24000, len(wav)
+
+
 def test_speed_shortens():
     slow = len(_speech()[2])
     fast = len(_speech(speed=2.0)[2])
@@ -77,6 +83,7 @@ def test_speed_shortens():
     ({"input": None}, "input", "missing_required_parameter"),
     ({"input": "   "}, "input", "invalid_value"),
     ({"input": "中文字符"}, "input", "invalid_value"),
+    ({"input": "🙂🎉🚀"}, "input", "invalid_value"),
     ({"voice": "no_such_voice"}, "voice", "invalid_value"),
     ({"response_format": "mp3"}, "response_format", "not_implemented"),
     ({"response_format": "ogg"}, "response_format", "invalid_value"),

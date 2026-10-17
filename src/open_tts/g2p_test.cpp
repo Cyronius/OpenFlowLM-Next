@@ -52,6 +52,13 @@ int main(int argc, char** argv) {
         expect_eq("unknown word spelled: " + word, r.phonemes, ps.get<std::string>());
         expect_eq("unknown word dropped in skip mode: " + word, skip(word).phonemes, "");
     }
+    // Accented letters are spelled as their base letter; misaki has no reading for them without espeak.
+    const std::string plain = fx["spell"]["Zorblax"].get<std::string>();
+    for (const char* accented : {"Zörbláx", "Zőrblax"}) {
+        const G2PResult r = spell(accented);
+        expect_eq(std::string("accented unknown word reported: ") + accented, r.unknown.empty() ? "" : r.unknown[0], accented);
+        expect_eq(std::string("accented unknown word spelled as its base letters: ") + accented, r.phonemes, plain);
+    }
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

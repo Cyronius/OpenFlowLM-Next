@@ -231,8 +231,9 @@ By default, audio tests run against known audio models (currently `whisper-v3:tu
 
 ### Text-to-Speech Tests
 Tests `/v1/audio/speech` on a server started with `--tts 1` (`oflm-add mlx-community/Kokoro-82M-bf16`
-installs `kokoro:82m`). `--model` names the speech model; the default is `kokoro:82m`. `--all` does not
-include this suite.
+installs `kokoro:82m`). The first `--model` entry that starts with `kokoro` names the speech model, so
+`--llm --tts --model llama3.2:1b` still speaks with `kokoro:82m`, the default. `--all` does not include this
+suite, and `--embedding` alongside `--tts` runs only the embedding suite.
 
 **Automated Checks:**
 | Check | Verdict | Description |
@@ -242,7 +243,7 @@ include this suite.
 | S3 Raw PCM | PASS / FAIL | `response_format: pcm` is the WAV's samples without the header |
 | S4 Speed | PASS / FAIL | `speed: 2.0` gives audio clearly shorter than `speed: 1.0` |
 | S5 Refuses | PASS / FAIL | No input, an unknown voice and mp3 (no encoder in this build) are each a 400 naming the field |
-| S6 Round trip | PASS / SOFT-FAIL / SKIPPED | With a Whisper model on the same server (`--asr 1`), the speech transcribes back to the sentence (word error rate at most 0.25) |
+| S6 Round trip | PASS / SOFT-FAIL / FAIL / SKIPPED | With a Whisper model on the same server (`--asr 1`), the speech transcribes back to the sentence (word error rate at most 0.25). SKIPPED only when the server answers that no ASR model is loaded; any other error is a FAIL |
 | S7 Formats | PASS / FAIL | flac, opus and aac come back in their containers (`fLaC`, Ogg with an `OpusHead`, ADTS) |
 
 **Output:** `speech_results_v{version}_{timestamp}.csv`

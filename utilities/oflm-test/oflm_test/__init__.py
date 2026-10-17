@@ -24,7 +24,7 @@ def resolve_suites(args):
     Returns ``(suites, note)`` where ``suites`` maps suite name -> bool and
     ``note`` is an (possibly empty) informational message for the user.
     """
-    explicit = {name: getattr(args, name) for name in SUITE_NAMES}
+    explicit = {name: getattr(args, name, False) for name in SUITE_NAMES}
     note = ""
     if args.all:
         # tts needs a server started with --tts 1, so it runs only when asked for
@@ -36,10 +36,10 @@ def resolve_suites(args):
 
     # An explicit --embedding request wins over --all or any chat-based suite:
     # the embedding tests must never share a run with suites needing a full model.
-    if explicit["embedding"] and (args.all or any(explicit[name] for name in CHAT_SUITES)):
+    if explicit["embedding"] and (args.all or any(explicit[name] for name in CHAT_SUITES + ("tts",))):
         suites = {name: name == "embedding" for name in SUITE_NAMES}
         note = ("--embedding is mutually exclusive with "
-                "--llm/--audio/--vision/--tools/--api; running only the embedding tests.")
+                "--llm/--audio/--vision/--tools/--api/--tts; running only the embedding tests.")
     return suites, note
 
 

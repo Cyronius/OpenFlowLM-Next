@@ -55,12 +55,17 @@ more mantissa bits in the same memory. Embeddings, norms, biases and the Snake a
 
 ### OPEN-TTS-VOICES: a voice is a style table, and the row follows the phoneme count
 **Applies to:** openflowlm-next (`src/open_tts/kokoro.cpp` `Voice`)
-**Verification:** manual (OPEN-TTS-PARITY uses it)
+**Verification:** manual
 
 `voices/<name>.safetensors` holds one tensor of 510 x 256 (`[510, 1, 256]` or `[510, 256]`).
 KPipeline speaks a chunk with row `len(phonemes) - 1`, counting code points of the phoneme
 string (characters the vocabulary drops still count), and so does the engine. The first 128
 values style the decoder, the last 128 the prosody predictor.
+
+**Verification (manual):** run OPEN-TTS-PARITY's check (`ref_kokoro.py` and `kokoro_cli --dump`
+on the same phoneme string and voice). The reference picks the row itself, so identical integer
+durations and the decoder output within 1e-5 (f32) show the engine read the same row of the same
+table; a wrong row moves the durations at once. Do it for one `a*` and one `b*` voice.
 
 ### OPEN-TTS-OPS: the host kernels equal float64
 **Applies to:** openflowlm-next (`src/open_tts/ops.cpp`)
@@ -86,7 +91,7 @@ scatter, the bidirectional LSTM, and the STFT pair.
 
 `gen_fixtures.py` builds small blocks from kokoro 0.9.4's own classes with random weights
 (`torch.manual_seed(0)`), runs them, and stores weights, inputs and outputs in
-`testdata/blocks.safetensors` (about 40 KB; no model weights). The C++ loads the same weights
+`testdata/blocks.safetensors` (78 KB; no model weights). The C++ loads the same weights
 through the engine's loaders and runs the engine's forward code.
 
 **Acceptance criteria (relative L2 against PyTorch's output):**
@@ -155,7 +160,14 @@ DEFAULT, or the `None` variant at the end of a sentence, as misaki does for an u
 espeak-ng, misaki's fallback for words the lexicons lack, is GPL-3 and is not used. An unknown
 word is spelled letter by letter (misaki's own acronym reading, `get_NNP`) by default, so the
 listener hears that something was there; `OFLM_TTS_UNKNOWN=skip` drops it instead, which is
-what KPipeline does without espeak. Either way the word is reported.
+what KPipeline does without espeak. Either way the word is reported. For spelling, a Latin
+letter with an accent (U+00C0 to U+017F: é, ö, ő, ß, æ...) is read as its base letter or letters,
+so `naïve résumé` is spelled rather than dropped; misaki's `get_NNP` has no entry for those
+letters and gives nothing. A letter outside that range with no single-letter entry still drops
+the word.
+
+Decimals follow misaki except where misaki drops a zero fraction: misaki reads `2.0` as "two",
+the engine as "two point zero". Left as is (the engine's reading says what is written).
 
 **Acceptance criteria:**
 - num2words: 1234, 2,500,000, 1001 as cardinals; 21, 100, 20 as ordinals; 1984, 1905, 2001,
@@ -163,8 +175,10 @@ what KPipeline does without espeak. Either way the word is reported.
 - 14 sentences covering punctuation, the/a, stems, numbers, years, ordinals, decimals,
   currency, percent, an acronym, an abbreviation, a hyphenated word, a contraction, an em dash
   and an ellipsis: each the exact phoneme string misaki 0.9.4 gives with the same lexicon
-  excerpt (`testdata/g2p_*.json`, about 300 entries of misaki's `us_gold`/`us_silver`).
+  excerpt (`testdata/g2p_*.json`, 151 entries of misaki's `us_gold`/`us_silver`).
 - An unknown word is reported, spelled as misaki's `get_NNP` spells it, and dropped in skip mode.
+- An unknown word with accented Latin letters (`Zörbláx`, `Zőrblax`) is reported and spelled
+  exactly as its unaccented form (`Zorblax`).
 - Manual: agreement with misaki + spaCy on a mixed corpus, and the unknown-word rate (Results).
 
 ### OPEN-TTS-CHUNK: long text is spoken in chunks the model accepts
@@ -181,7 +195,8 @@ prints one line per chunk with its length: each at most 510 and ending at senten
 
 ### OPEN-TTS-INSTALL: oflm-add installs Kokoro with its voices and lexicons
 **Applies to:** openflowlm-next (`utilities/oflm-add/oflm_add/__init__.py` `install_kokoro`)
-**Verification:** manual
+**Verification:** test (the installer, against a faked Hugging Face) and manual (the real repo)
+**Test:** `utilities/oflm-add/tests/test_kokoro_install.py`
 
 `oflm-add <repo>` with "kokoro" in the name (or `--family kokoro`) installs `config.json`, the
 safetensors checkpoint, every English voice (`voices/[ab][fm]_*.safetensors`) and misaki
@@ -189,7 +204,9 @@ safetensors checkpoint, every English voice (`voices/[ab][fm]_*.safetensors`) an
 repository never carries them). It registers `kokoro:82m` in the user registry with `tts: true`,
 family `kokoro`, format `safetensors`, label `["audio", "text-to-speech"]` and no download URL.
 A repo with only the `.pth` (hexgrad's own) is refused with a pointer to a safetensors
-conversion; a config that is not v1.0's is refused.
+conversion, a GGUF-only repo is refused saying the engine does not read GGUF yet, and a config
+that is not v1.0's is refused. The test covers the install, these refusals, a quantized
+checkpoint and a lexicon hash mismatch.
 
 **Verification (manual):** `oflm-add mlx-community/Kokoro-82M-bf16 --config <scratch registry>
 --models-root <scratch>/models`, then `oflm serve --tts 1` loads it (see Results).
@@ -201,8 +218,16 @@ Safetensors conversions with the original module names: `mlx-community/Kokoro-82
 (73k downloads; F32 despite its name; config, weights and every voice as safetensors),
 `prince-canuma/Kokoro-82M` (the same file), `round-tower/Kokoro-82M-bf16` (BF16, the same 548
 names, no voices, 115 downloads). ONNX (`onnx-community`, 686k downloads) and CoreML/OpenVINO
-need other readers. GGUFs exist after all (`cstr/kokoro-82m-GGUF` F16 and Q8_0, for CrispASR, and
-four smaller repos), contrary to the feasibility doc; none carries voices.
+need other readers. The safetensors headers read are in `survey-safetensors-headers.log`.
+
+GGUFs exist after all, contrary to the feasibility doc. A re-survey on 2026-10-17
+(`survey-hf-kokoro-repos.log`: 449 repos matching "kokoro", with downloads and file formats)
+lists about a dozen Kokoro GGUF repos. Two carry voices: `simonfxr/kokoro.cpp-GGUF` (F16 and
+Q8_0, all 54 voices as GGUF, Apache-2.0, for kokoro.cpp) and `cstr/kokoro-voices-GGUF` (voices
+only, for CrispASR beside `cstr/kokoro-82m-GGUF`). The first survey said none carried voices;
+that was wrong. The engine does not read any of them yet: their tensor names follow each
+runtime's own layout, and mapping one onto the module paths (plus Q8_0 dequantized to f16 at
+load) is the work. Not settled, below.
 
 Chosen: `mlx-community/Kokoro-82M-bf16` at a71e4d38. One repo carries config, weights and
 voices in a format the engine reads without a pickle parser, and its 548 tensors and the voices
@@ -260,7 +285,14 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
   from this branch's build loads `kokoro:82m` (28 voices, f16 weights). For the three round-trip
   sentences in both voices the server's WAV is byte-identical to `kokoro_cli`'s, so the Whisper
   result above holds for the served audio. `test_speech_api.py` 19 of 19 pass; `oflm-test --tts`
-  passes S1-S5 and S7 (S6 skipped: no Whisper on that server).
+  passes S1-S5 and S7 (S6 skipped: no Whisper on that server). After the review fixes
+  (`build-oflm-3.log`, `test_speech_api-review.log`, `oflm-test-tts-review.log`): every CTest
+  that builds passes (oflm_smoke, openai_compat, multipart, OPEN-VISION-IMAGE-READ, bench_embed,
+  open_tts_ops, open_tts_g2p, audio_encoder); three upstream test targets
+  (test_npu_platform, test_model_backend, test_downloader_pinning) do not compile on Windows, on
+  errors in files this branch does not change (`boost/any.hpp` via XRT, `setenv`, `std::min`). The wire tests, now with emoji input and accented words, 21 of
+  21; `oflm-test --tts` S1-S5 and S7 again, S6 skipped through the server's "no ASR model"
+  answer, which is now the only answer it counts as a skip.
 - **Speed** (`measure-rtf.log`, `dibs run --measure`, CLEAN before and after; two earlier runs were
   NOISY and are not used): `kokoro_cli`, best of 3, OpenMP's default threads (24 logical cores, Ryzen AI 9 HX PRO 370). Two
   sentences, 13.8 s of audio: 2.60 s with f16 weights (real-time factor 0.19), 2.68 s with f32 (0.19).
@@ -268,9 +300,14 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
 - **Linux** (`linux-gcc-open_tts.log`): the engine and both unit tests build with g++ 13 (WSL) under the
   flags CMake gives non-MSVC builds, the tests pass, and a sentence matches the Windows audio in
   length and to 0.11 dB log-mel.
-- **Odd input** (`odd-inputs-synthesis.log`, and 84 lines of emoji, CJK, control characters, long
-  numbers, URLs and random Unicode through `--g2p-lines`): no crash; text with nothing English in
-  it yields no phonemes, which the server answers with a 400 (SERVER-SPEECH-PARAMS).
+- **Odd input**: 84 lines of emoji, CJK, accented words, control characters, long numbers, URLs
+  and random Unicode through `--g2p-lines`, read from a UTF-8 file (`odd-inputs-lines.txt`,
+  `odd-inputs-g2p-lines.log`, rerun 2026-10-17 after the accent fold): no crash; text with
+  nothing English in it yields no phonemes, which the server answers with a 400
+  (SERVER-SPEECH-PARAMS; the wire tests send Chinese and emoji). `odd-inputs-synthesis.log` ran
+  the whole model on such text through `kokoro_cli --text`, but on Windows that argument arrives
+  in the ANSI code page, so its emoji and CJK cases reached the engine as `?` and prove only
+  that the model survives them; the file and HTTP paths are the ones that carry Unicode.
 
 ## Not settled
 
@@ -278,5 +315,8 @@ Measured 2026-10-17 on this box; logs in the branch's `.claude/plans/kokoro-run/
   build carries no LAME; opus, aac and flac go through FFmpeg's own encoders (SERVER-SPEECH-ENCODE).
 - Words with per-tag pronunciations always take the DEFAULT reading; a tagger would fix read/
   live/lead-type heteronyms.
+- GGUF Kokoro (`simonfxr/kokoro.cpp-GGUF` has weights and voices): not read; `oflm-add` refuses a
+  Kokoro repo without safetensors. A name map onto the module paths plus a Q8_0-to-f16 load,
+  through the existing GGUF reader: about a day, checked with OPEN-TTS-PARITY.
 - Other languages: misaki's other G2Ps (Japanese, Mandarin, ...) are separate ports.
 - The NPU: the decoder's 1024-channel convs and the ALBERT GEMMs are the parts that could move.

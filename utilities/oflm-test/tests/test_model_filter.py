@@ -126,12 +126,12 @@ class TestSuiteExclusivity(unittest.TestCase):
 
     def _args(self, **overrides):
         defaults = dict(llm=False, embedding=False, audio=False, vision=False, tools=False,
-                        api=False, all=False)
+                        api=False, tts=False, all=False)
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
     def _only_embedding(self):
-        suites = {name: False for name in ("llm", "audio", "vision", "tools", "api")}
+        suites = {name: False for name in ("llm", "audio", "vision", "tools", "api", "tts")}
         suites["embedding"] = True
         return suites
 

@@ -1897,9 +1897,13 @@ def install_kokoro(args, repo, local_dir, modelscope, dir_name, system_registry)
     weights = next((w for w in KOKORO_WEIGHTS if w in names), None)
     if weights is None:
         pth = [n for n in names if n.endswith(".pth")]
+        gguf = [n for n in names if n.endswith(".gguf")]
         hint = (" It ships the PyTorch checkpoint (" + ", ".join(pth) + "), which the engine does not read; "
                 "install mlx-community/Kokoro-82M-bf16 instead, whose tensors are the same values in safetensors."
-                if pth else "")
+                if pth else
+                " It ships GGUF (" + ", ".join(gguf[:3]) + "), which the Kokoro engine does not read yet; "
+                "install mlx-community/Kokoro-82M-bf16 instead."
+                if gguf else "")
         raise SystemExit(f"No Kokoro safetensors ({' or '.join(KOKORO_WEIGHTS)}) in {repo}.{hint}")
     voices = sorted(n for n in names if KOKORO_VOICE_RE.match(n))
     if not voices:

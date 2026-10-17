@@ -78,6 +78,13 @@ def test_refuses_the_pth_only_repo_with_a_pointer(tmp_path, fake_lexicons):
         oflm_add.install_kokoro(_args(tmp_path), str(repo), repo, False, repo.name, {"models": {}})
 
 
+def test_refuses_a_gguf_only_repo_naming_gguf(tmp_path, fake_lexicons):
+    repo = _repo(tmp_path, weights=None)
+    (repo / "kokoro-82m-f16.gguf").write_bytes(b"GGUF")
+    with pytest.raises(SystemExit, match="GGUF.*does not read yet"):
+        oflm_add.install_kokoro(_args(tmp_path), str(repo), repo, False, repo.name, {"models": {}})
+
+
 def test_refuses_another_geometry(tmp_path, fake_lexicons):
     repo = _repo(tmp_path, cfg=dict(V10, hidden_dim=256))
     with pytest.raises(SystemExit, match="hidden_dim=256"):
