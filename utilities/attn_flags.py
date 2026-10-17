@@ -1,10 +1,4 @@
-"""Print `<spec stem>|<ATTN_* flags>` for every recipes/specs/*.json, the exact flags its
-attention cores compile attn.h with (2026-10-16). Feeds utilities/attn_pp_identical.sh --all.
-
-Dense and LFM2 specs import designs/dense/dx.py and read its ATTN_FLAGS; the MoE and
-Qwen3.5 specs rebuild designs/layer_x/xlayer.py's list from the recipe's attention geometry.
-Gemma 4's kinds print one `<spec stem>@<build>|<flags>` line per distinct flag set.
-"""
+"""Print `<spec stem>[@<build>]|<ATTN_* flags>`, the flags each recipes/specs/*.json compiles attn.h with (2026-10-16)."""
 from __future__ import annotations
 
 import importlib.util
@@ -65,6 +59,7 @@ def dense_sets(spec_file: Path, spec) -> list[tuple[str, list[str]]]:
 
 
 def main() -> int:
+    bad = 0
     for sf in sorted((ROOT / "recipes" / "specs").glob("*.json")):
         spec = load_spec(sf)
         try:
@@ -74,11 +69,12 @@ def main() -> int:
                 sets = dense_sets(sf, spec)
         except Exception as e:
             print(f"# {sf.stem}: {type(e).__name__}: {e}", file=sys.stderr)
+            bad += 1
             continue
         for tag, flags in sets:
             if flags:
                 print(f"{tag}|{' '.join(flags)}")
-    return 0
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
