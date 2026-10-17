@@ -86,7 +86,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
         bool media = !input.images.empty() || !input.audios.empty();
         for (const auto& m : input.messages) media = media || m.contains("images") || m.contains("audios");
         if (media) {
-            header_print("ERROR", "Gemma 4 on the open kernels is text only; images and audio need OFLM_GEMMA4_ENGINE=closed");
+            header_print("ERROR", "Gemma 4 on the open kernels is text only; for images and audio run a gemma4-it tag (FLM's .q4nx container, closed engine)");
             return false;
         }
         nlohmann::ordered_json messages = input.messages;

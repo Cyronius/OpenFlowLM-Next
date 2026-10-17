@@ -281,8 +281,10 @@ public:
     Snapshot checkpoint() const;
     void restore(const Snapshot& s);
 
-    /// One cached row of an attention layer's K or V (bf16, kv_row / 4 elements).
+    /// One cached row of an attention layer's K or V (bf16, kv_row_bytes(layer) / 4 elements).
     void kv_row(int layer, int row, bool value, uint16_t* out);
+    /// A layer's own KV cache row in bytes; Gemma 4's global layers are wider than layout.kv_row.
+    size_t kv_row_bytes(int layer) const { return types_.at(static_cast<size_t>(layer))->state_row; }
 
     const WeightFile& file() const { return *file_; }
 
@@ -440,9 +442,7 @@ private:
     std::vector<std::vector<float>> block_logits_;     ///< per real token of the last block, when asked
 
     std::vector<float> logits_host_;
-    // Gemma 4's per-layer inputs (manifest `ple`, OPEN-FAMILY-GEMMA4), all host-resident f32: the
-    // whole-model projection [L * dim, hidden] and its norm, then per layer the gate [dim, hidden],
-    // the projection [hidden, dim], the norm [hidden] and the output scalar.
+    // Gemma 4's per-layer inputs (manifest `ple`), host-resident f32 because they run between dispatches
     struct PleWeights {
         std::vector<float> model_proj, model_norm, scalar;
         std::vector<std::vector<float>> gate, proj, norm;
