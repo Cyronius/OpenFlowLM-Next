@@ -180,6 +180,7 @@ ACORES, NHL, RB = G.ACORES, G.NHL, G.RB
 ROW = 1 if G.KVH == 1 else 2                           # ain elements per cached row (attn.h's ATTN_KVH 1)
 OGH = min(NHL, G.HPO)                                  # heads in one og element (attn.h's kOGH)
 N_OG = NHL // OGH                                      # og elements a core emits
+X_DEPTH = 2                                            # x fifo elements a main core holds
 LN_FLAGS = [f"-DLN_N={HID}", f"-DLN_EPS={G.EPS:g}f"]
 if SPEC.norm_groups != 1:                  # ln.h defaults it to 1; adding the flag would change
     LN_FLAGS.append(f"-DLN_GROUPS={SPEC.norm_groups}")   # every other family's build line (K2: 2)
@@ -258,7 +259,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     # ---- fifos
     of_w = [ObjectFifo(elem, name=f"w{c}", depth=2) for c in range(N_CORES)]
     of_y = [ObjectFifo(y_ty, name=f"y{c}", depth=2) for c in range(N_CORES)]
-    of_x = ObjectFifo(x_ty, name="x", depth=2)
+    of_x = ObjectFifo(x_ty, name="x", depth=X_DEPTH)
     of_lni = ObjectFifo(u8_ln, name="lni", depth=5)
     of_lno = ObjectFifo(u8_ln, name="lno", depth=1)      # one output element at a time (8 KB elements at 4096 wide)
     of_ain = ObjectFifo(u8_a, name="ain", depth=max(4, 2 * RB + 2, 1 + NPTAB + 1))   # a block is acquired at once
@@ -333,11 +334,19 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         if stop == 1:
             return
         # o against og (K = QW)
-        oe = acq(xin, G.OG_ELEMS)
-        for i in range(G.OG_ELEMS):
-            f_prep(oe[i], tab, QW, i)
-        role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
-        xin.release(G.OG_ELEMS)
+        if G.OG_ELEMS > X_DEPTH:
+            # og is wider than the x fifo (the 12B's 16 heads of 512): one element at a time, as h is
+            for i in range_(G.OG_ELEMS):
+                oe = xin.acquire(1)
+                f_prep(oe, tab, QW, i)
+                xin.release(1)
+            role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
+        else:
+            oe = acq(xin, G.OG_ELEMS)
+            for i in range(G.OG_ELEMS):
+                f_prep(oe[i], tab, QW, i)
+            role_bands(win, yout, tab, K, "attn", G.O_PC, QW, ms)
+            xin.release(G.OG_ELEMS)
         if stop == 2:
             return
         # up | gate per band against xm (K = HID), silu -> h band

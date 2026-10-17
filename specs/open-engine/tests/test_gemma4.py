@@ -307,14 +307,29 @@ def test_12b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, g12):
     assert tensors[DENSE_LOCAL].count(G4.T_K) == 1 and G4.T_V in tensors[DENSE_LOCAL]
 
 
-@pytest.mark.parametrize("part,hd,rot,kvh,e_a,kv_row,ptab_row", [
-    ("local", 256, 256, 8, 4096, 8192, 4096), ("global", 512, 128, 1, 2048, 2048, 2048)])
-def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row):
+@pytest.mark.parametrize("part,hd,rot,kvh,e_a,kv_row,ptab_row,og_elems", [
+    ("local", 256, 256, 8, 4096, 8192, 4096, 2), ("global", 512, 128, 1, 2048, 2048, 2048, 4)])
+def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row, og_elems):
+    """The global kind's 16 KB attention output is 4 x elements, wider than the main cores' 2-deep x fifo."""
     monkeypatch.setenv("G4_PART", part)
     R = G4.recipe(g12)
     G, L = R.geo, R.layout
     assert (G.HD, G.ROT, G.KVH, G.N_CORES, G.KV_SHARED, G.ACORES, G.NHL, G.RB) == (hd, rot, kvh, 4, False, 4, 4, 1)
     assert (L.E_A, L.KV_ROW, L.PTAB_ROW, G.PTAB_ELEMS, G.PTAB_CS_OFF) == (e_a, kv_row, ptab_row, 1, 512)
+    assert G.OG_ELEMS == og_elems
+
+
+def test_no_other_kind_or_family_streams_og_per_element(unvalidated, monkeypatch, e4b):
+    from recipes.load import load_spec
+    for spec in (e4b, ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B))):
+        for part in ("local", "global", "local_shared", "global_shared"):
+            monkeypatch.setenv("G4_PART", part)
+            assert G4.recipe(spec).geo.OG_ELEMS <= 2
+    monkeypatch.delenv("G4_PART")
+    for p in sorted(SPECS.glob("*.json")):
+        s = load_spec(p)
+        if s.family in DR.DENSE_FAMILIES and s.family != "gemma4":
+            assert DR.geometry(s).OG_ELEMS <= 2, p.name
 
 
 def test_12b_manifest_has_the_scalar_but_no_per_layer_inputs(unvalidated, g12):
