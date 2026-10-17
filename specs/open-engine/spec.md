@@ -1173,10 +1173,11 @@ layers.
 **Result 2026-10-16 (`oflm serve`, E4B, installed by oflm-add as `gemma4-it-open:e4b`):** the server
 loads the GGUF on the open kernels and answers "What is the capital of France?" with "The capital of
 France is Paris." (finish_reason stop). `oflm-test --llm --gen-lim 256`: 5 of 5 pass, the context
-retention check included. `oflm-test --tools --gen-lim 256`, non-stream half only (the stream half was
-trimmed to fit 15 minutes: the prefill is token at a time, ~45 s per tool prompt): 7 of 8 checks pass
-(a basic and an inferred call, restraint, two parallel calls, the loop's lookup, the tool result's tail
-reproduced, a nullable schema). The loop's final answer at temperature 0.3 stopped after "$60.0 - $6."
+retention check included. `oflm-test --tools --gen-lim 256`, run as two 15-minute halves (the prefill
+is token at a time, ~45 s per tool prompt). Non-stream: 7 of 8 checks pass (a basic and an inferred
+call, restraint, two parallel calls, the loop's lookup, the tool result's tail reproduced, a nullable
+schema). Stream: the 7 checks it reached pass, the loop's $54 total included; the time limit cut it
+during the last level (the nullable schema). The non-stream loop's final answer at temperature 0.3 stopped after "$60.0 - $6."
 without the $54 total; the same request answered greedily gives "$54.00" with finish_reason stop
 (its working line reads "$64 - $6 = $54.00", a slip on the way to the right total). The engine is not
 the cause: over that loop's 346-token prompt (Google's template, rendered by transformers) E4B's
