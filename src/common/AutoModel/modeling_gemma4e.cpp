@@ -87,7 +87,7 @@ bool Gemma4e::insert(chat_meta_info_t& meta_info, lm_uniform_input_t& input, std
         for (const auto& m : input.messages) media = media || m.contains("images") || m.contains("audios");
         // thrown, not false: every caller reports false as "Max length reached", and the CLI then ends the chat
         if (media)
-            throw std::runtime_error("Gemma 4 on the open kernels is text only; for images and audio run a gemma4-it tag (FLM's .q4nx container, closed engine)");
+            throw request_error("Gemma 4 on the open kernels is text only; for images and audio run a gemma4-it tag (FLM's .q4nx container, closed engine)");
         nlohmann::ordered_json messages = input.messages;
         if (messages.empty()) messages.push_back({{"role", "user"}, {"content", input.prompt}});
         std::vector<int> tokens = this->tokenizer->encode(this->apply_chat_template(messages, input.tools));

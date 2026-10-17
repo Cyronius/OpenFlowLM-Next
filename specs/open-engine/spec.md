@@ -1100,10 +1100,12 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
 - **The logits are soft-capped** at 30 on the host after the tied head (token_embd, Q6_K
   re-quantized to q4_1).
 - The pools are GGUF-direct with bf16 scales (OPEN-GGUF-BF16-POOL); no f32-scale twin is built.
-- Text only: the adapter refuses images and audio on the open engine with an error the client sees
-  (not the generic "Max length reached!"), naming the curated `gemma4-it` tags, whose `.q4nx`
-  containers run them on the closed engine; the server keeps serving. `OFLM_GEMMA4_ENGINE=closed`
-  is no way round it: an install holding only `model.gguf` has nothing the closed engine can read.
+- Text only: the adapter refuses images and audio on the open engine as a request error. The server
+  answers 400 "Invalid request" (not "Max length reached!"; its error policy keeps exception text off
+  the wire), its log and `oflm run` give the reason, naming the curated `gemma4-it` tags, whose
+  `.q4nx` containers run them on the closed engine, and the server keeps serving.
+  `OFLM_GEMMA4_ENGINE=closed` is no way round it: an install holding only `model.gguf` has nothing
+  the closed engine can read.
 - The kernel set lives under the official model's name (`Gemma4-E4B-IT-NPU2`), where the official
   `.q4nx` container finds it too. Its one view packs GGUF-direct, which no `.q4nx` can feed, so the
   engine declines it for a model directory without a `model.gguf` (or with a `model.q4nx` beside it),
@@ -1151,8 +1153,8 @@ sliding or global, each with its own KV cache or sharing one -- are four `dx` bu
    and `--xclbin-dir` pointing at a scratch root), `oflm serve`, `oflm-test --llm --model <tag>`,
    `oflm-test --tools --model <tag>`. An answer whose working is garbled ("$64 - $6") comes from the
    sampler's default frequency and presence penalties: replay the request with both at 0 before
-   suspecting the engine. An image request to the install comes back as an error naming the
-   `gemma4-it` tags, and a text request after it still answers.
+   suspecting the engine. An image request to the install comes back as 400 "Invalid request", the
+   server log names the `gemma4-it` tags, and a text request after it still answers.
 5. The official container keeps the closed engine: `oflm serve` on a model directory holding a
    `model.q4nx` with the Gemma 4 set reachable (`OFLM_OPEN_KERNELS_DIR` or under its name) prints
    "not using ... it packs GGUF-direct" and does not start the open engine.
