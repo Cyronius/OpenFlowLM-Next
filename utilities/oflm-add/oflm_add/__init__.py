@@ -2143,7 +2143,8 @@ def main():
             if mmproj_use:
                 print(f"vision tower   : {mmproj_use} -> mmproj.gguf")
             for n, why in sorted({**gguf_refused, **mmproj_refused}.items()):
-                print(f"  skipped      : {n} ({why})")
+                if n != mmproj_use:
+                    print(f"  skipped      : {n} ({why})")
             bases = get_base_chain()
             print(f"base model(s)  : {', '.join(bases) or '(none in README)'}")
             print("tokenizer      : base repo files, else the GGUF's embedded tokenizer")
@@ -2169,7 +2170,8 @@ def main():
     if gguf_mode and not args.quiet:
         log(f"[INFO] GGUF-direct install: {gguf_name} -> model.gguf")
         for n, why in sorted(gguf_refused.items()):
-            log(f"[INFO]   skipping {n}: {why}")
+            if n != mmproj_use:
+                log(f"[INFO]   skipping {n}: {why}")
     if gguf_mode and mmproj_use and not args.quiet:
         log(f"[INFO] vision tower: {mmproj_use} -> mmproj.gguf")
     if local_dir:
