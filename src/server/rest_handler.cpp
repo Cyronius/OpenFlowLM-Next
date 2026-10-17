@@ -483,6 +483,7 @@ void RestHandler::ensure_tts_model_loaded(const std::string& model_tag) {
     try {
         const auto t0 = std::chrono::steady_clock::now();
         this->tts_engine = std::make_unique<open_tts::TtsEngine>(this->supported_models.get_model_path(resolved));
+        this->tts_engine->phonemize("a", false);   // the US lexicon now, not on the first request
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         header_print("OFLM", "Loaded text-to-speech model " + resolved + " (" +
                                  this->tts_engine->model().weights_dtype() + " weights, " +
