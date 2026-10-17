@@ -77,7 +77,8 @@ assert not G.GATE, "dx.py: the Qwen3 dense recipe has no attention gate"
 # wrappers compiled with the f32-scale define and the gemv_q4s32 symbol prefix.
 F32 = SPEC.quant == "q4_1_f32"
 CH = QR.chunk_bytes(SPEC.quant)
-GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32"] if F32 else []
+# the generated TUs carry the q4nx view's chunks per call, which the f32 chunks may not fit
+GEMV_DEF = ["-DGEMV_Q4_SCALES_F32=1", "-DGEMV_Q4_PREFIX=gemv_q4s32", f"-DGEMV_PER_CALL={G.PER_CALL}"] if F32 else []
 GYSYM = "gemv_q4s32_gy" if F32 else "gemv_q4_gy"
 GMSYM = "gemv_q4s32_gms" if F32 else "gemv_q4_gms"
 

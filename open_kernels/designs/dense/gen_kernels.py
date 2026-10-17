@@ -96,7 +96,10 @@ FOLD_FILES = ("gemv_q4_gyms.cc",)
 def files(R) -> dict[str, str]:
     G = R.geo
     q8 = R.spec.q8_roles
-    hdr = f'''#define GEMV_PER_CALL {G.PER_CALL}
+    # the f32-scale twin passes its own count with -D: its 6 KB chunks can halve it (Gemma 3 4B)
+    hdr = f'''#ifndef GEMV_PER_CALL
+#define GEMV_PER_CALL {G.PER_CALL}
+#endif
 #include "gemv_q4.h"
 '''
     out = {
