@@ -173,6 +173,10 @@ SHARED = G.KV_SHARED                                   # no k / v: the window an
 assert not (SHARED and (QKVB or STOP != 99)), "dx.py: a KV-shared layer has no bias stream or debug stops"
 if SHARED and G.KVH == 1:                              # this position's row is one fifo element (attn_step_new.cc)
     ATTN_FLAGS.append("-DATTN_KV_SHARED=1")
+QLOCAL = G.QLOCAL                                      # each attention core keeps its own heads' q only (attn.h)
+assert not (QLOCAL and QKVB), "dx.py: ATTN_QLOCAL has no bias-stream form"
+if QLOCAL:
+    ATTN_FLAGS.append("-DATTN_QLOCAL=1")
 for _k, _v in QR.probe_env().items():               # ATTN_NULL / ATTN_ABL: see attn.h.
     if _k not in ("ATTN_RB", "ATTN_FAST"):             # RB is in the flags above via G.RB; FAST picks G itself.
         ATTN_FLAGS.append(f"-D{_k}={_v}")              # In the build key -- recipes/cache.py.
@@ -210,7 +214,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     og_ty = np.ndarray[(OGH * G.HD,), np.dtype[bfloat16]]   # attn_fin writes kOGH heads at a time
     fcs = np.ndarray[(G.ROT,), np.dtype[np.float32]]
     fhd = np.ndarray[(G.HD,), np.dtype[np.float32]]
-    fq = (np.ndarray[(2 * QW,), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
+    fq = (np.ndarray[(2 * (NHL * G.HD if QLOCAL else QW),), np.dtype[bfloat16]]   # ATTN_VEXP: q pre-split, [hi | lo]
           if G.VEXP else np.ndarray[(QW,), np.dtype[np.float32]])
     fml = np.ndarray[(2 * G.MLS,), np.dtype[np.float32]]   # [m | l], stride MLS (padded when ATTN_VEXP)
     foacc = np.ndarray[(NHL * G.HD,), np.dtype[np.float32]]   # this core's heads only
@@ -243,7 +247,7 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
     pz = [u8_a] if NPTAB > 1 else []                        # the record's second element
     f_meta = ef("attn_meta", ATTN / "attn_meta.cc", [u8_a, u8_a] + pz + [bhd, bhd, fcs, pb_ty], ATTN_FLAGS)
     bz = [u8_ab] if QKVB else []                            # the bias element, when the family has one
-    f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32], ATTN_FLAGS)
+    f_q = ef("attn_q", ATTN / "attn_q.cc", [u8_a] + bz + [bhd, fcs, fq, i32] + ([i32] if QLOCAL else []), ATTN_FLAGS)
     f_k = None if SHARED else ef("attn_k", ATTN / "attn_k.cc", [u8_a] + bz + [bhd, fcs, fhd, brow, i32], ATTN_FLAGS)
     f_v = None if SHARED else ef("attn_v", ATTN / "attn_v.cc", [u8_a] + bz + [brow, i32], ATTN_FLAGS)
     f_init = ef("attn_init", ATTN / "attn_init.cc", [foacc, fml], ATTN_FLAGS)
@@ -454,7 +458,9 @@ def dx(pool: In, xres: InOut, consts: In, kv: InOut, act: InOut, ptab: In, *, st
         ain.release(1 + NPTAB)
         for h in range_(G.Q_AIN_ELEMS):
             e = ain.acquire(1)
-            if bias_in is None:
+            if bias_in is None and QLOCAL:
+                f_q(e, qn, cs, qs, h, h0)
+            elif bias_in is None:
                 f_q(e, qn, cs, qs, h)
             else:
                 b = bias_in.acquire(1)

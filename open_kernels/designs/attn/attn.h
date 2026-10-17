@@ -95,6 +95,9 @@
 #ifndef ATTN_KV_SHARED
 #define ATTN_KV_SHARED 0     // 1: a KV-shared layer at one kv head reads this position's row back as one element
 #endif
+#ifndef ATTN_QLOCAL
+#define ATTN_QLOCAL 0        // 1: a core keeps only its own heads' q (Gemma 4 12B: 16 heads of 512 overflow L1)
+#endif
 #ifndef ATTN_VEXP
 #define ATTN_VEXP 0          // 1: batch the online-softmax exponentials over heads (see attn_row_impl)
 #endif
@@ -247,6 +250,17 @@ static constexpr bool kSplit = (kNHL != kNH);   // compile-time: no h0 arithmeti
 #define ATTN_H0_PARM , int h0
 #define ATTN_H0_DECL
 #define ATTN_H0_ARG , h0
+#endif
+// ATTN_QI / ATTN_QHALF: a head's q slot and the lo half's offset; without ATTN_QLOCAL the tokens they always were
+#if ATTN_QLOCAL
+#if !ATTN_VEXP || ATTN_RB > 1 || ATTN_NHL == ATTN_NH
+#error "attn.h: ATTN_QLOCAL is for a split one-row vector-softmax core (ATTN_VEXP, ATTN_RB 1, ATTN_NHL < ATTN_NH)"
+#endif
+#define ATTN_QI(h, hl) hl
+#define ATTN_QHALF (kNHL * kHD)
+#else
+#define ATTN_QI(h, hl) h
+#define ATTN_QHALF kQW
 #endif
 // The second half of the position record is an argument only where the record needs one.
 #if ATTN_PTAB_SPLIT
@@ -504,8 +518,13 @@ static inline void to_bf16_hd(const float *__restrict src, bfloat16 *__restrict 
 // bf16 halves and mac twice. q does not change over the context, so that split was being
 // recomputed for every cached row: NH * P times per token instead of NH. Hoisting it here
 // leaves the inner loop two macs and no split, and the arithmetic is bit-identical.
+#if ATTN_QLOCAL
+static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const bfloat16 *__restrict qn,
+                               const float *__restrict cs, ATTN_QT *__restrict qs, int e, int h0) {
+#else
 static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const bfloat16 *__restrict qn,
                                const float *__restrict cs, ATTN_QT *__restrict qs, int e) {
+#endif
   aie::set_rounding(aie::rounding_mode::conv_even);
 #if ATTN_QKV_BIAS
   alignas(128) float qb[kEL];
@@ -519,8 +538,12 @@ static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const 
 #else
   alignas(128) float t[kHD];
   for (unsigned i = 0; i < kHPE; ++i) {
+#if ATTN_QLOCAL
+    const int hl = (int)((unsigned)e * kHPE + i) - h0;    // another core's head: neither computed nor kept
+    if (hl < 0 || hl >= (int)kNHL) continue;
+#endif
     norm_rope(qsrc + i * kHD, qn, cs, t);
-    bfloat16 *qh = qs + ((unsigned)e * kHPE + i) * kHD;
+    bfloat16 *qh = qs + ATTN_QI(((unsigned)e * kHPE + i), (unsigned)hl) * kHD;
     for (unsigned j = 0; j < kHD; j += kV) {
       vbN<kV> h, l;
       splitN<kV>(aie::load_v<kV>(t + j), h, l);
@@ -537,7 +560,7 @@ static inline void attn_q_impl(const float *__restrict qe ATTN_BIAS_PARM, const 
 #endif
 #endif
       aie::store_v(qh + j, h);
-      aie::store_v(qh + kQW + j, l);
+      aie::store_v(qh + ATTN_QHALF + j, l);
     }
   }
 #endif
@@ -651,7 +674,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
   for (unsigned hl = 0; hl < kNHL; ++hl) {
     const unsigned h = kSplit ? ((unsigned)h0 + hl) : hl;   // folds away when this core owns them all                 // global head: q and the kv mapping
     const unsigned kvh = h / (kNH / kKVH);
-    const bfloat16 *q = qs + h * kHD;
+    const bfloat16 *q = qs + ATTN_QI(h, hl) * kHD;
     const bfloat16 *k = Kt + kvh * kHD;
     // Two accumulators, not one: the hi and lo terms are independent, so this is
     // twice the distance between dependent macs for the scheduler to fill.
@@ -663,7 +686,7 @@ __attribute__((noinline)) inline void attn_row_impl(const bfloat16 *__restrict K
     for (unsigned j = 0; j < kHD; j += kV) {
       const vbN<kV> kj = aie::load_v<kV>(k + j);
       d0 = aie::mac(d0, aie::load_v<kV>(q + j), kj);          // hi
-      d1 = aie::mac(d1, aie::load_v<kV>(q + kQW + j), kj);    // lo
+      d1 = aie::mac(d1, aie::load_v<kV>(q + ATTN_QHALF + j), kj);    // lo
     }
     sv[hl] = aie::reduce_add(aie::add(d0, d1).template to_vector<float>());   // 1/sqrt(HD) is in q
   }

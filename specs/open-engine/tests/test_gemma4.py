@@ -307,16 +307,31 @@ def test_12b_plan_reads_tensors_the_file_has_at_their_widths(unvalidated, g12):
     assert tensors[DENSE_LOCAL].count(G4.T_K) == 1 and G4.T_V in tensors[DENSE_LOCAL]
 
 
-@pytest.mark.parametrize("part,hd,rot,kvh,e_a,kv_row,ptab_row,og_elems", [
-    ("local", 256, 256, 8, 4096, 8192, 4096, 2), ("global", 512, 128, 1, 2048, 2048, 2048, 4)])
-def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row, og_elems):
-    """The global kind's 16 KB attention output is 4 x elements, wider than the main cores' 2-deep x fifo."""
+@pytest.mark.parametrize("part,hd,rot,kvh,e_a,kv_row,ptab_row,og_elems,qlocal", [
+    ("local", 256, 256, 8, 4096, 8192, 4096, 2, False), ("global", 512, 128, 1, 2048, 2048, 2048, 4, True)])
+def test_12b_part_geometry(unvalidated, monkeypatch, g12, part, hd, rot, kvh, e_a, kv_row, ptab_row, og_elems,
+                           qlocal):
+    """The global kind's 16 KB attention output is 4 x elements, wider than the main cores' 2-deep x fifo, and
+    an all-heads q store would be 32 KB, so each attention core keeps its own 4 heads (ATTN_QLOCAL)."""
     monkeypatch.setenv("G4_PART", part)
     R = G4.recipe(g12)
     G, L = R.geo, R.layout
     assert (G.HD, G.ROT, G.KVH, G.N_CORES, G.KV_SHARED, G.ACORES, G.NHL, G.RB) == (hd, rot, kvh, 4, False, 4, 4, 1)
     assert (L.E_A, L.KV_ROW, L.PTAB_ROW, G.PTAB_ELEMS, G.PTAB_CS_OFF) == (e_a, kv_row, ptab_row, 1, 512)
-    assert G.OG_ELEMS == og_elems
+    assert (G.OG_ELEMS, G.QLOCAL) == (og_elems, qlocal)
+
+
+def test_no_other_kind_or_family_keeps_only_its_own_q(unvalidated, monkeypatch, e4b):
+    from recipes.load import load_spec
+    for spec in (e4b, ModelSpec.from_gguf_metadata(gguf_md(hdr=HDR_E2B))):
+        for part in ("local", "global", "local_shared", "global_shared"):
+            monkeypatch.setenv("G4_PART", part)
+            assert not G4.recipe(spec).geo.QLOCAL
+    monkeypatch.delenv("G4_PART")
+    for p in sorted(SPECS.glob("*.json")):
+        s = load_spec(p)
+        if s.family in DR.DENSE_FAMILIES and s.family != "gemma4":
+            assert not DR.geometry(s).QLOCAL, p.name
 
 
 def test_no_other_kind_or_family_streams_og_per_element(unvalidated, monkeypatch, e4b):

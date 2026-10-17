@@ -97,6 +97,7 @@ class DenseGeometry:
     ROPE_PAIR: int = 0                                              # rotary pair distance; 0 = ROT / 2
     PTAB_CS_OFF: int = 512                                          # where cos / sin sit in the position record
     KV_SHARED: bool = False                                         # no k / v: attend over another layer's cache
+    QLOCAL: bool = False                                            # each attention core keeps only its own heads' q
 
 
 @dataclass(frozen=True)
@@ -331,7 +332,11 @@ def geometry(spec: ModelSpec) -> DenseGeometry:
         VEXP=vexp, MLS=mls, ACORES=acores, NHL=nhl, RB=rb,
         SCALE_ONE=g4, VNORM=g4, ROPE_PAIR=hd // 2 if g4 else spec.rotary_dim // 2,
         PTAB_CS_OFF=_ptab_cs_off(spec), KV_SHARED=_kv_shared(spec),
+        QLOCAL=g4 and vexp == 1 and rb == 1 and acores > 1 and 4 * qw > QSTORE_FIT,
     )
+
+
+QSTORE_FIT = 16 * 1024   # the widest all-heads q store a Gemma 4 attention core has fit (E2B / E4B); the 12B needs 32 KB
 
 
 def layout(spec: ModelSpec, max_ctx: int = 4096) -> DenseLayout:
