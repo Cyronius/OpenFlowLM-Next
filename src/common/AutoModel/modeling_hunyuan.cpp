@@ -3,7 +3,6 @@
 
 #include "AutoModel/modeling_hunyuan.hpp"
 
-/************              HunYuan family            **************/
 HunYuan::HunYuan(oflm_rt::device* npu_device_inst) : AutoModel(npu_device_inst, "HunYuan") {}
 
 void HunYuan::load_model(std::string model_path, json model_info, int default_context_length,

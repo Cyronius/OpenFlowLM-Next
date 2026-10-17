@@ -1,7 +1,6 @@
 /// \file modeling_hunyuan.hpp
 /// \brief Tencent HunYuan V1 dense family (Hy-MT2 translation models).
-/// \note Open kernels only: this tree has no closed hunyuan engine, so a missing
-///       kernel set is a named refusal, as for Granite.
+/// \note Open kernels only: no closed HunYuan engine exists, so a missing kernel set is a named refusal.
 
 #pragma once
 #include "AutoModel/automodel.hpp"
@@ -9,7 +8,6 @@
 #include "open_qwen36/engine.hpp"
 #endif
 
-/************              HunYuan family            **************/
 class HunYuan : public AutoModel {
 private:
     void setup_tokenizer(std::string model_path);
