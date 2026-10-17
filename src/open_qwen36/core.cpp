@@ -29,6 +29,7 @@
 #include "xrt/experimental/xrt_ext.h"
 #include "xrt/experimental/xrt_xclbin.h"
 
+#include "open_qwen36/bidir_block.hpp"
 #include "open_qwen36/block_host.hpp"
 
 namespace open_qwen36 {
@@ -1769,6 +1770,112 @@ void Core::mrope_begin() {
     if (mrope_on_) return;
     mrope_on_ = true;
     mrope_pos_ = pos_;
+}
+
+bool Core::bidir_block_ok(std::string* why) const {
+    auto no = [why](const std::string& s) {
+        if (why) *why = s;
+        return false;
+    };
+    if (has_mrope()) return no("an M-RoPE model places its image rows by (t, h, w) through step_embed");
+    for (int l = 0; l < nl_; ++l) {
+        const std::vector<Step>& prog = types_[l]->program;
+        if (prog.size() != 1 || prog.front().op != "run")
+            return no("layer " + std::to_string(l) + " is not one dispatch, so its attention cannot be re-pointed per row");
+        const auto k = kerns_.find(prog.front().kernel);
+        if (k == kerns_.end() || k->second.patch != "attnpos" || types_[l]->state_kind != "kv")
+            return no("layer " + std::to_string(l) + "'s kernel has no attention window to patch");
+        const auto& args = prog.front().args;
+        const auto rg = std::find_if(args.begin(), args.end(), [&](const std::string& a) { return w_->per_row_globals.count(a) != 0; });
+        if (rg == args.end() || w_->per_row_globals.at(*rg).window != k->second.geom.window)
+            return no("layer " + std::to_string(l) + "'s position table and kernel disagree on the window");
+    }
+    return true;
+}
+
+void Core::step_bidir_block(const float* rows, size_t n, bool want_logits) {
+    if (!weights_loaded_) throw std::runtime_error("open_qwen36: step before load_weights");
+    if (n == 0) return;
+    std::string why;
+    if (!bidir_block_ok(&why)) throw std::runtime_error("open_qwen36: this kernel set cannot run an image block: " + why);
+    if (decode_step_is_host()) throw std::runtime_error("open_qwen36: the host decode route has no image block");
+    const size_t p0 = static_cast<size_t>(pos_);
+    if (p0 + n > cfg_.max_ctx)
+        throw std::runtime_error("open_qwen36: an image block of " + std::to_string(n) + " rows at position " +
+                                 std::to_string(p0) + " passes the context capacity " + std::to_string(cfg_.max_ctx));
+    for (const auto& [name, k] : kerns_)
+        if (k.patch == "attnpos" && k.geom.window && n >= k.geom.window)
+            throw std::runtime_error("open_qwen36: an image block of " + std::to_string(n) + " rows does not fit " + name +
+                                     "'s " + std::to_string(k.geom.window) + "-row window");
+    const auto t0 = std::chrono::steady_clock::now();
+    timing_ = StepTiming{};
+    const size_t H = w_->hidden;
+    const uint32_t nn = static_cast<uint32_t>(n);
+    // The rows' position records keep their RoPE angles and take the block's row counts while it runs.
+    auto counts = [&](bool block) {
+        for (const auto& [name, rg] : w_->per_row_globals) {
+            xrt::bo& bo = globals_.at(name);
+            uint8_t* base = bo.map<uint8_t*>();
+            for (uint32_t t = 0; t < nn; ++t) {
+                uint64_t start = 0, valid = 0, nf = 0;
+                if (block) {
+                    bidir::rows(p0, nn, t, rg.window, &start, &valid);
+                } else {
+                    stream_patch::attn_window(p0 + t, rg.window, &start, &nf);
+                    valid = p0 + t - start;
+                }
+                const int32_t v = static_cast<int32_t>(valid), f = static_cast<int32_t>(valid ? valid : 1);
+                std::memcpy(base + (p0 + t) * rg.per_row, &v, 4);
+                std::memcpy(base + (p0 + t) * rg.per_row + 4, &f, 4);
+            }
+            bo.sync(XCL_BO_SYNC_BO_TO_DEVICE, n * rg.per_row, p0 * rg.per_row);
+        }
+    };
+    counts(true);
+    xrt::bo& xres = buffer("xres", 0);
+    std::vector<float> h(rows, rows + n * H), next(n * H);
+    size_t dispatches = 0;
+    for (int l = 0; l < nl_; ++l) {
+        const Step& st = types_[l]->program.front();
+        Kern& k = kerns_.at(st.kernel);
+        const size_t row = types_[l]->state_row;
+        xrt::bo& kv = state_[l];
+        const bool last = l + 1 == nl_;
+        for (const bidir::Step& d : bidir::layer_schedule(p0, nn, last, want_logits)) {
+            if (d.copy_to >= 0) {
+                uint8_t* m = kv.map<uint8_t*>();
+                read_back(kv, row, static_cast<size_t>(d.copy_from) * row);
+                std::memcpy(m + static_cast<size_t>(d.copy_to) * row, m + static_cast<size_t>(d.copy_from) * row, row);
+                kv.sync(XCL_BO_SYNC_BO_TO_DEVICE, row, static_cast<size_t>(d.copy_to) * row);
+            }
+            uint64_t start = 0, valid = 0;
+            bidir::rows(p0, nn, d.t, k.geom.window, &start, &valid);
+            stream_patch::attn_apply_rows(k.iw(), k.attn, start, valid, d.drain, p0 + d.t, k.geom);
+            k.instr->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            std::memcpy(xres.map<float*>(), h.data() + static_cast<size_t>(d.t) * H, H * 4);
+            xres.sync(XCL_BO_SYNC_BO_TO_DEVICE, H * 4, 0);
+            timing_.dispatch_ms += run(k, st.args, l);
+            ++dispatches;
+            if (d.keep && !last) {
+                read_back(xres, H * 4, 0);
+                std::memcpy(next.data() + static_cast<size_t>(d.t) * H, xres.map<float*>(), H * 4);
+            }
+        }
+        if (!last) std::swap(h, next);
+    }
+    counts(false);
+    pos_ += static_cast<int>(n);
+    if (want_logits) {
+        // the last layer's final dispatch left the last row's output in xres
+        for (const auto& s : w_->tail) timing_.dispatch_ms += run(kerns_.at(s.kernel), s.args, 0);
+        xrt::bo& lg = buffer("logits", 0);
+        read_back(lg, w_->vocab * 4, 0);
+        std::memcpy(logits_host_.data(), lg.map<uint8_t*>(), w_->vocab * 4);
+    }
+    timing_.total_ms = ms_since(t0);
+    log("image block: " + std::to_string(n) + " rows at [" + std::to_string(p0) + ", " + std::to_string(p0 + n) +
+        ") attending both ways, " + std::to_string(dispatches) + " layer dispatches in " +
+        std::to_string(static_cast<int>(timing_.total_ms)) + " ms");
 }
 
 void Core::write_record(size_t row, const double pos[3]) {

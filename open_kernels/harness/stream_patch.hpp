@@ -261,13 +261,8 @@ inline void moe2_apply(uint32_t* iw, const std::vector<MoePatch>& table, const u
     }
 }
 
-/// Set the cache position: the window fill reads rows [start, start + nf) (attn_window: every
-/// cached row, or the sliding window's), the new row lands at row pos, the RoPE record is ptab
-/// row pos (whose [valid | nf] counts match the same window).
-inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64_t pos,
-                       const AttnGeometry& g = AttnGeometry{}) {
-    uint64_t start, nf;
-    attn_window(pos, g.window, &start, &nf);
+/// The rows a dispatch streams when `valid` of them are real cached rows.
+inline uint64_t attn_stream_rows(uint64_t valid, const AttnGeometry& g) {
     if (g.rb > 1) {
         // The blocked walk (attn.h ATTN_BLOCK_ONLY) covers the `valid` cached rows AND the
         // new position's row in ceil((valid + 1) / rb) blocks, the last of which takes the
@@ -279,16 +274,33 @@ inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64
         // exactly `pos` -- inside the cache, and the row this very dispatch writes. At
         // rb > 2 it can be pos + rb - 2, which needs rb - 2 rows of slack above the
         // context capacity in the KV buffer.
-        const uint64_t valid = pos - start;
-        nf = g.rb * (valid / g.rb + 1) - 1;
+        return g.rb * (valid / g.rb + 1) - 1;
     }
+    return valid ? valid : 1;
+}
+
+/// The four per-dispatch words set apart: the fill streams `valid` cached rows from `start`, the
+/// new row drains to row `drain`, the record is ptab row `record` (OPEN-VISION-GEMMA3's image block).
+inline void attn_apply_rows(uint32_t* iw, const std::vector<AttnPatch>& table, uint64_t start, uint64_t valid,
+                            uint64_t drain, uint64_t record, const AttnGeometry& g = AttnGeometry{}) {
+    const uint64_t nf = attn_stream_rows(valid, g);
     for (const auto& p : table) {
         uint64_t v = p.kind == 0   ? nf * g.kv_row / 4  // a BD length is in words
-                     : p.kind == 1 ? pos * g.kv_row
-                     : p.kind == 2 ? pos * g.ptab_row
+                     : p.kind == 1 ? drain * g.kv_row
+                     : p.kind == 2 ? record * g.ptab_row
                                    : start * g.kv_row;
         iw[p.word] = static_cast<uint32_t>(v) | p.flags;
     }
+}
+
+/// Set the cache position: the window fill reads rows [start, start + nf) (attn_window: every
+/// cached row, or the sliding window's), the new row lands at row pos, the RoPE record is ptab
+/// row pos (whose [valid | nf] counts match the same window).
+inline void attn_apply(uint32_t* iw, const std::vector<AttnPatch>& table, uint64_t pos,
+                       const AttnGeometry& g = AttnGeometry{}) {
+    uint64_t start, nf;
+    attn_window(pos, g.window, &start, &nf);
+    attn_apply_rows(iw, table, start, pos - start, pos, pos, g);
 }
 
 }  // namespace stream_patch

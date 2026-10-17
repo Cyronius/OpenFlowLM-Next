@@ -13,8 +13,11 @@
 ///               are contiguous, runs the whole stack in that order and restores the row
 ///               order after the merger; the rotary table is permuted with the tokens.
 ///               Reference: open_kernels/model/replica_vit_qwen25.py.
+///   Siglip   -- an `mmproj` GGUF (llama.cpp's `clip` arch): SigLIP's learned positions,
+///               LayerNorm blocks with no rotary, full attention, GELU-tanh, `post_ln`; then
+///               Gemma 3's projector (OPEN-VISION-GEMMA3). Weights stay as the file ships them.
 ///
-/// Either way the container is bf16 with every linear pre-tiled for the closed engine's
+/// The q4nx containers are bf16 with every linear pre-tiled for the closed engine's
 /// vision_mm kernel as [n/64][k/256][64][256], zero-padded, which `untile` undoes. The
 /// output rows replace the image tokens in the LM's prompt. vit_test.cpp checks each port
 /// against its reference's fixture; the NPU version (phase B) reuses the prefill GEMM.
@@ -24,9 +27,13 @@
 #include <string>
 #include <vector>
 
+namespace open_qwen36 {
+class GgufFile;
+}
+
 namespace open_qwen36::vision {
 
-enum class VitFamily { Qwen3VL, Qwen25VL };
+enum class VitFamily { Qwen3VL, Qwen25VL, Siglip };
 
 struct VitConfig {
     VitFamily family = VitFamily::Qwen3VL;
@@ -59,6 +66,14 @@ struct VitConfig {
     /// checked against the shapes, so a wrong argument is refused rather than believed.
     static VitConfig qwen3vl_from_tensors(const std::string& vision_q4nx_path, int heads,
                                           const std::vector<int>& deepstack);
+    /// Siglip: the image edge in pixels, the projector ("gemma3") and its average-pool edge.
+    int image = 0, pool = 0;
+    std::string projector;
+    /// An mmproj GGUF's `clip.vision.*` keys, checked against its tensor shapes. Refuses a
+    /// projector other than Gemma 3's and a weight type the tower does not keep exactly.
+    static VitConfig siglip_from_gguf(const std::string& mmproj_path);
+    int grid() const { return image / patch; }                  ///< Siglip: patches per side
+    int tokens() const { return pool ? (grid() / pool) * (grid() / pool) : 0; }
     int patch_dim() const { return channels * temporal * patch * patch; }
     /// A window's edge in merge units: 112 px / 2 patches per unit / 14 px per patch = 4.
     int window_side() const { return window / merge / patch; }
@@ -70,9 +85,13 @@ struct VitConfig {
 /// those windows produce no tokens and no segment. Mirrors replica_vit_qwen25.window_index.
 void window_index(const VitConfig& cfg, int grid_h, int grid_w, std::vector<int>& index, std::vector<int>& cu);
 
-/// y = x . W^T + b, W kept as bf16 [out, in] (un-tiled), b as f32.
+/// y = x . W^T + b, W [out, in] kept in the file's own element type (bf16 or f16 in `w`, f32 in
+/// `wf`), b as f32.
 struct Linear {
+    enum class Fmt : uint8_t { Bf16, F16, F32 };
+    Fmt fmt = Fmt::Bf16;
     std::vector<uint16_t> w;
+    std::vector<float> wf;
     std::vector<float> b;
     int out = 0, in = 0;
 };
@@ -100,11 +119,23 @@ struct VitWeights {
     std::vector<float> merger_ln_w, merger_ln_b;
     Linear merger_fc1, merger_fc2;      // [4 hidden, 4 hidden], [out, 4 hidden]
     std::vector<Merger> deepstack;      // one per cfg.deepstack index, Qwen3-VL only
+    std::vector<float> post_ln_w, post_ln_b;   // Siglip
+    std::vector<float> mm_norm_w;       // Gemma 3's soft-embedding RMSNorm, stored as 1 + w
+    Linear mm_proj;                     // [out, hidden]
 };
 
 /// Read and un-tile the container, per cfg.family. ~0.85 GB resident as bf16 for the 35B,
-/// ~1.3 GB for Qwen2.5-VL-3B.
+/// ~1.3 GB for Qwen2.5-VL-3B. Siglip reads the mmproj GGUF at `path`, ~0.85 GB as f16.
 VitWeights load_vit(const std::string& vision_q4nx_path, const VitConfig& cfg);
+
+/// Siglip: an image as the processor leaves it, [channels, image, image] f32, cut into its
+/// [grid^2, channels * patch^2] patches in row-major patch order, each patch (c, y, x).
+std::vector<float> siglip_patches(const VitConfig& cfg, const float* chw);
+
+/// Siglip + Gemma 3's projector: patches from siglip_patches in, [tokens, out] out. `tower`,
+/// when given, receives the tower's own [grid^2, hidden] output, before the projector.
+std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, const float* patches,
+                                  std::vector<float>* tower = nullptr);
 
 /// pixels: [grid_h * grid_w, patch_dim] f32 in the processor's patch order (merge-block
 /// major, as modeling_*_image.cpp's reorder_patches emits). Returns

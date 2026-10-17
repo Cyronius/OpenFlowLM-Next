@@ -20,7 +20,9 @@
 #endif
 
 #include "nlohmann/json.hpp"
+#include "open_qwen36/gguf_file.hpp"
 #include "open_qwen36/q4nx_file.hpp"
+#include "open_qwen36/weight_file.hpp"
 
 namespace open_qwen36::vision {
 namespace {
@@ -179,6 +181,16 @@ void widen_avx2(const uint16_t* wr, float* wd, int in) {
 }
 
 #if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,f16c")))
+#endif
+void widen_f16_avx2(const uint16_t* wr, float* wd, int in) {
+    int k = 0;
+    for (; k + 8 <= in; k += 8)
+        _mm256_storeu_ps(wd + k, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(wr + k))));
+    for (; k < in; ++k) wd[k] = fp16_to_f32(wr[k]);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
 __attribute__((target("avx2,fma")))
 #endif
 float dot_avx2(const float* a, const float* b, int n) {
@@ -226,7 +238,36 @@ bool have_avx2() {
     return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
 #endif
 }
+
+bool have_f16c() {
+#if defined(_MSC_VER)
+    int r[4];
+    __cpuid(r, 1);
+    return have_avx2() && (r[2] & (1 << 29)) != 0;     // ECX bit 29
+#else
+    return have_avx2() && __builtin_cpu_supports("f16c");
+#endif
+}
 #endif  // OFLM_VIT_AVX2
+
+/// One weight row as f32, from whichever element type the Linear keeps.
+inline void widen_row(const Linear& L, int o, float* wd) {
+    const size_t off = static_cast<size_t>(o) * L.in;
+    if (L.fmt == Linear::Fmt::F32) {
+        std::memcpy(wd, L.wf.data() + off, static_cast<size_t>(L.in) * 4);
+        return;
+    }
+    const uint16_t* wr = L.w.data() + off;
+#if defined(OFLM_VIT_AVX2)
+    static const bool avx2 = have_avx2(), f16c = have_f16c();
+    if (L.fmt == Linear::Fmt::F16 && f16c) { widen_f16_avx2(wr, wd, L.in); return; }
+    if (L.fmt == Linear::Fmt::Bf16 && avx2) { widen_avx2(wr, wd, L.in); return; }
+#endif
+    if (L.fmt == Linear::Fmt::F16)
+        for (int k = 0; k < L.in; ++k) wd[k] = fp16_to_f32(wr[k]);
+    else
+        for (int k = 0; k < L.in; ++k) wd[k] = bf16f(wr[k]);
+}
 
 /// The two shapes attention() reduces over, vectorised where the CPU allows it.
 /// The scalar forms use four accumulators rather than one: the old single chain
@@ -282,14 +323,7 @@ void linear(const float* x, int n, const Linear& L, float* y, int ldy = 0) {
 #pragma omp for schedule(dynamic, 4)
             for (int blk = 0; blk < nb; ++blk) {
                 const int o0 = blk * 8, oc = std::min(8, out - o0);
-                for (int j = 0; j < oc; ++j) {
-                    const uint16_t* wr = L.w.data() + static_cast<size_t>(o0 + j) * in;
-                    float* wd = wf.data() + static_cast<size_t>(j) * in;
-#if defined(OFLM_VIT_AVX2)
-                    if (avx2) { widen_avx2(wr, wd, in); continue; }
-#endif
-                    for (int k = 0; k < in; ++k) wd[k] = bf16f(wr[k]);
-                }
+                for (int j = 0; j < oc; ++j) widen_row(L, o0 + j, wf.data() + static_cast<size_t>(j) * in);
                 for (int i = p; i < p + pn; ++i) {
                     const float* xr = x + static_cast<size_t>(i) * in;
                     float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -781,6 +815,146 @@ VitConfig VitConfig::qwen25_from_config_text(const std::string& config_json) {
     return c;
 }
 
+VitConfig VitConfig::siglip_from_gguf(const std::string& path) {
+    GgufFile g(path);
+    auto fail = [&](const std::string& why) -> void { throw std::runtime_error("vit: " + path + ": " + why); };
+    if (!g.kv_has("general.architecture") || g.kv_str("general.architecture") != "clip")
+        fail("not an mmproj GGUF (general.architecture is not clip)");
+    const std::string proj = g.kv_has("clip.projector_type") ? g.kv_str("clip.projector_type") : "";
+    if (proj != "gemma3")
+        fail("projector '" + proj + "' - the Siglip tower here feeds Gemma 3's projector only");
+    if (g.kv_has("clip.use_gelu") && g.kv_str("clip.use_gelu") != "1") fail("clip.use_gelu is off - SigLIP's MLP is GELU-tanh");
+    for (const char* k : {"clip.vision.image_mean", "clip.vision.image_std"})
+        if (g.kv_has(k) && g.kv_str(k) != "0.500000,0.500000,0.500000")
+            fail(std::string(k) + " is " + g.kv_str(k) + "; the app normalises every Gemma 3 image with 0.5 / 0.5");
+    VitConfig c;
+    c.family = VitFamily::Siglip;
+    c.projector = proj;
+    auto u = [&](const char* k) { return static_cast<int>(g.kv_u64(std::string("clip.vision.") + k)); };
+    c.image = u("image_size");
+    c.patch = u("patch_size");
+    c.hidden = u("embedding_length");
+    c.inter = u("feed_forward_length");
+    c.depth = u("block_count");
+    c.heads = u("attention.head_count");
+    c.out = u("projection_dim");
+    c.eps = static_cast<float>(g.kv_f64("clip.vision.attention.layer_norm_epsilon"));
+    c.temporal = 1;
+    c.merge = 1;
+    c.channels = 3;
+    // llama.cpp writes the pooling factor only when it is not Gemma 3's 4
+    c.pool = g.kv_has("clip.vision.projector.scale_factor") ? u("projector.scale_factor") : 4;
+    if (c.heads <= 0 || c.hidden % c.heads) fail("embedding_length is not a multiple of head_count");
+    c.head_dim = c.hidden / c.heads;
+    if (c.patch <= 0 || c.image % c.patch || c.pool <= 0 || c.grid() % c.pool)
+        fail("a " + std::to_string(c.image) + " px image does not cut into " + std::to_string(c.patch) +
+             " px patches that pool by " + std::to_string(c.pool));
+    c.npos = c.grid() * c.grid();
+    auto dims = [&](const std::string& n, std::vector<uint64_t> want) {
+        if (!g.has(n)) fail("no tensor " + n);
+        if (g.tensor(n).dims != want) fail(n + " is not the shape the clip.vision keys say");
+    };
+    const uint64_t H = c.hidden, P = c.patch;
+    dims("v.patch_embd.weight", {P, P, 3, H});
+    dims("v.position_embd.weight", {H, static_cast<uint64_t>(c.npos)});
+    dims("mm.input_projection.weight", {static_cast<uint64_t>(c.out), H});
+    dims("mm.soft_emb_norm.weight", {H});
+    for (int b = 0; b < c.depth; ++b) dims("v.blk." + std::to_string(b) + ".attn_q.weight", {H, H});
+    if (g.has("v.blk." + std::to_string(c.depth) + ".attn_q.weight")) fail("more blocks than clip.vision.block_count");
+    const size_t want = 7 + 16 * static_cast<size_t>(c.depth);
+    if (g.tensor_count() != want)
+        fail("holds " + std::to_string(g.tensor_count()) + " tensors where this tower reads " + std::to_string(want) +
+             " - list its names before loading it");
+    return c;
+}
+
+namespace {
+
+/// A [out, in] matrix with its element type kept: f16 and bf16 bits as stored, f32 as f32.
+Linear gguf_matrix(const GgufFile& g, const std::string& wname, int out, int in, bool transposed = false) {
+    const GgufFile::TensorInfo& t = g.tensor(wname);
+    const size_t n = static_cast<size_t>(out) * in;
+    if (t.nvalues() != n)
+        throw std::runtime_error("vit: " + wname + " holds " + std::to_string(t.nvalues()) + " values where [" +
+                                 std::to_string(out) + ", " + std::to_string(in) + "] needs " + std::to_string(n));
+    size_t nb = 0;
+    const uint8_t* p = g.raw(wname, &nb);
+    Linear L;
+    L.out = out;
+    L.in = in;
+    // `transposed`: the file holds [in, out] (y = x W), so element (o, i) sits at i * out + o
+    auto at = [&](size_t o, size_t i) { return transposed ? i * out + o : o * in + i; };
+    if (t.type == GgufFile::Type::F16 || t.type == GgufFile::Type::BF16) {
+        L.fmt = t.type == GgufFile::Type::F16 ? Linear::Fmt::F16 : Linear::Fmt::Bf16;
+        const uint16_t* s = reinterpret_cast<const uint16_t*>(p);
+        L.w.resize(n);
+        for (size_t o = 0; o < static_cast<size_t>(out); ++o)
+            for (size_t i = 0; i < static_cast<size_t>(in); ++i) L.w[o * in + i] = s[at(o, i)];
+    } else if (t.type == GgufFile::Type::F32) {
+        L.fmt = Linear::Fmt::F32;
+        const float* s = reinterpret_cast<const float*>(p);
+        L.wf.resize(n);
+        for (size_t o = 0; o < static_cast<size_t>(out); ++o)
+            for (size_t i = 0; i < static_cast<size_t>(in); ++i) L.wf[o * in + i] = s[at(o, i)];
+    } else {
+        throw std::runtime_error("vit: " + wname + " is " + GgufFile::type_name(t.type) +
+                                 "; the tower keeps F16 / BF16 / F32 weights exactly as shipped - install the "
+                                 "model's F16 mmproj");
+    }
+    L.b.assign(static_cast<size_t>(out), 0.f);
+    return L;
+}
+
+std::vector<float> gguf_vec(const GgufFile& g, const std::string& name, size_t n) {
+    std::vector<float> v = g.f32(name);
+    if (v.size() != n)
+        throw std::runtime_error("vit: " + name + " has " + std::to_string(v.size()) + " values, the tower wants " +
+                                 std::to_string(n));
+    return v;
+}
+
+VitWeights load_vit_siglip(const std::string& path, const VitConfig& cfg) {
+    GgufFile g(path);
+    const int H = cfg.hidden, I = cfg.inter;
+    VitWeights w;
+    w.patch = gguf_matrix(g, "v.patch_embd.weight", H, cfg.patch_dim());
+    w.patch.b = gguf_vec(g, "v.patch_embd.bias", H);
+    w.pos = gguf_vec(g, "v.position_embd.weight", static_cast<size_t>(cfg.npos) * H);
+    w.blocks.resize(cfg.depth);
+    for (int i = 0; i < cfg.depth; ++i) {
+        const std::string b = "v.blk." + std::to_string(i) + ".";
+        VitBlock& B = w.blocks[i];
+        B.ln1_w = gguf_vec(g, b + "ln1.weight", H);
+        B.ln1_b = gguf_vec(g, b + "ln1.bias", H);
+        B.ln2_w = gguf_vec(g, b + "ln2.weight", H);
+        B.ln2_b = gguf_vec(g, b + "ln2.bias", H);
+        const std::pair<const char*, Linear*> attn[] = {{"attn_q", &B.q}, {"attn_k", &B.k}, {"attn_v", &B.v}, {"attn_out", &B.proj}};
+        for (const auto& [name, L] : attn) {
+            *L = gguf_matrix(g, b + name + ".weight", H, H);
+            L->b = gguf_vec(g, b + name + ".bias", H);
+        }
+        // Converters disagree on which of ffn_up / ffn_down is SigLIP's fc1, so the shapes decide.
+        const std::string up = b + "ffn_up", down = b + "ffn_down";
+        const std::vector<uint64_t> to_inter = {static_cast<uint64_t>(H), static_cast<uint64_t>(I)};
+        const bool up_first = g.tensor(up + ".weight").dims == to_inter, down_first = g.tensor(down + ".weight").dims == to_inter;
+        if (up_first == down_first)
+            throw std::runtime_error("vit: " + b + "ffn_up / ffn_down: " + (up_first ? "both" : "neither") +
+                                     " map hidden to the MLP width");
+        const std::string fc1 = up_first ? up : down, fc2 = up_first ? down : up;
+        B.fc1 = gguf_matrix(g, fc1 + ".weight", I, H);
+        B.fc1.b = gguf_vec(g, fc1 + ".bias", I);
+        B.fc2 = gguf_matrix(g, fc2 + ".weight", H, I);
+        B.fc2.b = gguf_vec(g, fc2 + ".bias", H);
+    }
+    w.post_ln_w = gguf_vec(g, "v.post_ln.weight", H);
+    w.post_ln_b = gguf_vec(g, "v.post_ln.bias", H);
+    w.mm_norm_w = gguf_vec(g, "mm.soft_emb_norm.weight", H);
+    w.mm_proj = gguf_matrix(g, "mm.input_projection.weight", cfg.out, H, true);
+    return w;
+}
+
+}  // namespace
+
 static VitWeights load_vit_qwen25(const Q4nxFile& f, const VitConfig& cfg) {
     const std::string p = "model.visual.";
     const int H = cfg.hidden, I = cfg.inter, M = cfg.merge * cfg.merge;
@@ -832,6 +1006,7 @@ static VitWeights load_vit_qwen25(const Q4nxFile& f, const VitConfig& cfg) {
 }
 
 VitWeights load_vit(const std::string& path, const VitConfig& cfg) {
+    if (cfg.family == VitFamily::Siglip) return load_vit_siglip(path, cfg);
     Q4nxFile f(path);
     if (cfg.family == VitFamily::Qwen25VL) return load_vit_qwen25(f, cfg);
     const std::string p = "model.visual.";
@@ -1053,11 +1228,87 @@ std::vector<float> vit_forward_deepstack(const VitConfig& cfg, const VitWeights&
             throw std::runtime_error("vit: the windowed tower has no deepstack path");
         return forward_qwen25(cfg, w, pixels, gh, gw);
     }
+    if (cfg.family == VitFamily::Siglip) {
+        if (deep) deep->clear();
+        if (gh != cfg.grid() || gw != cfg.grid())
+            throw std::runtime_error("vit: the Siglip tower takes its own " + std::to_string(cfg.grid()) + " x " +
+                                     std::to_string(cfg.grid()) + " patch grid");
+        return siglip_forward(cfg, w, pixels);
+    }
     return forward_qwen3vl(cfg, w, pixels, gh, gw, deep);
 }
 
 std::vector<float> vit_forward(const VitConfig& cfg, const VitWeights& w, const float* pixels, int gh, int gw) {
     return vit_forward_deepstack(cfg, w, pixels, gh, gw, nullptr);
+}
+
+std::vector<float> siglip_patches(const VitConfig& cfg, const float* chw) {
+    const int G = cfg.grid(), P = cfg.patch, C = cfg.channels, S = cfg.image;
+    const size_t pd = static_cast<size_t>(C) * P * P;
+    std::vector<float> out(static_cast<size_t>(G) * G * pd);
+#pragma omp parallel for schedule(static)
+    for (int py = 0; py < G; ++py)
+        for (int px = 0; px < G; ++px) {
+            float* d = out.data() + (static_cast<size_t>(py) * G + px) * pd;
+            for (int c = 0; c < C; ++c)
+                for (int ky = 0; ky < P; ++ky)
+                    std::memcpy(d + (static_cast<size_t>(c) * P + ky) * P,
+                                chw + (static_cast<size_t>(c) * S + static_cast<size_t>(py) * P + ky) * S +
+                                    static_cast<size_t>(px) * P,
+                                sizeof(float) * P);
+        }
+    return out;
+}
+
+std::vector<float> siglip_forward(const VitConfig& cfg, const VitWeights& w, const float* patches,
+                                  std::vector<float>* tower) {
+    if (cfg.family != VitFamily::Siglip) throw std::runtime_error("vit: siglip_forward on another tower");
+    if (cfg.head_dim > 128) throw std::runtime_error("vit: head_dim > 128 does not fit the attention accumulator");
+    const int G = cfg.grid(), n = G * G, H = cfg.hidden;
+    std::vector<float> x(static_cast<size_t>(n) * H);
+    linear(patches, n, w.patch, x.data());
+    for (size_t i = 0; i < x.size(); ++i) x[i] += w.pos[i];
+    // SigLIP has no rotary embedding: identity tables make attention()'s rotation exact
+    const std::vector<float> cs(static_cast<size_t>(n) * cfg.head_dim, 1.0f), sn(cs.size(), 0.0f);
+    std::vector<float> hn(x.size()), qkv(static_cast<size_t>(n) * 3 * H), att(x.size()), tmp(x.size());
+    std::vector<float> ff(static_cast<size_t>(n) * cfg.inter);
+    const std::vector<int> whole = {0, n};
+    for (const VitBlock& B : w.blocks) {
+        layer_norm(x.data(), n, H, B.ln1_w.data(), B.ln1_b.data(), cfg.eps, hn.data());
+        linear(hn.data(), n, B.q, qkv.data(), 3 * H);
+        linear(hn.data(), n, B.k, qkv.data() + H, 3 * H);
+        linear(hn.data(), n, B.v, qkv.data() + 2 * H, 3 * H);
+        attention(cfg, qkv.data(), n, cs, sn, whole, att.data());
+        linear(att.data(), n, B.proj, tmp.data());
+        for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
+        layer_norm(x.data(), n, H, B.ln2_w.data(), B.ln2_b.data(), cfg.eps, hn.data());
+        linear(hn.data(), n, B.fc1, ff.data());
+#pragma omp parallel for schedule(static)
+        for (int i = 0; i < static_cast<int>(ff.size()); ++i) ff[i] = gelu_tanh(ff[i]);
+        linear(ff.data(), n, B.fc2, tmp.data());
+        for (size_t i = 0; i < x.size(); ++i) x[i] += tmp[i];
+    }
+    layer_norm(x.data(), n, H, w.post_ln_w.data(), w.post_ln_b.data(), cfg.eps, hn.data());
+    if (tower) *tower = hn;
+    // Gemma 3's projector: pool the patch grid by `pool`, RMSNorm (the file stores 1 + w), project
+    const int T = G / cfg.pool, k = cfg.pool;
+    std::vector<float> pooled(static_cast<size_t>(T) * T * H), normed(pooled.size());
+#pragma omp parallel for schedule(static)
+    for (int ty = 0; ty < T; ++ty)
+        for (int tx = 0; tx < T; ++tx) {
+            float* d = pooled.data() + (static_cast<size_t>(ty) * T + tx) * H;
+            for (int c = 0; c < H; ++c) {
+                double s = 0;
+                for (int i = 0; i < k; ++i)
+                    for (int j = 0; j < k; ++j)
+                        s += hn[(static_cast<size_t>(ty * k + i) * G + tx * k + j) * H + c];
+                d[c] = static_cast<float>(s / (k * k));
+            }
+        }
+    rms_norm(pooled.data(), T * T, H, w.mm_norm_w.data(), cfg.eps, normed.data());
+    std::vector<float> y(static_cast<size_t>(T) * T * cfg.out);
+    linear(normed.data(), T * T, w.mm_proj, y.data());
+    return y;
 }
 
 }  // namespace open_qwen36::vision

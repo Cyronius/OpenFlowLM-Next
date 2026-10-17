@@ -46,8 +46,8 @@ std::string rd_str(const uint8_t*& p, const uint8_t* end) {
 }
 
 // One metadata value, recorded as its string form (the config derivation's
-// view); arrays and other composite values are skipped wholesale.
-void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& out) {
+// view); an array keeps its length in `len`, and its values only when it is a short numeric one.
+void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& out, uint64_t* len = nullptr) {
     switch (t) {
         case 0: out = std::to_string(rd_u8(p)); break;
         case 1: out = std::to_string(static_cast<int8_t>(rd_u8(p))); break;
@@ -58,13 +58,16 @@ void rd_value(uint32_t t, const uint8_t*& p, const uint8_t* end, std::string& ou
         case 6: { float v; std::memcpy(&v, p, 4); p += 4; out = std::to_string(v); break; }
         case 7: out = std::to_string(rd_u8(p) != 0); break;
         case 8: out = rd_str(p, end); break;
-        case 9: {  // array: element type + count; the values are skipped
+        case 9: {  // array: element type + count
             const uint32_t et = rd_u32(p);
             const uint64_t n = rd_u64(p);
+            const bool keep = n <= 64 && et != 8 && et != 9;
             for (uint64_t i = 0; i < n; ++i) {
-                std::string skip;
-                rd_value(et, p, end, skip);
+                std::string v;
+                rd_value(et, p, end, v);
+                if (keep) out += (i ? "," : "") + v;
             }
+            if (len) *len = n;
             break;
         }
         case 10: out = std::to_string(rd_u64(p)); break;
@@ -169,8 +172,10 @@ GgufFile::GgufFile(const std::string& path) : path_(path) {
             const std::string key = rd_str(q, end);
             const uint32_t t = rd_u32(q);
             std::string v;
-            rd_value(t, q, end, v);
+            uint64_t len = 0;
+            rd_value(t, q, end, v, &len);
             meta_[key] = v;
+            if (t == 9) arr_len_[key] = len;
         }
         for (uint64_t i = 0; i < ntensors; ++i) {
             const std::string name = rd_str(q, end);

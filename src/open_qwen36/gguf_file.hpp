@@ -78,6 +78,13 @@ public:
     std::string kv_str(const std::string& key) const;
     uint64_t kv_u64(const std::string& key) const;
     double kv_f64(const std::string& key) const;
+    /// An array key's element count (0 when absent); kv_str has its values comma-joined when it
+    /// is numeric and at most 64 long, and "" otherwise.
+    uint64_t kv_array_len(const std::string& key) const {
+        const auto it = arr_len_.find(key);
+        return it == arr_len_.end() ? 0 : it->second;
+    }
+    size_t tensor_count() const { return tensors_.size(); }
 
     static const char* type_name(Type t);
 
@@ -89,6 +96,7 @@ private:
     std::map<std::string, TensorInfo> tensors_;
     mutable std::map<std::string, TensorMeta> meta_cache_;  // row-major shapes, built on demand
     std::map<std::string, std::string> meta_;       // everything as strings (the derivation's view)
+    std::map<std::string, uint64_t> arr_len_;       // array keys: their element counts
 #ifdef _WIN32
     void* file_ = nullptr;
     void* mapping_ = nullptr;
