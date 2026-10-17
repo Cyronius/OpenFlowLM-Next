@@ -21,8 +21,14 @@ The first 100 devtest sentences; the German run stopped at 67 when its 15-minute
 
 The 4-bit engine scores about 0.9 chrF below the 8-bit reference on both pairs. At this sample
 size that is within noise (both intervals include zero), and the loss is under about 2.3 chrF.
-Not covered: other pairs, the reverse direction, the Q4_K_M and Q6_K files (oflm-add picks
-Q4_K_M from this repo by default), COMET or any human judgment.
+
+The Q4_K_M file, which oflm-add picks from this repo by default, requantized the same way:
+en -> zh 39.07 on the same 100 sentences, -0.45 [-2.18, +1.26] against llama.cpp on Q8_0 and
++0.44 [-1.37, +2.35] against the Q8_0 file on the NPU. Only 1 and 2 of its 100 outputs match
+those two runs exactly, against 17 between the two Q8_0 runs.
+
+Not covered: other pairs, the reverse direction, German on Q4_K_M, the Q6_K file, COMET or any
+human judgment.
 
     python flores_chrf.py gen --url http://127.0.0.1:52633 --model hy-mt2-flash:1.8b \
         --flores <flores200_dataset/devtest> --n 100 --out open.jsonl

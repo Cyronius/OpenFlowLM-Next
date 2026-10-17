@@ -1076,7 +1076,7 @@ engine -- the open one has no vision path.
 
 ### OPEN-FAMILY-HUNYUAN: HunYuan dense on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/dense.py`, `spec.py`, `designs/attn/attn.h`, `designs/dense/dx.py`, `utilities/q4nx-build`, `src/open_qwen36/pools.cpp`, `src/common/AutoModel/modeling_hunyuan.cpp`, `utilities/oflm-add`)
-**Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`, or the official `tencent/Hy-MT2-1.8B-GGUF`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B and 1.8B layouts are unit-tested in `tests/test_hunyuan.py`, the 1.8B's padded tied head in `src/open_qwen36/gguf_pack_test.cpp` (GGUF-PACK), and the installer's HunYuan names in `utilities/oflm-add/tests/test_gguf_installer.py`
+**Test category:** manual (needs the NPU and a converted `Hy-MT2-7B-NPU2`, or the official `tencent/Hy-MT2-1.8B-GGUF`); the derivation, the folded RoPE base, the post-RoPE norm order and the 7B and 1.8B layouts are unit-tested in `tests/test_hunyuan.py`, the 1.8B's padded tied head in `src/open_qwen36/gguf_pack_test.cpp` (GGUF-PACK), the slice's GGUF reader in `tests/test_gguf_src.py`, and the installer's HunYuan names and install plan in `utilities/oflm-add/tests/test_gguf_installer.py`
 
 A HunYuan V1 dense model (Hy-MT2-7B and the Hunyuan-{1.8,4,7}B dense line:
 Llama 3.1 8B's GQA shape, eps 1e-5, silu FFN, a tied head) shall run on the
@@ -1111,7 +1111,8 @@ only (this tree has no closed HunYuan engine).
 - The manifest carries `vocab 128192` / `real_vocab 128166` while `hf_config_check.vocab_size` is 128167; a config.json carrying the padded count is refused by name (`manifest_test`, fixture 4). The tokenizer defines ids 0..128165 (127957 vocab entries plus 209 added tokens, no gaps), so 128166 is its id count; config.json's 128167 is the embedding table's row count, one row no token maps to, inherited from the base model.
 - 1.8B: the GGUF derivation agrees with `config.json`'s on every shape field; the file stores the folded RoPE base (11158840.0) and eps as f32, so those two differ in the last bits and the kernel set links by the `config.json` derivation, which is what oflm-add hashes. Geometry: `E_A 1024`, `PTAB_ROW 1024` (one element), four attention cores of four heads at `RB 4`, `LMHEAD_BANDS 1888`, and the nested `gguf` manifest packs the head with `std_perm_gguf`.
 - GGUF-PACK: a tied 40-row Q8_0 head packed into a 64-row plan comes back on the requantized q4_1 grid with rows 40..63 exactly zero, and a 32-row plan is refused.
-- oflm-add: `Hy-MT2-1.8B-GGUF` derives family `hunyuan` and tag `hy-mt2:1.8b`; GGUF arch `hunyuan-dense` and `model_type` `hunyuan_v1_dense` resolve to `hunyuan`; a `generation_config.json` `eos_token_id` that is a single int is written to `tokenizer_config.json` as a one-element list (the engine exits at load without the list); a file named `Q4_K_M` that carries Q6_K tensors (llama.cpp's `_M` mix) passes the tensor check.
+- The slice's GGUF reader, `model/gguf_src.py`, builds both the NPU pools and the fp64 reference, so a slice cannot see it drift from the engine. It packs Q4_1 and Q4_0 byte for byte as `gguf_pool.pack_q4_pool`; it packs a 40-row tied Q8_0 head exactly as the same head with 24 zero rows appended, each value within 0.52 of a step of the Q8_0 value, on fp16 scales; it refuses a plan narrower than the file, a band or more wider, or of another width; and it reads an embedding row as the exact Q8_0 values.
+- oflm-add: `Hy-MT2-1.8B-GGUF` derives family `hunyuan` and tag `hy-mt2:1.8b`; GGUF arch `hunyuan-dense` and `model_type` `hunyuan_v1_dense` resolve to `hunyuan`; a `generation_config.json` `eos_token_id` that is a single int is written to `tokenizer_config.json` as a one-element list (the engine exits at load without the list); a file named `Q4_K_M` that carries Q6_K tensors (llama.cpp's `_M` mix) passes the tensor check. With no GGUF-direct kernel set linked (no official entry and no `--open-kernels`), the dry-run plan says the install stops and names `--open-kernels`; `--open-kernels <set>`, or `--xclbin-from <model>` naming an installed set, whose manifest has a `gguf` section plans the GGUF-direct install.
 
 **Procedure (manual):**
 1. Convert: `q4nx-build -i tencent/Hy-MT2-7B-GGUF` (the Q8_0 file requantizes to q4_1 with the least loss), then copy the HF repo's `config.json` beside the resulting `model.q4nx` / `tokenizer.json`.
@@ -1129,9 +1130,9 @@ token 33 (231 ms/token, 4.3 tok/s). `qk_norm_post_rope=True` is now in the
 catalogue. Details: `.claude/plans/open-kernels-phase-e-hunyuan.md`.
 
 **Procedure (manual), Hy-MT2-1.8B from its GGUF:**
-1. Export `recipes/specs/hy-mt2-1.8b.json` (the base repo's `config.json` derivation) with `export_qwen36_kernels.py`; `--only dx_f32,lm_head_q4_f32,ln` is the GGUF-direct part.
-2. Install: `oflm-add` on a directory holding `Hy-MT2-1.8B-Q8_0.gguf`, the GGUF repo's `README.md` (its `base_model` names `tencent/Hy-MT2-1.8B`) and the base repo's `config.json` / tokenizer files / `chat_template.jinja`, with `--open-kernels <set>` until an official registry entry ships the set; `--tag hy-mt2-flash:1.8b` maps FLM's tag onto the same install.
-3. Slice: `model/make_decode.py --model-dir <installed dir> --layers 8 --tokens 8 --token 120000` (it reads `model.gguf` through `model/gguf_src.py`, the engine's pack law), the harness on `run_decode.cfg`, then `compare_decode.py --tokens 8`.
+1. Export `recipes/specs/hy-mt2-1.8b.json` (the base repo's `config.json` derivation) with `export_qwen36_kernels.py`. `--only dx_f32,lm_head_q4_f32,ln` builds only the GGUF-direct part, enough for step 3's harness but not for the engine: `Engine::find_kernels` refuses a set missing any file its manifest names, so serve from the full export.
+2. Install: `oflm-add` on a directory holding `Hy-MT2-1.8B-Q8_0.gguf`, the GGUF repo's `README.md` (its `base_model` names `tencent/Hy-MT2-1.8B`) and the base repo's `config.json` / tokenizer files / `chat_template.jinja`, with `--open-kernels <set>` until an official registry entry ships the set; `--tag hy-mt2-flash:1.8b` maps FLM's tag onto the same install. Without `--open-kernels` (or `--xclbin-from` naming an installed set) the install stops. `oflm-add tencent/Hy-MT2-1.8B-GGUF --open-kernels <set>` installs the remote repo's default file, Q4_K_M.
+3. Slice: `model/make_decode.py --model-dir <installed dir> --layers 8 --tokens 8` (it reads `model.gguf` through `model/gguf_src.py`, the engine's pack law, Q4_0 / Q4_1 / Q8_0 files only, and starts from `config.json`'s `bos_token_id`, 120000), the harness on `run_decode.cfg`, then `compare_decode.py --tokens 8`.
 4. Serve: `oflm serve hy-mt2-flash:1.8b` and `oflm-test --llm --model hy-mt2-flash:1.8b --gen-lim 256`.
 5. Quality: `utilities/quant-compare/flores_chrf.py gen` against `oflm serve` and against `llama-server` on the same Q8_0 file, then `score` (chrF against the FLORES-200 devtest references, and how often the two engines agree).
 
@@ -1141,11 +1142,19 @@ Windows + XRT):** the 8-layer slice over 8 positions from id 120000 passed -- lo
 (maxrel <= 1.3e-2), and the head's padded rows 120818..120831 exactly zero. The full export
 (every set, the catalogue point included) builds; `dx`, `dx_f32` and `dx_attn` each leave 16
 bytes of program memory. Through `oflm serve` all 32 layers load from the GGUF, a German
-translation instruction comes back token for token the same as llama.cpp's on the same Q8_0 file,
-and `oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES-200 devtest, greedy, chrF against
-llama.cpp on the Q8_0 file: en->zh 38.63 vs 39.52 (100 sentences), en->de 58.47 vs 59.35 (67,
-the 15-minute budget): about 0.9 below on both, and both paired-bootstrap 95% intervals
-include zero (`utilities/quant-compare/README.md`). Speed was not measured.
+translation instruction comes back in German, and `oflm-test --llm --gen-lim 256` passes 5 of 5.
+FLORES-200 devtest, greedy, chrF against llama.cpp on the Q8_0 file: en->zh 38.63 vs 39.52 (100
+sentences), en->de 58.47 vs 59.35 (67, the 15-minute budget): about 0.9 below on both, and both
+paired-bootstrap 95% intervals include zero (`utilities/quant-compare/README.md`). Speed was not
+measured.
+
+**Result 2026-10-16 (Hy-MT2-1.8B, `Hy-MT2-1.8B-Q4_K_M.gguf`, the file oflm-add picks by
+default):** installed from `tencent/Hy-MT2-1.8B-GGUF` by `oflm-add --open-kernels` (192 Q4_K and
+33 Q6_K tensors, the tied head among the Q6_K, all requantized to q4_1 at load), served from the
+same kernel set; `oflm-test --llm --gen-lim 256` passes 5 of 5. FLORES en->zh on the same 100
+sentences: 39.07, against 38.63 for the Q8_0 file on the NPU and 39.52 for llama.cpp on the Q8_0
+file; both paired 95% intervals include zero. No slice (the reader takes Q4_0 / Q4_1 / Q8_0
+only), no German.
 
 ### OPEN-FAMILY-GRANITE: IBM Granite on the dense recipe
 **Applies to:** openflowlm-next (`open_kernels/recipes/spec.py`, `dense.py`, `families.py`, `src/open_qwen36/`, `utilities/q4nx-build`)
