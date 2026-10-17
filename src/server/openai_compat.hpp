@@ -616,6 +616,12 @@ inline json images_request(const json& req, const std::vector<int>& sizes, int a
 // specs/server-api: SERVER-RERANK, SERVER-EMBED-QWEN3.
 // ---------------------------------------------------------------------------------
 
+// A parsed non-negative number is stored unsigned, so 0 must be checked on both kinds.
+inline bool positive_integer(const json& v) {
+    if (!v.is_number_integer()) return false;
+    return v.is_number_unsigned() ? v.get<uint64_t>() > 0 : v.get<long long>() > 0;
+}
+
 struct RerankRequest {
     std::string model;                     ///< empty when the request omits it
     std::string query;
@@ -654,7 +660,7 @@ inline json rerank_request(const json& req, RerankRequest& out) {
     }
     if (has("top_n")) {
         const json& v = req.at("top_n");
-        if (!v.is_number_integer() || (!v.is_number_unsigned() && v.get<long long>() < 1))
+        if (!positive_integer(v))
             return invalid_param("top_n", "top_n must be a positive integer.");
         out.top_n = v.get<size_t>();
     }
@@ -686,7 +692,7 @@ inline json resolve_dimensions(const json& req, size_t min_dims, size_t full_dim
     out = 0;
     if (!req.contains("dimensions") || req.at("dimensions").is_null()) return json();
     const json& v = req.at("dimensions");
-    if (!v.is_number_integer() || (!v.is_number_unsigned() && v.get<long long>() < 1))
+    if (!positive_integer(v))
         return invalid_param("dimensions", "dimensions must be a positive integer.");
     const size_t d = v.get<size_t>();
     if (full_dims != 0 && d == full_dims) return json();

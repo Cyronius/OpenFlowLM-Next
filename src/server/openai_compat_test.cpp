@@ -741,6 +741,8 @@ static void test_rerank() {
     json j = good;
     j["top_n"] = 0;
     refused(j, "top_n", "top_n 0");
+    refused(json::parse(R"({"query":"q","documents":["a","b","c"],"top_n":0})"), "top_n", "a parsed top_n 0");
+    refused(json::parse(R"({"query":"q","documents":["a"],"top_n":-2})"), "top_n", "a parsed top_n -2");
     j["top_n"] = "2";
     refused(j, "top_n", "a string top_n");
     j = good;
@@ -825,6 +827,8 @@ static void test_embed_qwen3() {
     for (const json& bad : {json(16), json(2048), json(0), json(-5), json("256"), json(256.5)})
         ok(openai_compat::status_for(openai_compat::resolve_dimensions(json{{"dimensions", bad}}, 32, 1024, d)) == 400,
            "dimensions " + bad.dump() + " is refused with 400");
+    ok(openai_compat::status_for(openai_compat::resolve_dimensions(json::parse(R"({"dimensions":0})"), 32, 1024, d)) == 400,
+       "a parsed dimensions 0 is refused with 400");
     ok(openai_compat::status_for(openai_compat::resolve_dimensions(json{{"dimensions", 256}}, 0, 768, d)) == 400,
        "a fixed-width model refuses dimensions 256");
     ok(openai_compat::resolve_dimensions(json{{"dimensions", 768}}, 0, 768, d).is_null() && d == 0,
