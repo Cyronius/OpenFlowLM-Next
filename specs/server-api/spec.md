@@ -523,7 +523,8 @@ the kernel set.
 
 **Verification (manual):** with the embedder installed and served, the card's example (two queries
 under `prompt_name: query`, two documents under `document`) gives a 2x2 similarity matrix within
-0.02 of the CPU reference's (transformers, fp32, the official safetensors); `oflm-test --embedding
+0.02 of the CPU reference's (transformers, fp32, the official safetensors;
+`utilities/qwen3-embed-ref` `embed fp32` / `rerank fp32`); `oflm-test --embedding
 --model qwen3-embedding:0.6b` passes.
 
 **Result 2026-10-17** (mradermacher's i1-Q4_1 file, served beside the reranker). The served matrix
@@ -574,7 +575,8 @@ endpoint holds the NPU lock like `/v1/embeddings`.
 
 **Verification (manual):** the card's example -- "What is the capital of China?" against its two
 documents -- ranks the Beijing document first, and every score is within 0.02 of the CPU
-reference's (transformers, fp32, the official safetensors); `oflm-test --rerank --model
+reference's (transformers, fp32, the official safetensors;
+`utilities/qwen3-embed-ref` `embed fp32` / `rerank fp32`); `oflm-test --rerank --model
 qwen3-reranker:0.6b` passes (its R1-R8 checks are unit-tested against a fake server in
 `utilities/oflm-test/tests/test_rerank_checks.py`).
 

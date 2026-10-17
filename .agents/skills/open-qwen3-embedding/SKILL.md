@@ -50,9 +50,9 @@ byte-identical (`CallableDesign.as_mlir()`).
 ## Install and serve
 
 ```sh
-python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Embedding-0.6B-i1-GGUF --tag qwen3-embedding:0.6b \
+python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Embedding-0.6B-i1-GGUF \
     --open-kernels <set> --no-xclbin
-python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Reranker-0.6B-i1-GGUF --tag qwen3-reranker:0.6b \
+python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Reranker-0.6B-i1-GGUF \
     --open-kernels <set> --no-xclbin
 oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b
 oflm-test --embedding --model qwen3-embedding:0.6b
@@ -60,7 +60,7 @@ oflm-test --rerank --model qwen3-reranker:0.6b
 ```
 
 The 4B pair installs the same way from `mradermacher/Qwen3-{Embedding,Reranker}-4B-i1-GGUF` with
-`--tag qwen3-{embedding,reranker}:4b` and each model's own set. A new size needs its tag line in
+each model's own set. A new size needs its tag line in
 `all_embedding_model.hpp` (the table routes by tag), so a rebuild of oflm.
 
 These are imatrix `i1-Q4_1` files: every matmul packs exactly. Qwen's own embedder GGUF
@@ -68,8 +68,11 @@ These are imatrix `i1-Q4_1` files: every matmul packs exactly. Qwen's own embedd
 too, but the engine requantizes Q8_0 to plain min/max q4_1, and on the embedder that moved the
 model card's similarity matrix by up to 0.13 (the i1-Q4_1 file: 0.03).
 
-`--tag` is needed: `derive_tag` reads mradermacher's `-i1` (and ggml-org's `-Q8_0`) as part of the
-size and would register `qwen3-embedding:0.6b-i1`.
+No `--tag` is needed: for these two families `oflm-add` drops a repo's `-i1` / `-Q8_0` suffix from
+the size, so the tag is the exact one the server's table routes (`qwen3-embedding:0.6b`).
+
+CPU references and the NPU comparison behind the specs' manual procedures:
+`utilities/qwen3-embed-ref/qwen3_ref.py` (see its README).
 
 ## Traps
 
