@@ -485,7 +485,14 @@ xrt::hw_context& Core::context(const std::string& name) {
     fs::path p = fs::path(cfg_.kernel_dir) / w_->contexts.at(name);
     if (!fs::exists(p)) throw std::runtime_error("open_qwen36: missing kernel " + p.string());
     xrt::xclbin xcl(p.string());
-    auto uuid = dev_->register_xclbin(xcl);
+    xrt::uuid uuid;
+    try {
+        uuid = dev_->register_xclbin(xcl);
+    } catch (const std::exception& e) {
+        // an embedder and a reranker on one kernel set are two Cores registering the same xclbin
+        uuid = xcl.get_uuid();
+        std::fprintf(stderr, "open_qwen36: register_xclbin(%s): %s; using its uuid as registered\n", p.string().c_str(), e.what());
+    }
     auto ctx = std::make_unique<xrt::hw_context>(*dev_, uuid);
     return *(ctxs_[name] = std::move(ctx));
 }

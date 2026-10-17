@@ -58,8 +58,15 @@ Removed: none.
 
 ## Weights
 
-Embedder: `Qwen/Qwen3-Embedding-0.6B-GGUF`, `Qwen3-Embedding-0.6B-Q8_0.gguf` (Qwen's own file; its
-only other file is F16). Q8_0 is requantized to q4_1 at load. Reranker: `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`
-(llama.cpp's organisation; there is no official reranker GGUF), same treatment. The CPU references
-also score mradermacher's imatrix `i1-Q4_1` files, which pack exactly; see the report for which is
-better and why the Q8_0 files are the default.
+Default: mradermacher's imatrix `i1-Q4_1` files of both models
+(`mradermacher/Qwen3-Embedding-0.6B-i1-GGUF`, `mradermacher/Qwen3-Reranker-0.6B-i1-GGUF`). Every
+matmul is Q4_1, which the engine packs exactly; `token_embd` is Q6_K, read exactly on the host;
+the metadata is right (pooling last, `add_eos_token` true on the embedder).
+
+Also tried: Qwen's own embedder file (`Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0; its only other file
+is F16) and ggml-org's reranker Q8_0 (llama.cpp's organisation; no official reranker GGUF exists).
+Both load, but the engine requantizes Q8_0 to plain min/max q4_1, and on the embedder that moved the
+model card's similarity matrix by up to 0.13 against 0.03 for the i1-Q4_1 file (both on the NPU).
+`oflm-add` had refused the i1 files for their Q6_K `token_embd`; it now accepts them.
+Several community files carry wrong metadata (`add_eos_token` false, no pooling type) and are
+not usable: PeterAM4's and Mungert's.

@@ -33,14 +33,20 @@ python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/q
 ## Install and serve
 
 ```sh
-python utilities/oflm-add/oflm-add.py Qwen/Qwen3-Embedding-0.6B-GGUF --open-kernels <set> --no-xclbin
-python utilities/oflm-add/oflm-add.py ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF --tag qwen3-reranker:0.6b \
+python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Embedding-0.6B-i1-GGUF --tag qwen3-embedding:0.6b \
+    --open-kernels <set> --no-xclbin
+python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Reranker-0.6B-i1-GGUF --tag qwen3-reranker:0.6b \
     --open-kernels <set> --no-xclbin
 oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b
 ```
 
-`--tag` is needed for ggml-org's repo: `derive_tag` reads its `-Q8_0` (and mradermacher's `-i1`)
-as part of the size and would register `qwen3-reranker:0.6b-q8`.
+These are imatrix `i1-Q4_1` files: every matmul packs exactly. Qwen's own embedder GGUF
+(`Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 and F16 only) and ggml-org's reranker Q8_0 install and run
+too, but the engine requantizes Q8_0 to plain min/max q4_1, and on the embedder that moved the
+model card's similarity matrix by up to 0.13 (the i1-Q4_1 file: 0.03).
+
+`--tag` is needed: `derive_tag` reads mradermacher's `-i1` (and ggml-org's `-Q8_0`) as part of the
+size and would register `qwen3-embedding:0.6b-i1`.
 
 ## Traps
 
@@ -60,5 +66,6 @@ as part of the size and would register `qwen3-reranker:0.6b-q8`.
   not used.
 - **Prefill is one token per step** for any GGUF kernel set (the block route is off for f32-scale
   pools), so a long passage costs a decode step per token.
-- `oflm-add`'s GGUF check refuses a file whose `token_embd` is Q6_K beside Q4_1 matmuls (the
-  imatrix `i1-Q4_1` files), which is why the Q8_0 files are the install default.
+- **The official embedder GGUF's README names `Qwen/Qwen3-0.6B-Base`**, whose `config.json` has the
+  chat vocabulary (151936). `oflm-add` takes no `config.json` from the base chain for these two
+  families; the engine derives the checked fields from the GGUF.
