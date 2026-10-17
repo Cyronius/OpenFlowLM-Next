@@ -31,6 +31,7 @@ using json = nlohmann::ordered_json;
 struct CancellationToken;
 class Tokenizer;
 namespace open_diffusion { class Engine; }
+namespace open_tts { class TtsEngine; }
 
 ///@brief One file part of a /v1/images/edits form (`image`, `image[]` or `mask`)
 struct ImageUpload {
@@ -115,6 +116,11 @@ public:
                                       std::function<void(const json&)> send_response,
                                       StreamResponseCallback send_streaming_response,
                                       std::shared_ptr<CancellationToken> cancellation_token = nullptr);
+    // specs/server-api: SERVER-SPEECH-*
+    void handle_openai_audio_speech(const json& request,
+                                    std::function<void(const json&)> send_response,
+                                    StreamResponseCallback send_streaming_response,
+                                    std::shared_ptr<CancellationToken> cancellation_token = nullptr);
     void handle_openai_completion(const json& request,
         std::function<void(const json&)> send_response,
         StreamResponseCallback send_streaming_response,
@@ -139,6 +145,8 @@ private:
     ModelLoad ensure_model_loaded(const std::string& model_tag, bool model_field_present = false);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
+    /// --tts 1: load the text-to-speech model at startup; exits naming why it cannot.
+    void ensure_tts_model_loaded(const std::string& model_tag);
     /// current_model_tag is written by ensure_model_loaded() on the NPU-queued
     /// routes and read by GET /api/ps, which is not queued. These two are the
     /// only way either side touches it across threads (#135).
@@ -179,6 +187,9 @@ private:
     bool modelscope;
     bool asr;
     std::string asr_model_tag;
+    std::unique_ptr<open_tts::TtsEngine> tts_engine;
+    bool tts;
+    std::string tts_model_tag;          // --ttsmodel, resolved; what a speech request must name
     bool embed;
     // Which embedding model --embed loads, from --embeddingmodel.
     // Empty means embed-gemma:300m, so an existing command line keeps

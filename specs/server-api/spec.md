@@ -470,3 +470,103 @@ embedding and Whisper engines do.
 3. `oflm serve llama3.2:1b --imagegen 1 --imagemodel llama3.2:3b` exits with `--imagemodel: model
    'llama3.2:3b' is not an image model`; `oflm run llama3.2:1b --imagegen 1` is refused.
 4. Not measured: resident beside `--asr 1` and `--embed 1` as well.
+
+## The Speech API
+
+`POST /v1/audio/speech` is OpenAI's text-to-speech endpoint over the open TTS engine
+(`src/open_tts`, Kokoro-82M on the host CPU; its own requirements are in
+`specs/open-tts/spec.md`). The handler is `rest_handler.cpp`'s `handle_openai_audio_speech`; the
+request rules are one pure function, `openai_compat::speech_request()`, unit-tested in
+`src/server/openai_compat_test.cpp`. The integration tests are `specs/server-api/tests/test_speech_api.py`
+(a server started with `--tts 1`, no NPU needed) and `oflm-test --tts`.
+
+### SERVER-SPEECH: a request gets the audio file it asked for
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/server/server.cpp`)
+**Verification:** test
+**Test:** `specs/server-api/tests/test_speech_api.py`
+
+The response body is the file itself, not JSON: a RIFF WAV (24 kHz, mono, 16-bit PCM) with
+`Content-Type: audio/wav`, or with `response_format: "pcm"` the same samples without the header
+(`audio/pcm`, little-endian), as OpenAI's `pcm` is. WAV is the default where OpenAI's is mp3,
+because this build has no mp3 encoder. The responder sends a handler's
+`openai_compat::binary_body()` as raw bytes with its content type; every other response stays
+JSON. The same request gives the same bytes (OPEN-TTS-NOISE).
+
+**Acceptance criteria:**
+- `{"model": "kokoro:82m", "input": <a sentence>, "voice": "af_heart"}` returns 200, a WAV of
+  24000 Hz mono 16-bit, longer than half a second and not silent.
+- The same request twice gives identical bytes; `response_format: "pcm"` gives exactly the WAV's
+  bytes after its 44-byte header.
+- `speed: 2.0` gives audio at most 0.8 of the length `speed: 1.0` gives.
+
+### SERVER-SPEECH-PARAMS: OpenAI's fields, and a refused one names itself
+**Applies to:** openflowlm-next (`src/server/openai_compat.hpp`)
+**Verification:** test
+**Test:** `src/server/openai_compat_test.cpp` (`test_speech_request`, the `openai_compat` CTest);
+`specs/server-api/tests/test_speech_api.py` (on the wire)
+
+- `input`: required, a string with text in it, at most 4096 characters (OpenAI's limit; counted
+  in characters, not bytes).
+- `voice`: required, a string (SERVER-SPEECH-VOICES says which).
+- `response_format`: `wav` (default) or `pcm`. `mp3`, `opus`, `aac` and `flac` are 400
+  `not_implemented`, naming the missing encoder; anything else is 400 `invalid_value`.
+- `speed`: a number in [0.25, 4.0], default 1, OpenAI's range.
+- `stream_format`: `audio` (the whole file) is accepted, `sse` is 400 `not_implemented`.
+- `instructions`: a string, accepted and ignored with a log line: Kokoro takes none.
+- `model`: see SERVER-SPEECH-LOAD. `null` is the same as leaving a field out; unknown fields are
+  ignored.
+
+**Acceptance criteria:** each of the above, as `test_speech_request` asserts them: a 400 whose
+`param` names the field, `code` `not_implemented` for the formats and `sse`, and acceptance at the
+edges (4096 characters, 4096 two-byte characters, speed 0.25 and 4).
+
+### SERVER-SPEECH-VOICES: the installed English voices, by Kokoro's name or OpenAI's
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/open_tts/tts_engine.cpp`)
+**Verification:** test
+**Test:** `specs/server-api/tests/test_speech_api.py`
+
+A voice is one of the installed `voices/<name>.safetensors` (`af_heart`, `bm_george`, ...). Kokoro
+names several of its voices after OpenAI's (`af_alloy`, `af_nova`, `am_echo`, `am_onyx`,
+`bm_fable`), so a bare name resolves to the one installed voice ending in `_<name>`: `alloy` is
+`af_alloy`. A name that matches none, or more than one, is a 400 on `voice` listing the voices.
+Voices for other languages (`j*`, `z*`, `e*`, ...) are a 400 `not_implemented`: the phonemizer is
+English only.
+
+**Acceptance criteria:**
+- `voice: "alloy"` gives the same bytes as `voice: "af_alloy"`.
+- `voice: "no_such_voice"` is a 400 with `param == "voice"` whose message lists `af_heart`.
+
+### SERVER-SPEECH-LOAD: --tts 1 loads it, and it is not a chat model
+**Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/include/utils/vm_args.hpp`, `src/include/model_list.hpp`)
+**Verification:** test (the wire) and manual (startup)
+**Test:** `specs/server-api/tests/test_speech_api.py`
+
+`oflm serve [<chat model>] --tts 1 [--ttsmodel <tag>]` loads the TTS model at startup (default
+`kokoro:82m`); the engine is host-only, so it sits beside any chat, ASR, embedding or image model
+and is never swapped. A `--ttsmodel` that is not in the registry, or whose entry is not
+`"tts": true`, stops the server at startup naming why, before anything is downloaded; `--ttsmodel`
+without `--tts 1` is refused; both flags are serve-only. A request's `model` must name the
+loaded TTS model: `tts-1` and any other tag are 400 `model_not_found` (SERVER-MODEL-IDENTITY), and
+an omitted `model` is the loaded one. A server started without `--tts 1` answers 400
+`model_not_found` naming `--tts 1`. `/v1/models` lists the TTS model; `/api/tags`, which chat
+clients read, does not; a chat request naming it is refused as not a chat model.
+
+**Acceptance criteria:**
+- `"model": "tts-1"` and `"model": "oflm-test-no-such-model:0b"` are 400 `model_not_found`; the
+  next request for the loaded model is a 200.
+- `/v1/models` lists `kokoro:82m` and `/api/tags` does not.
+
+**Verification (manual):** `oflm serve --tts 1 --ttsmodel llama3.2:1b` exits with
+`--ttsmodel llama3.2:1b is not a text-to-speech model`; `oflm run llama3.2:1b --tts 1` is refused.
+
+### SERVER-SPEECH-QUEUE: one synthesis at a time, in the NPU queue
+**Applies to:** openflowlm-next (`src/server/server.cpp` `requires_npu_access`)
+**Verification:** manual
+
+A speech request runs on the CPU, but it takes the same queue as the NPU routes. Two reasons:
+on this platform busy CPU cores slow a concurrent NPU job 2-3x (they share the package power
+budget, measured 2026-09-20), and two syntheses at once would each get half the cores. So a
+speech request waits behind chat, embeddings and images, and they wait behind it.
+
+**Verification (manual):** with a chat model loaded, send a long speech request and a chat
+request together: the log shows `NPU busy, request queued` for the second, and both answer 200.

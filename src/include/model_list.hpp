@@ -173,6 +173,8 @@ class model_list {
                 if (model_type == "whisper-v3") continue;
                 else if (model_type == "flux2-klein") continue;   // not a chat model (/v1/models lists it)
                 for (const auto& [size, model_info] : model_subset.items()) {
+                    // text to speech is not a chat model either (/v1/models lists it, SERVER-SPEECH-LOAD)
+                    if (model_info.is_object() && model_info.value("tts", false)) continue;
                     nlohmann::json model_entry = {
                         {"name", model_type + ":" + size},
                         {"model", model_type + ":" + size},

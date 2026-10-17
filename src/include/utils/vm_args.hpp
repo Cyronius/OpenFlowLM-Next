@@ -56,6 +56,7 @@ inline void print_help(po::options_description& general) {
     std::cout << "\toflm serve llama3.2:1b --asr 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --embed 1" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --imagegen 1" << std::endl;
+    std::cout << "\toflm serve llama3.2:1b --tts 1 --ttsmodel kokoro:82m" << std::endl;
     std::cout << "\toflm serve llama3.2:1b --modelscope 1" << std::endl;
     std::cout << "\toflm serve qwen3vl-it:4b --img-pre-resize 1" << std::endl;
     std::cout << "\toflm bench granite:3b -i utilities/bench-configs/bench-1k.json" << std::endl;
@@ -100,6 +101,10 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
             ("imagemodel", po::value<std::string>(&parsed_args.image_model)->default_value(""),
              "The image model a request naming none gets, and --imagegen 1 loads "
              "(for serve command; default: flux2-klein:4b)")
+            ("tts", po::value<bool>(&parsed_args.tts)->default_value(0),
+             "Load the text-to-speech model for POST /v1/audio/speech (for serve command)")
+            ("ttsmodel", po::value<std::string>(&parsed_args.tts_model)->default_value(""),
+             "Which text-to-speech model --tts 1 loads (for serve command; default: kokoro:82m)")
             ("host", po::value<std::string>(&parsed_args.host)->default_value("127.0.0.1"), 
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 
@@ -265,6 +270,8 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                     {"host", "The host option is only supported with the serve command!"},
                     {"imagegen", "--imagegen is only supported with the serve command!"},
                     {"imagemodel", "--imagemodel is only supported with the serve command!"},
+                    {"tts", "--tts is only supported with the serve command!"},
+                    {"ttsmodel", "--ttsmodel is only supported with the serve command!"},
                 };
                 for (const auto& [opt, message] : serve_only) {
                     if (parsed_args.command == "port" && std::string(opt) == "port") {

@@ -1827,6 +1827,135 @@ def extract_tokenizer_from_gguf(gguf_path, target, force=False):
     return written
 
 
+# ---------------------------------------------------------------- text to speech (Kokoro)
+
+KOKORO_FAMILY = "kokoro"
+KOKORO_WEIGHTS = ("kokoro-v1_0.safetensors", "model.safetensors")
+# American and British English voices: the open phonemizer is English only.
+KOKORO_VOICE_RE = re.compile(r"^voices/([ab][fm]_[a-z]+)\.safetensors$")
+# misaki's lexicons (Apache-2.0), fetched from its PyPI wheel at install time and pinned by hash,
+# so the repository never carries them.
+MISAKI_WHEEL = "misaki-0.9.4-py3-none-any.whl"
+MISAKI_LEXICONS = {
+    "us_gold.json": "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f",
+    "us_silver.json": "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475",
+    "gb_gold.json": "29e62f4b60261c88f7f3c2c7811ca3825978948090b72d2b27d565b729282f71",
+    "gb_silver.json": "48131e2d92ccc41655f4543e87e0f938e71463eb5a54be7f0693bb712ebb6bce",
+}
+
+
+def kokoro_config_ok(cfg):
+    """Problems that keep a config.json off the open Kokoro engine (v1.0's geometry only)."""
+    if not isinstance(cfg, dict):
+        return ["no config.json"]
+    want = {"hidden_dim": 512, "style_dim": 128, "n_layer": 3, "max_dur": 50, "n_token": 178, "n_mels": 80}
+    bad = [f"{k}={cfg.get(k)!r} (want {v})" for k, v in want.items() if cfg.get(k) != v]
+    ist = cfg.get("istftnet") or {}
+    if ist.get("upsample_rates") != [10, 6] or ist.get("gen_istft_n_fft") != 20 or ist.get("gen_istft_hop_size") != 5:
+        bad.append("istftnet is not v1.0's (upsample_rates [10, 6], n_fft 20, hop 5)")
+    if (cfg.get("plbert") or {}).get("hidden_size") != 768:
+        bad.append("plbert hidden_size is not 768")
+    if not isinstance(cfg.get("vocab"), dict):
+        bad.append("no vocab")
+    return bad
+
+
+def fetch_misaki_lexicons(target, force=False, quiet=False):
+    """lexicon/{us,gb}_{gold,silver}.json from misaki's wheel on PyPI, each checked against its pinned hash."""
+    import zipfile
+    lex = target / "lexicon"
+    lex.mkdir(parents=True, exist_ok=True)
+    missing = [n for n in MISAKI_LEXICONS if force or not (lex / n).is_file()]
+    if missing:
+        meta = _http_get_json("https://pypi.org/pypi/misaki/0.9.4/json")
+        files = {u["filename"]: u for u in meta.get("urls", [])}
+        if MISAKI_WHEEL not in files:
+            raise SystemExit(f"PyPI lists no {MISAKI_WHEEL}; cannot fetch the lexicons")
+        with tempfile.TemporaryDirectory(prefix="oflm-add-misaki-") as tmp:
+            whl = Path(tmp) / MISAKI_WHEEL
+            if not quiet:
+                log(f"Downloading {MISAKI_WHEEL} (the English lexicons, Apache-2.0)...")
+            download_file(files[MISAKI_WHEEL]["url"], whl, expected_size=files[MISAKI_WHEEL].get("size"),
+                          expected_sha=(files[MISAKI_WHEEL].get("digests") or {}).get("sha256"), quiet=True,
+                          headers={})
+            with zipfile.ZipFile(whl) as z:
+                for n in missing:
+                    (lex / n).write_bytes(z.read(f"misaki/data/{n}"))
+    for n, sha in MISAKI_LEXICONS.items():
+        got = hashlib.sha256((lex / n).read_bytes()).hexdigest()
+        if got != sha:
+            raise SystemExit(f"lexicon/{n} has sha256 {got}, not misaki 0.9.4's {sha}")
+    return [f"lexicon/{n}" for n in MISAKI_LEXICONS]
+
+
+def install_kokoro(args, repo, local_dir, modelscope, dir_name, system_registry):
+    """Kokoro-82M for the open TTS engine: config.json, a safetensors checkpoint read as it is
+    (weight norm folded at load), the English voice tables, and misaki's lexicons."""
+    if local_dir:
+        names = [str(p.relative_to(local_dir)).replace("\\", "/") for p in local_dir.rglob("*") if p.is_file()]
+    else:
+        names = [e.get("path") for e in hf_file_tree(repo) if e.get("type", "file") == "file" and e.get("path")]
+    weights = next((w for w in KOKORO_WEIGHTS if w in names), None)
+    if weights is None:
+        pth = [n for n in names if n.endswith(".pth")]
+        hint = (" It ships the PyTorch checkpoint (" + ", ".join(pth) + "), which the engine does not read; "
+                "install mlx-community/Kokoro-82M-bf16 instead, whose tensors are the same values in safetensors."
+                if pth else "")
+        raise SystemExit(f"No Kokoro safetensors ({' or '.join(KOKORO_WEIGHTS)}) in {repo}.{hint}")
+    voices = sorted(n for n in names if KOKORO_VOICE_RE.match(n))
+    if not voices:
+        raise SystemExit(f"No English voices (voices/a*_*.safetensors, voices/b*_*.safetensors) in {repo}")
+    tag = args.tag or f"{KOKORO_FAMILY}:82m"
+    if ":" not in tag:
+        raise SystemExit(f"--tag {tag}: a tag has the form <name>:<size>, e.g. {KOKORO_FAMILY}:82m")
+    target = models_root_dir(args.models_root) / dir_name
+    user_list = user_registry_path(args.config)
+    if args.dry_run:
+        print(f"repo directory : {dir_name}")
+        print(f"tag            : {tag}")
+        print(f"details.family : {KOKORO_FAMILY} (open TTS engine, host only)")
+        print(f"weights        : {weights} (safetensors, read as stored)")
+        print(f"voices         : {len(voices)} English ({', '.join(v[7:-12] for v in voices[:4])}, ...)")
+        print(f"lexicons       : misaki 0.9.4 from PyPI -> lexicon/")
+        print(f"models dir     : {target}")
+        print(f"registry       : {user_list}")
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    want = ["config.json", weights] + voices
+    if local_dir:
+        got = copy_from_dir(local_dir, target, force=args.force, want=want)
+    else:
+        cache = hf_cache_snapshot(repo)
+        got = copy_from_dir(cache, target, force=args.force, want=want) if cache else []
+        got += fetch_assets(repo, target, modelscope, verify=not args.no_verify, force=args.force,
+                            quiet=args.quiet, want=[f for f in want if f not in got])
+    missing = [f for f in want if not (target / f).is_file()]
+    if missing:
+        raise SystemExit(f"Kokoro install is missing {missing}")
+    problems = kokoro_config_ok(load_json(target / "config.json"))
+    if problems:
+        raise SystemExit("Not Kokoro-82M v1.0, the only geometry the open TTS engine runs: " + "; ".join(problems))
+    with open(target / weights, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+    dtypes = sorted({v["dtype"] for k, v in header.items() if k != "__metadata__"})
+    if not set(dtypes) <= {"F32", "F16", "BF16"}:
+        raise SystemExit(f"{weights} holds {dtypes}; the TTS engine reads F32, F16 or BF16")
+    files = want + fetch_misaki_lexicons(target, force=args.force, quiet=args.quiet)
+    entry = build_entry(None, dir_name, files, sum((target / f).stat().st_size for f in files))
+    for k in ("max_prefill_len",):
+        entry.pop(k, None)
+    entry.update({"tts": True, "default_context_length": 512, "oflm_min_version": "0.1.0",
+                  "label": ["audio", "text-to-speech"], "footprint": round(entry["size"] / 1e9, 2)})
+    entry["details"] = {"format": "safetensors", "family": KOKORO_FAMILY, "think": False, "parameter_size": "82M",
+                        "quantization_level": "/".join(dtypes), "weights": "safetensors"}
+    register(user_list, tag, entry, system_registry)
+    log(f"[INFO] Registered tag '{tag}' in {user_list}")
+    print()
+    print(f"Done: {dir_name} installed to {target}")
+    print(f"Run:  oflm serve --tts 1 --ttsmodel {tag}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Install a pre-converted OFLM (Q4NX) model and register it with OpenFlowLM.",
@@ -1862,6 +1991,12 @@ def main():
         dir_name = repo.split("/")[-1]
     if not dir_name:
         raise SystemExit("Could not determine a model directory name from the repo.")
+
+    # Kokoro text to speech has its own install: no kernels, no tokenizer, voices and lexicons instead.
+    if (args.family or "").lower() == KOKORO_FAMILY or (args.family is None and "kokoro" in dir_name.lower()):
+        system_list = Path(args.system_list) if args.system_list else find_system_model_list()
+        install_kokoro(args, repo, local_dir, modelscope, dir_name, load_json(system_list))
+        return
 
     # ---- scan the repo for a compatible GGUF (the GGUF-direct path): a repo
     # that carries llama.cpp-style weights installs one of them as model.gguf;

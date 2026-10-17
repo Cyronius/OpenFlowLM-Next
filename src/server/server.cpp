@@ -196,7 +196,10 @@ bool requires_npu_access(const std::string& method, const std::string& path) {
                path == "/v1/completions" ||
                path == "/api/embeddings" ||
                path == "/v1/images/generations" ||
-               path == "/v1/images/edits";
+               path == "/v1/images/edits" ||
+               // CPU-only, but queued with the rest: busy cores slow a concurrent NPU
+               // job 2-3x (shared package power), and two syntheses would split the cores.
+               path == "/v1/audio/speech";
     }
     return false;
 }
@@ -826,10 +829,17 @@ bool WebServer::handle_request(http::request<http::string_body>& req,
                 openai_compat::status_for(response_data, static_cast<int>(status)));
 
             response_ref.result(status);
-            // A body can echo request text (e.g. a model tag), which is not
-            // guaranteed valid UTF-8.
-            response_ref.body() = safe_dump(response_data);
-            response_ref.set(http::field::content_type, "application/json");
+            if (openai_compat::is_binary_body(response_data)) {
+                // a file, e.g. /v1/audio/speech's WAV (SERVER-SPEECH-FORMATS)
+                const auto& bytes = response_data.at("oflm_binary_body").get_binary();
+                response_ref.body().assign(bytes.begin(), bytes.end());
+                response_ref.set(http::field::content_type, response_data.at("content_type").get<std::string>());
+            } else {
+                // A body can echo request text (e.g. a model tag), which is not
+                // guaranteed valid UTF-8.
+                response_ref.body() = safe_dump(response_data);
+                response_ref.set(http::field::content_type, "application/json");
+            }
             response_ref.prepare_payload();
             cancellation_token->complete();
             unregister_active_request(request_id);
@@ -1130,6 +1140,20 @@ std::unique_ptr<WebServer> create_lm_server(model_list& models, ModelDownloader&
                     if (it != parts.end()) request_json[field] = it->second.content;
                 }
                 rest_handler->handle_openai_audio_transcriptions(request_json, send_response, send_streaming_response, cancellation_token);
+        });
+
+    // SERVER-SPEECH-*: text to speech over the open TTS engine
+    server->register_handler("POST", "/v1/audio/speech",
+        [rest_handler](const http::request<http::string_body>& req,
+            std::function<void(const json&)> send_response,
+            std::function<void(const json&, bool)> send_streaming_response,
+            std::shared_ptr<HttpSession> session,
+            std::shared_ptr<CancellationToken> cancellation_token) {
+                json request_json;
+                if (!req.body().empty()) {
+                    request_json = json::parse(req.body());
+                }
+                rest_handler->handle_openai_audio_speech(request_json, send_response, send_streaming_response, cancellation_token);
         });
 
     // SERVER-IMAGES-*: the OpenAI Images API over the open diffusion engine

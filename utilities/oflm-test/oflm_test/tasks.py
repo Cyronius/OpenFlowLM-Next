@@ -2151,3 +2151,172 @@ class TranscriptionTask(BaseTestTask):
                 time.sleep(1)
         print(f"Transcription tests complete. Saved to {self.csv_filename}")
         return self.result
+
+
+class SpeechTask(BaseTestTask):
+    """
+    /v1/audio/speech (SERVER-SPEECH-*), on a server started with --tts 1.
+
+      S1 Speaks         A sentence comes back as a 24 kHz 16-bit mono WAV, at least half a
+                        second long and not silent.
+      S2 Repeats        The same request twice gives the same bytes.
+      S3 Raw PCM        response_format pcm is the WAV's samples without the header.
+      S4 Speed          speed 2.0 gives audio clearly shorter than speed 1.0.
+      S5 Refuses        No input, an unknown voice, and mp3 (no encoder here) are each a 400
+                        naming the field.
+      S6 Round trip     With a Whisper model loaded as well (--asr 1), the speech transcribes
+                        back to the sentence (word error rate, SOFT-FAIL above 0.25).
+
+    Talks raw HTTP: the body is audio, and for S5 the status is the assertion.
+    """
+
+    SUITE_NAME = "speech"
+    SENTENCE = "The quick brown fox jumps over the lazy dog, and then it runs into the forest."
+
+    def __init__(self, base_url, backend_os="linux", model_filter: list[str] | None = None):
+        super().__init__(base_url, backend_os, model_filter=model_filter)
+        self.csv_filename = self.get_csv_filename("speech")
+        self.model_tag = (model_filter or ["kokoro:82m"])[0]
+        self.voice = "af_heart"
+
+    def _speech(self, **fields):
+        body = {"model": self.model_tag, "input": self.SENTENCE, "voice": self.voice}
+        body.update(fields)
+        body = {k: v for k, v in body.items() if v is not None}
+        request = urllib.request.Request(f"{self.base_url}/audio/speech", data=json.dumps(body).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                return response.status, response.headers.get("Content-Type", ""), response.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Type", ""), e.read()
+
+    @staticmethod
+    def _wav(data: bytes):
+        """(rate, channels, bits, samples as a list of ints) of a PCM WAV, or None."""
+        import struct
+        if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+            return None
+        pos, fmt, pcm = 12, None, None
+        while pos + 8 <= len(data):
+            cid, size = data[pos:pos + 4], struct.unpack("<I", data[pos + 4:pos + 8])[0]
+            if cid == b"fmt ":
+                fmt = struct.unpack("<HHIIHH", data[pos + 8:pos + 24])
+            elif cid == b"data":
+                pcm = data[pos + 8:pos + 8 + size]
+            pos += 8 + size + (size & 1)
+        if not fmt or pcm is None or fmt[0] != 1:
+            return None
+        n = len(pcm) // 2
+        return fmt[2], fmt[1], fmt[5], list(struct.unpack(f"<{n}h", pcm[:2 * n]))
+
+    def _probe_speaks(self):
+        status, ctype, data = self._speech(response_format="wav")
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {data[:200]!r}"), status, ""
+        w = self._wav(data)
+        if w is None:
+            return ("FAIL", f"not a PCM WAV (Content-Type {ctype}, {len(data)} bytes)"), status, ""
+        rate, ch, bits, s = w
+        secs = len(s) / rate if rate else 0
+        rms = (sum(x * x for x in s) / max(len(s), 1)) ** 0.5 / 32768
+        self._wav_bytes, self._samples = data, s
+        if (rate, ch, bits) != (24000, 1, 16):
+            return ("FAIL", f"{rate} Hz, {ch} channel(s), {bits}-bit; want 24000 Hz mono 16-bit"), status, ""
+        if secs < 0.5 or rms < 0.005:
+            return ("FAIL", f"{secs:.2f} s at RMS {rms:.4f}: too short or silent"), status, ""
+        if "audio/wav" not in ctype:
+            return ("SOFT-FAIL", f"Content-Type {ctype}, not audio/wav"), status, ""
+        return ("PASS", f"{secs:.2f} s, RMS {rms:.3f}"), status, f"{len(data)} bytes"
+
+    def _probe_repeats(self):
+        status, _, data = self._speech(response_format="wav")
+        if status != 200:
+            return ("FAIL", f"HTTP {status}"), status, ""
+        same = data == getattr(self, "_wav_bytes", None)
+        return (("PASS", "byte-identical") if same else ("FAIL", "the second answer differs")), status, ""
+
+    def _probe_pcm(self):
+        status, ctype, data = self._speech(response_format="pcm")
+        if status != 200:
+            return ("FAIL", f"HTTP {status}: {data[:200]!r}"), status, ""
+        wav = getattr(self, "_wav_bytes", b"")
+        if len(wav) < 44 or data != wav[44:]:
+            return ("FAIL", f"{len(data)} bytes that are not the WAV's {len(wav) - 44} sample bytes"), status, ""
+        return ("PASS", f"{len(data)} bytes, Content-Type {ctype}"), status, ""
+
+    def _probe_speed(self):
+        status, _, data = self._speech(response_format="wav", speed=2.0)
+        w = self._wav(data) if status == 200 else None
+        if w is None:
+            return ("FAIL", f"HTTP {status}"), status, ""
+        fast, slow = len(w[3]), len(getattr(self, "_samples", []))
+        if not slow or fast > 0.8 * slow:
+            return ("FAIL", f"speed 2.0 gave {fast} samples against {slow} at 1.0"), status, ""
+        return ("PASS", f"{fast / slow:.2f} of the speed-1.0 length"), status, ""
+
+    def _probe_refuses(self):
+        notes = []
+        for what, fields, param in (("no input", {"input": None}, "input"),
+                                    ("unknown voice", {"voice": "no_such_voice"}, "voice"),
+                                    ("mp3", {"response_format": "mp3"}, "response_format")):
+            status, _, data = self._speech(**fields)
+            try:
+                err = json.loads(data.decode("utf-8")).get("error", {})
+            except (ValueError, UnicodeDecodeError, AttributeError):
+                err = {}
+            if status != 400 or err.get("param") != param:
+                return ("FAIL", f"{what}: HTTP {status}, param {err.get('param')!r}"), status, ""
+            notes.append(f"{what} -> 400 {err.get('code')}")
+        return ("PASS", "; ".join(notes)), 400, ""
+
+    @staticmethod
+    def _wer(ref: str, hyp: str) -> float:
+        norm = lambda t: re.sub(r"[^a-z' ]", " ", t.lower()).split()
+        r, h = norm(ref), norm(hyp)
+        d = list(range(len(h) + 1))
+        for i in range(1, len(r) + 1):
+            prev, d[0] = d[0], i
+            for j in range(1, len(h) + 1):
+                cur = min(d[j] + 1, d[j - 1] + 1, prev + (r[i - 1] != h[j - 1]))
+                prev, d[j] = d[j], cur
+        return d[len(h)] / max(len(r), 1)
+
+    def _probe_round_trip(self):
+        wav = getattr(self, "_wav_bytes", None)
+        if not wav:
+            return ("SKIPPED", "no audio from S1"), "N/A", ""
+        boundary = "----oflmtest" + uuid.uuid4().hex
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-v3:turbo\r\n"
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n"
+                f"Content-Type: audio/wav\r\n\r\n").encode("utf-8") + wav + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        request = urllib.request.Request(f"{self.base_url}/audio/transcriptions", data=body,
+                                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                said = json.loads(response.read().decode("utf-8")).get("text", "")
+        except urllib.error.HTTPError as e:
+            return ("SKIPPED", f"no speech recognition here (HTTP {e.code}); start with --asr 1 too"), e.code, ""
+        wer = self._wer(self.SENTENCE, said)
+        verdict = "PASS" if wer <= 0.25 else "SOFT-FAIL"
+        return (verdict, f"WER {wer:.2f}: {said.strip()[:120]}"), 200, said[:200]
+
+    def run(self):
+        with open(self.csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Model", "Check", "Status", "Detail", "Verdict"])
+            print(f"\n=== Starting Speech Tests ({self.model_tag}, voice {self.voice}) ===")
+            for check, fn in (("S1 Speaks", self._probe_speaks), ("S2 Repeats", self._probe_repeats),
+                              ("S3 Raw PCM", self._probe_pcm), ("S4 Speed", self._probe_speed),
+                              ("S5 Refuses", self._probe_refuses), ("S6 Round trip", self._probe_round_trip)):
+                try:
+                    verdict, status, note = fn()
+                    self.record(verdict, f"{self.model_tag} / {check}")
+                    writer.writerow([self.model_tag, check, status, note, f"{verdict[0]}: {verdict[1]}"])
+                    print(f"  {check}: {verdict[0]} ({verdict[1]})")
+                except Exception as e:
+                    print(f"  {check}: ERROR ({e})")
+                    self.record(f"ERROR: {e}", f"{self.model_tag} / {check}")
+                    writer.writerow([self.model_tag, check, "N/A", str(e), f"ERROR: {e}"])
+        print(f"Speech tests complete. Saved to {self.csv_filename}")
+        return self.result

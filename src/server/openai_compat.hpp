@@ -611,6 +611,92 @@ inline json images_request(const json& req, const std::vector<int>& sizes, int a
     return json();
 }
 
+// ---------------------------------------------------------------------------------
+// The Speech API (/v1/audio/speech). specs/server-api: SERVER-SPEECH-*.
+// ---------------------------------------------------------------------------------
+
+/// A response that is a file, not JSON: the responder sends `bytes` with `content_type`.
+inline json binary_body(const std::string& bytes, const std::string& content_type) {
+    return json{{"oflm_binary_body", json::binary(std::vector<std::uint8_t>(bytes.begin(), bytes.end()))},
+                {"content_type", content_type}};
+}
+
+inline bool is_binary_body(const json& j) {
+    return j.is_object() && j.contains("oflm_binary_body") && j.at("oflm_binary_body").is_binary() &&
+           j.contains("content_type") && j.at("content_type").is_string();
+}
+
+/// A request's speech controls, validated. The model is resolved by the handler.
+struct SpeechRequest {
+    std::string input;
+    std::string voice;
+    std::string response_format = "wav";   ///< "wav" | "pcm"
+    double speed = 1.0;
+    std::vector<std::string> ignored;      ///< accepted and ignored, for the log line
+};
+
+constexpr size_t kSpeechMaxInput = 4096;   ///< OpenAI's limit, in characters
+
+/// Parse and check a speech request into `out`: an empty json when acceptable, else the 400.
+///
+/// The rules (SERVER-SPEECH-PARAMS):
+///   - `input` (a non-empty string of at most 4096 characters) and `voice` (a string) are required;
+///   - `response_format` is wav or pcm; mp3, opus, aac and flac are OpenAI's and are refused as
+///     not implemented, because this build carries no encoder for them;
+///   - `speed` is a number in [0.25, 4.0], OpenAI's range, default 1;
+///   - `stream_format: "sse"` is refused as not implemented; `"audio"` is the whole file;
+///   - `instructions` is a string that is accepted and ignored: Kokoro takes no instructions;
+///   - `null` is the same as leaving a field out, and fields this server does not know are ignored.
+inline json speech_request(const json& req, SpeechRequest& out) {
+    out = SpeechRequest{};
+    if (json err = require_field(req, "input", FieldType::String); !err.is_null()) return err;
+    out.input = req.at("input").get<std::string>();
+    size_t chars = 0;
+    for (unsigned char c : out.input) chars += (c & 0xC0) != 0x80;
+    if (out.input.find_first_not_of(" \t\r\n") == std::string::npos)
+        return invalid_param("input", "input must contain text to speak.");
+    if (chars > kSpeechMaxInput)
+        return invalid_param("input", "input is " + std::to_string(chars) + " characters; the limit is " +
+                                      std::to_string(kSpeechMaxInput) + ".");
+    if (json err = require_field(req, "voice", FieldType::String); !err.is_null()) return err;
+    out.voice = req.at("voice").get<std::string>();
+
+    auto has = [&](const char* f) { return req.contains(f) && !req.at(f).is_null(); };
+    if (has("response_format")) {
+        const json& v = req.at("response_format");
+        if (!v.is_string()) return invalid_param("response_format", "response_format must be a string.");
+        const std::string f = v.get<std::string>();
+        if (f == "mp3" || f == "opus" || f == "aac" || f == "flac")
+            return invalid_param("response_format", "response_format " + f + " is not implemented in this "
+                                 "server: it has no " + f + " encoder. Use wav or pcm (24 kHz, 16-bit mono).",
+                                 "not_implemented");
+        if (f != "wav" && f != "pcm")
+            return invalid_param("response_format", "response_format must be wav or pcm.");
+        out.response_format = f;
+    }
+    if (has("speed")) {
+        const json& v = req.at("speed");
+        if (!v.is_number()) return invalid_param("speed", "speed must be a number.");
+        const double s = v.get<double>();
+        if (!(s >= 0.25 && s <= 4.0)) return invalid_param("speed", "speed must be between 0.25 and 4.0.");
+        out.speed = s;
+    }
+    if (has("stream_format")) {
+        const json& v = req.at("stream_format");
+        const std::string f = v.is_string() ? v.get<std::string>() : std::string();
+        if (f == "sse")
+            return invalid_param("stream_format", "stream_format sse is not implemented; the response is "
+                                                  "the whole audio file.", "not_implemented");
+        if (f != "audio") return invalid_param("stream_format", "stream_format must be audio or sse.");
+    }
+    if (has("instructions")) {
+        if (!req.at("instructions").is_string())
+            return invalid_param("instructions", "instructions must be a string.");
+        out.ignored.push_back("instructions");
+    }
+    return json();
+}
+
 /// A multipart form's text fields as the JSON images_request() reads. Form values are
 /// all strings; the numeric and boolean controls are converted when they parse as
 /// such, and left as strings otherwise, so a bad one is refused as the wrong type.

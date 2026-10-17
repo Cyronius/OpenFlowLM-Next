@@ -709,6 +709,62 @@ static void test_images_request() {
     refused(form, "steps", "the form's steps 2.5");
 }
 
+// SERVER-SPEECH-PARAMS: the speech request's rules, and the binary-body convention.
+static void test_speech_request() {
+    std::printf("\n-- speech_request --\n");
+    using openai_compat::SpeechRequest;
+    using openai_compat::json;
+    SpeechRequest r;
+    auto run = [&](const json& req) { return openai_compat::speech_request(req, r); };
+    auto refused = [&](const json& req, const std::string& param, const std::string& what) {
+        const json e = run(req);
+        ok(!e.is_null() && openai_compat::status_for(e) == 400 && e["error"]["param"] == param,
+           what + " -> 400 naming " + param + (e.is_null() ? "  (accepted)" : "  (got " + e.dump() + ")"));
+        return e;
+    };
+    const json base = {{"input", "Hello there."}, {"voice", "af_heart"}};
+    auto with = [&](json extra) { json j = base; for (auto& [k, v] : extra.items()) j[k] = v; return j; };
+
+    ok(run(base).is_null(), "input and voice alone are accepted");
+    eq(r.response_format, "wav", "response_format defaults to wav");
+    ok(r.speed == 1.0, "speed defaults to 1");
+    refused(json{{"voice", "af_heart"}}, "input", "no input");
+    refused(json{{"input", "hi"}}, "voice", "no voice");
+    refused(with({{"input", "   \n"}}), "input", "blank input");
+    refused(with({{"input", 5}}), "input", "a numeric input");
+    refused(with({{"input", std::string(4097, 'a')}}), "input", "4097 characters");
+    ok(run(with({{"input", std::string(4096, 'a')}})).is_null(), "4096 characters are accepted");
+    std::string accents;
+    for (int i = 0; i < 4096; ++i) accents += "\xC3\xA9";
+    ok(run(with({{"input", accents}})).is_null(), "4096 two-byte characters are accepted");
+
+    ok(run(with({{"response_format", "pcm"}})).is_null() && r.response_format == "pcm", "pcm is accepted");
+    ok(run(with({{"response_format", nullptr}})).is_null() && r.response_format == "wav", "null is omitted");
+    for (const char* f : {"mp3", "opus", "aac", "flac"}) {
+        const json e = refused(with({{"response_format", f}}), "response_format", std::string("format ") + f);
+        eq(e["error"]["code"].get<std::string>(), "not_implemented", std::string(f) + " is named as not implemented");
+    }
+    refused(with({{"response_format", "ogg"}}), "response_format", "format ogg");
+    ok(run(with({{"speed", 0.25}})).is_null() && r.speed == 0.25, "speed 0.25");
+    ok(run(with({{"speed", 4}})).is_null() && r.speed == 4.0, "speed 4 (an integer)");
+    refused(with({{"speed", 0.2}}), "speed", "speed 0.2");
+    refused(with({{"speed", 4.5}}), "speed", "speed 4.5");
+    refused(with({{"speed", "fast"}}), "speed", "a string speed");
+    ok(run(with({{"stream_format", "audio"}})).is_null(), "stream_format audio");
+    const json sse = refused(with({{"stream_format", "sse"}}), "stream_format", "stream_format sse");
+    eq(sse["error"]["code"].get<std::string>(), "not_implemented", "sse is named as not implemented");
+    ok(run(with({{"instructions", "Speak calmly."}})).is_null() &&
+           r.ignored == std::vector<std::string>{"instructions"}, "instructions are accepted and ignored");
+    refused(with({{"instructions", 3}}), "instructions", "numeric instructions");
+    ok(run(with({{"model", "kokoro:82m"}, {"user", "x"}})).is_null(), "model and unknown extras pass through");
+
+    const json b = openai_compat::binary_body(std::string("RIFF\0\x01", 6), "audio/wav");
+    ok(openai_compat::is_binary_body(b), "a binary body is recognised");
+    ok(b["oflm_binary_body"].get_binary().size() == 6, "and keeps every byte, NULs included");
+    ok(!openai_compat::is_binary_body(json{{"error", {{"message", "x"}}}}), "an error body is not binary");
+    eqi(openai_compat::status_for(b), 200, "a binary body is a 200");
+}
+
 int main(int argc, char** argv) {
     std::string list_path = argc > 1 ? argv[1] : "model_list.json";
     if (!fs::exists(list_path)) {
@@ -727,6 +783,7 @@ int main(int argc, char** argv) {
     test_stream_errors();
     test_require_field();
     test_images_request();
+    test_speech_request();
     test_is_chat_model(list_path);
 
     std::printf("\n%s (%d checks, %d failures)\n", failures ? "FAILED" : "PASS", checks, failures);

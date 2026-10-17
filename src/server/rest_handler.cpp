@@ -26,6 +26,7 @@
 #include "open_diffusion/engine.hpp"
 #include "open_diffusion/prompt.hpp"
 #include "open_diffusion/reference.hpp"
+#include "open_tts/tts_engine.hpp"
 #include "tokenizer/tokenizer.hpp"
 
 ///@brief Report a handler's error on the transport the client is actually reading (#64)
@@ -370,7 +371,7 @@ static json convert_tool_responses_gemma4(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), modelscope(args.modelscope), asr(args.asr), asr_model_tag(args.asr_model.empty() ? std::string("whisper-v3:turbo") : args.asr_model), tts(args.tts), tts_model_tag(args.tts_model.empty() ? std::string("kokoro:82m") : args.tts_model), embed(args.embed), embedding_model_tag(args.embedding_model), image_resident(args.image_resident), image_model_tag(args.image_model.empty() ? std::string("flux2-klein:4b") : args.image_model), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
     this->npu_device_inst = oflm_rt::device(0);
 
     if (args.ctx_length != -1) {
@@ -444,7 +445,54 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
             exit(EXIT_FAILURE);
         }
     }
+    // --tts 1 (SERVER-SPEECH-LOAD): the engine is host-only, so it sits beside everything else.
+    if (this->tts) {
+        ensure_tts_model_loaded(this->tts_model_tag);
+    } else if (!args.tts_model.empty()) {
+        header_print("ERROR", "--ttsmodel needs --tts 1");
+        exit(EXIT_FAILURE);
+    }
     this->prompt_cache = PromptCache();
+}
+
+void RestHandler::ensure_tts_model_loaded(const std::string& model_tag) {
+    // get_model_info() answers an unknown tag with llama3.2:1b; refuse before anything downloads.
+    const std::string tag = this->supported_models.cut_tag(model_tag);
+    if (!this->supported_models.is_model_supported(tag) && !this->supported_models.is_model_supported(
+            this->supported_models.rectify_model_tag(tag))) {
+        header_print("ERROR", "--ttsmodel " + tag + " is not in the model list; install one with "
+                              "oflm-add mlx-community/Kokoro-82M-bf16");
+        exit(EXIT_FAILURE);
+    }
+    auto [resolved, info] = this->supported_models.get_model_info(this->supported_models.rectify_model_tag(tag));
+    if (!info.value("tts", false)) {
+        header_print("ERROR", "--ttsmodel " + resolved + " is not a text-to-speech model");
+        exit(EXIT_FAILURE);
+    }
+    switch (downloader.is_model_downloaded(resolved)) {
+        case ModelDownloader::ModelStatus::Ready:
+            break;
+        case ModelDownloader::ModelStatus::Outdated:
+        case ModelDownloader::ModelStatus::Missing:
+            downloader.pull_model(resolved, modelscope);
+            break;
+        case ModelDownloader::ModelStatus::Incompatible:
+            header_print("ERROR", "--ttsmodel " + resolved + " is incompatible with this version of OpenFlowLM");
+            exit(EXIT_FAILURE);
+    }
+    try {
+        const auto t0 = std::chrono::steady_clock::now();
+        this->tts_engine = std::make_unique<open_tts::TtsEngine>(this->supported_models.get_model_path(resolved));
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        header_print("OFLM", "Loaded text-to-speech model " + resolved + " (" +
+                                 this->tts_engine->model().weights_dtype() + " weights, " +
+                                 std::to_string(this->tts_engine->voices().size()) + " voices) in " +
+                                 std::to_string((int)ms) + " ms, on the CPU");
+    } catch (const std::exception& e) {
+        header_print("ERROR", "Failed to load text-to-speech model " + resolved + ": " + e.what());
+        exit(EXIT_FAILURE);
+    }
+    this->tts_model_tag = resolved;
 }
 
 ///@brief RestHandler destructor
@@ -1934,6 +1982,73 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
     catch (const std::exception& e) {
         const json error_response = exception_error("handle_openai_audio_transcriptions", e);
         send_response(error_response);
+    }
+}
+
+///@brief POST /v1/audio/speech: text to a WAV or raw PCM file (SERVER-SPEECH-*)
+void RestHandler::handle_openai_audio_speech(const json& request,
+                                             std::function<void(const json&)> send_response,
+                                             StreamResponseCallback send_streaming_response,
+                                             std::shared_ptr<CancellationToken> cancellation_token) {
+    try {
+        openai_compat::SpeechRequest sp;
+        if (json err = openai_compat::speech_request(request, sp); !err.is_null()) {
+            send_response(err);
+            return;
+        }
+        if (!this->tts_engine) {
+            send_response(openai_compat::invalid_param("model", "no text-to-speech model is loaded: this server "
+                                                       "was started without one. Start oflm serve with --tts 1.",
+                                                       "model_not_found"));
+            return;
+        }
+        // SERVER-MODEL-IDENTITY: the loaded model, or a refusal; tts-1 is not served under another name.
+        if (request.contains("model") && !request.at("model").is_null()) {
+            if (!request.at("model").is_string()) {
+                send_response(openai_compat::invalid_param("model", "model must be a string."));
+                return;
+            }
+            std::string want = this->supported_models.cut_tag(request.at("model").get<std::string>());
+            if (this->supported_models.is_model_supported(want)) want = this->supported_models.rectify_model_tag(want);
+            if (want != this->tts_model_tag) {
+                send_response(openai_compat::invalid_param("model", "model '" + want + "' is not the loaded "
+                                                           "text-to-speech model; this server speaks with '" +
+                                                           this->tts_model_tag + "'.", "model_not_found"));
+                return;
+            }
+        }
+        const std::string voice = this->tts_engine->resolve_voice(sp.voice);
+        if (voice.empty() || !open_tts::TtsEngine::english_voice(voice)) {
+            std::string list;
+            for (const auto& v : this->tts_engine->voices())
+                if (open_tts::TtsEngine::english_voice(v)) list += (list.empty() ? "" : ", ") + v;
+            const std::string why = voice.empty() ? "voice '" + sp.voice + "' is not installed"
+                                                  : "voice '" + voice + "' is not English, and the phonemizer "
+                                                    "speaks English only (not implemented)";
+            send_response(openai_compat::invalid_param("voice", why + ". Voices: " + list + ".",
+                                                       voice.empty() ? "invalid_value" : "not_implemented"));
+            return;
+        }
+        for (const auto& f : sp.ignored) header_print("OFLM", "speech: '" + f + "' accepted and ignored (Kokoro takes none)");
+        const auto t0 = std::chrono::steady_clock::now();
+        open_tts::SpeakInfo info;
+        const std::vector<float> audio = this->tts_engine->speak(sp.input, voice, (float)sp.speed, &info);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!info.unknown.empty()) {
+            std::string u;
+            for (const auto& w : info.unknown) u += (u.empty() ? "" : ", ") + w;
+            header_print("OFLM", "speech: words not in the lexicon, spelled out: " + u);
+        }
+        std::printf("[oflm] speech: %.2f s of audio in %zu chunk(s), voice %s, host wall clock %.0f ms\n",
+                    info.seconds, info.chunks.size(), voice.c_str(), ms);
+        std::fflush(stdout);
+        if (sp.response_format == "pcm")
+            send_response(openai_compat::binary_body(open_tts::encode_pcm16(audio), "audio/pcm"));
+        else
+            send_response(openai_compat::binary_body(open_tts::encode_wav(audio), "audio/wav"));
+    }
+    catch (const std::exception& e) {
+        send_response(exception_error("handle_openai_audio_speech", e));
     }
 }
 

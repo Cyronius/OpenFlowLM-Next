@@ -57,6 +57,10 @@ struct program_args_t {
     bool image_resident = false;      // --imagegen 1: load the image engine at startup and keep it
     std::string image_model = "";     // --imagemodel; empty means flux2-klein:4b
 
+    // for serve command's /v1/audio/speech (SERVER-SPEECH-*)
+    bool tts = false;                 // --tts 1: load the text-to-speech engine at startup
+    std::string tts_model = "";       // --ttsmodel; empty means kokoro:82m
+
     // for list command
     std::string list_filter = "all";
 

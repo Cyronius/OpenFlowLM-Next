@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 import sys
 from .tasks import (LLMTask, EmbeddingTask, AudioTask, VisionTask, ToolCallingTask,
-                    ApiConformanceTask, TranscriptionTask)
+                    ApiConformanceTask, TranscriptionTask, SpeechTask)
 
-SUITE_NAMES = ("llm", "embedding", "audio", "vision", "tools", "api")
+SUITE_NAMES = ("llm", "embedding", "audio", "vision", "tools", "api", "tts")
 # Suites that need a chat model loaded; embedding is the odd one out.
 CHAT_SUITES = ("llm", "audio", "vision", "tools", "api")
 
@@ -27,7 +27,8 @@ def resolve_suites(args):
     explicit = {name: getattr(args, name) for name in SUITE_NAMES}
     note = ""
     if args.all:
-        suites = {name: name != "embedding" for name in SUITE_NAMES}
+        # tts needs a server started with --tts 1, so it runs only when asked for
+        suites = {name: name not in ("embedding", "tts") for name in SUITE_NAMES}
         note = ("Note: --all excludes the embedding suite; run `oflm-test --embedding` "
                 "separately so only an embed model needs to be loaded.")
     else:
@@ -84,6 +85,9 @@ def main():
     parser.add_argument('--vision', action='store_true', help="Run vision tests")
     parser.add_argument('--tools', action='store_true',
                         help="Run tool-calling tests (seven complexity levels)")
+    parser.add_argument('--tts', action='store_true',
+                        help="Run text-to-speech tests (/v1/audio/speech; server started with --tts 1; "
+                             "--model names the TTS tag, default kokoro:82m)")
     parser.add_argument('--api', action='store_true',
                         help="Run server conformance tests (error status, model identity, "
                              "finish_reason, request isolation, stream parity)")
@@ -173,6 +177,9 @@ def run_suites(args, baseurl, suites, model_filter, results):
 
     if suites["api"]:
         results.append(ApiConformanceTask(baseurl, args.backend_os, model_filter=model_filter).run())
+
+    if suites["tts"]:
+        results.append(SpeechTask(baseurl, args.backend_os, model_filter=model_filter).run())
 
 
 if __name__ == "__main__":
