@@ -488,7 +488,8 @@ text a query becomes, the ids, the prompt, the score, the order and `dimensions`
 `test_embed_qwen3`; the install: `utilities/oflm-add/tests/test_llm_embed_install.py`) and manual
 (the vectors)
 
-`oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b` serves Qwen3-Embedding-0.6B. A query
+`oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b` serves Qwen3-Embedding-0.6B, and
+`qwen3-embedding:4b` serves Qwen3-Embedding-4B the same way. A query
 (`prompt_name` / `task_type` `query` or `search_query`) is embedded as
 `Instruct: <instruction>\nQuery:<text>` with the card's web-search instruction; a document
 (`document`, `search_document`, `search_result`) is embedded as written; a request naming no task
@@ -496,8 +497,8 @@ gets the model's own default, the text as written, which is what its sentence-tr
 says and what llama.cpp and other OpenAI-compatible servers do. Any other task is refused: the
 model declares prompts for query and document only. The ids are the tokenizer's, followed by the
 end-of-text id when the GGUF's `tokenizer.ggml.add_eos_token` is true (151643 for Qwen3-Embedding).
-The vector is the final-norm hidden state at that last id, L2-normalized. `dimensions` (32 to 1024)
-returns the first `dimensions` entries renormalized to unit length (Matryoshka). A model that
+The vector is the final-norm hidden state at that last id, L2-normalized. `dimensions` (32 to the
+model's width: 1024, or 2560 at 4B) returns the first `dimensions` entries renormalized to unit length (Matryoshka). A model that
 cannot shorten its vectors -- every other backend -- refuses `dimensions` with 400 unless it asks
 for the model's own width; it used to be ignored silently.
 
@@ -534,13 +535,19 @@ other check held: 1024 dimensions, unit length, `dimensions: 256` is the renorma
 --embedding --model qwen3-embedding:0.6b`: 10 PASS, E8 SKIP (its bundled vectors are
 embeddinggemma's).
 
+**Result 2026-10-17, 4B** (mradermacher's i1-Q4_1 file, served beside the 4B reranker). The served
+matrix is [[0.7577, 0.1063], [0.0293, 0.6463]] against fp32's [[0.7534, 0.1147], [0.0320, 0.6258]]:
+max difference 0.0205, a hair over the bar; the same GGUF on the CPU is 0.0195 from fp32 and the
+served matrix is within 0.0009 of it. Every other check held as at 0.6B, with 2560 dimensions.
+`oflm-test --embedding --model qwen3-embedding:4b`: 10 PASS, E8 SKIP.
+
 ### SERVER-RERANK: `/v1/rerank` scores and orders documents against a query
 **Applies to:** openflowlm-next (`src/server/rest_handler.cpp`, `src/server/server.cpp`, `src/server/openai_compat.hpp`, `src/include/AutoEmbeddingModel/`)
 **Verification:** test (the body, prompt, score and order: `src/server/openai_compat_test.cpp`
 `test_rerank`) and manual (the scores)
 
-`oflm serve --rerankmodel qwen3-reranker:0.6b` loads a reranker beside any chat and embedding
-model and serves `POST /v1/rerank` in the Cohere / Jina / llama.cpp shape:
+`oflm serve --rerankmodel qwen3-reranker:0.6b` (or `qwen3-reranker:4b`) loads a reranker beside
+any chat and embedding model and serves `POST /v1/rerank` in the Cohere / Jina / llama.cpp shape:
 `{model?, query, documents: [string | {text}], top_n?, return_documents?, instruction?}` ->
 `{object: "list", model, results: [{index, relevance_score, document?}], usage}`, results sorted by
 score, best first, ties in request order. Each document is scored on the card's prompt (system
@@ -577,3 +584,8 @@ gravity" with `top_n: 1` keeps the gravity document at 0.99850 (fp32 0.99936). A
 `query`, a numeric document and another model's tag are each refused with 400 naming the field or
 the loaded model. `oflm-test --rerank`: 8 PASS; repeat draws and a document scored alone against
 beside another were bit-identical.
+
+**Result 2026-10-17, 4B: PASS** (mradermacher's i1-Q4_1 file). The Beijing document ranks first at
+0.99698 (fp32 0.99820), the gravity document scores 0.000002 (fp32 0.000001), and "Explain
+gravity" with `top_n: 1` keeps the gravity document at 0.96800 (fp32 0.98115, within 0.02). The
+refusals hold as at 0.6B. `oflm-test --rerank --model qwen3-reranker:4b`: 8 PASS.

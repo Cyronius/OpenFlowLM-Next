@@ -101,7 +101,7 @@ holds except the embedder's "within 0.02 of fp32" bar, which the weights miss (0
 CPU). `oflm-test --embedding --model qwen3-embedding:0.6b` passes its ten checks (E8 skips: its
 bundled vectors are embeddinggemma's). Results are in the two requirements.
 
-## The 4B sizes (2026-10-17, in progress)
+## The 4B sizes (2026-10-17)
 
 Qwen3-Embedding-4B and Qwen3-Reranker-4B are the Qwen3-4B network (36 layers, hidden 2560, 32/8
 heads at 128, ff 9728), both with a tied head. Unlike the 0.6B pair they differ in vocabulary: the
@@ -126,4 +126,9 @@ about 80 minutes. A plain export rebuilds it whenever wanted.
 The fp32 references reproduce both cards: the embedder's similarity matrix to 1e-6, the
 reranker's logit differences (6.32 and -14.42 for the first query) to within 0.12 of the printed
 6.44 and -14.38. The i1-Q4_1 weights are closer to fp32 at 4B than at 0.6B: on the CPU the card
-matrix moves by 0.0196, inside the 0.02 bar; NPU cosine to fp32 is 0.979 to 0.989.
+matrix moves by 0.0195, inside the 0.02 bar; NPU cosine to fp32 is 0.979 to 0.989.
+
+On the NPU and through `oflm serve` the 4B pair passes the same checks as the 0.6B pair: the
+embedder sits 0.0205 from fp32 on the card (0.0009 from the same weights on the CPU), the reranker
+within 0.014; `oflm-test --embedding` and `--rerank` pass. Results are in the three requirements.
+The 8B sizes were not started.

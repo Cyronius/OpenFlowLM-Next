@@ -1,13 +1,13 @@
 ---
 name: open-qwen3-embedding
-description: Serve Qwen3-Embedding-0.6B (/v1/embeddings) and Qwen3-Reranker-0.6B (/v1/rerank) on the open dense kernels, read straight from their GGUFs. Use when installing either model, rebuilding the Qwen3-Embedding-0.6B-NPU2 kernel set, adding the 4B/8B sizes, or debugging an LLM-backed embedder or reranker (OpenLlmEmbedding, Core::prefill_hidden).
+description: Serve Qwen3-Embedding (/v1/embeddings) and Qwen3-Reranker (/v1/rerank), 0.6B and 4B, on the open dense kernels, read straight from their GGUFs. Use when installing any of them, rebuilding their kernel sets, adding the 8B size, or debugging an LLM-backed embedder or reranker (OpenLlmEmbedding, Core::prefill_hidden).
 ---
 
 # Qwen3-Embedding and Qwen3-Reranker on the open kernels
 
-Both models are the Qwen3-0.6B network (28 layers, hidden 1024, 16/8 heads at 128, ff 3072) with a
-151669-row vocabulary and a tied head. They need no kernel of their own: the job is a hidden state
-instead of logits.
+At 0.6B both models are the Qwen3-0.6B network (28 layers, hidden 1024, 16/8 heads at 128, ff
+3072) with a 151669-row vocabulary and a tied head; at 4B, the Qwen3-4B network (below). They need
+no kernel of their own: the job is a hidden state instead of logits.
 
 - Engine: `Core::prefill_hidden(ids)` (OPEN-HIDDEN-STATE) runs the prompt from position 0, then the
   tail up to the head (the final norm writes `hn`), and returns `hn` of the last token as f32.
@@ -16,7 +16,7 @@ instead of logits.
   chosen by the tag table in `all_embedding_model.hpp`. The text, id, prompt and score rules are
   `llm_conventions.hpp`; the wire rules (`/v1/rerank`'s body, `dimensions`) are `openai_compat.hpp`.
 - Specs: `specs/open-engine/spec.md` OPEN-HIDDEN-STATE, `specs/server-api/spec.md`
-  SERVER-EMBED-QWEN3 and SERVER-RERANK; plan `specs/open-engine/plans/qwen3-embedding.md`.
+  SERVER-EMBED-QWEN3 and SERVER-RERANK; plan (done) `specs/open-engine/plans/archive/qwen3-embedding.md`.
 
 ## The kernel set
 
@@ -26,9 +26,26 @@ One set serves both models: every GGUF of either and both `config.json`s derive 
 151936, and a set under its name would make `qwen3:0.6b` load against the wrong head and fail.
 
 ```sh
-# WSL, under dibs build; about 20 minutes, most of it the q4nx route's attention blocks
+# WSL, under dibs build; up to an hour on a busy box (both layouts: q4nx and GGUF f32-scale)
 python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/qwen3-embedding-0.6b.json
 ```
+
+At 4B the two models stop sharing a set: the embedder's vocabulary is 151665, the reranker's
+151669, so each has its own spec (`qwen3-embedding-4b.json`, `qwen3-reranker-4b.json`) and set
+(`Qwen3-Embedding-4B-NPU2`, `Qwen3-Reranker-4B-NPU2`). The network is Qwen3-4B's (36 layers,
+hidden 2560, 32/8 heads, ff 9728, tied head), so no kernel point is new.
+
+The two 4B specs compile the same kernels (both heads pad to 151680 rows; nothing else reads the
+vocabulary), so after a full export of one, the other can be written from the same build dirs:
+
+```sh
+python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/qwen3-embedding-4b.json   # ~80 min
+python open_kernels/export_qwen36_kernels.py --spec open_kernels/recipes/specs/qwen3-reranker-4b.json --no-build
+```
+
+Check it first (the 2026-10-17 run did): `F.builds()` and the generated kernel sources equal under
+both specs, and the MLIR of `dense/dx.py` (also with `GEMV_SCALES_F32=1`) and `dense/dx_attn.py`
+byte-identical (`CallableDesign.as_mlir()`).
 
 ## Install and serve
 
@@ -38,7 +55,13 @@ python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Embedding-0.6B-i1-GGUF 
 python utilities/oflm-add/oflm-add.py mradermacher/Qwen3-Reranker-0.6B-i1-GGUF --tag qwen3-reranker:0.6b \
     --open-kernels <set> --no-xclbin
 oflm serve --embed 1 --embeddingmodel qwen3-embedding:0.6b --rerankmodel qwen3-reranker:0.6b
+oflm-test --embedding --model qwen3-embedding:0.6b
+oflm-test --rerank --model qwen3-reranker:0.6b
 ```
+
+The 4B pair installs the same way from `mradermacher/Qwen3-{Embedding,Reranker}-4B-i1-GGUF` with
+`--tag qwen3-{embedding,reranker}:4b` and each model's own set. A new size needs its tag line in
+`all_embedding_model.hpp` (the table routes by tag), so a rebuild of oflm.
 
 These are imatrix `i1-Q4_1` files: every matmul packs exactly. Qwen's own embedder GGUF
 (`Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 and F16 only) and ggml-org's reranker Q8_0 install and run
