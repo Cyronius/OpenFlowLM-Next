@@ -170,13 +170,9 @@ def _dq_q6_k(raw) -> np.ndarray:
     return out
 
 
-def _dq_q4_k(raw) -> np.ndarray:
-    """[..., 144] super-blocks -> [..., 256] f32, as gguf_file.cpp (d1 = d * sc; d1 * q - m1)."""
-    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16)[..., 0].astype(np.float32)
-    dmin = np.ascontiguousarray(raw[..., 2:4]).view(np.float16)[..., 0].astype(np.float32)
-    s = raw[..., 4:16].astype(np.int32)
-    qs = raw[..., 16:144].astype(np.int32)
-    sc = np.empty(raw.shape[:-1] + (8,), np.int32)
+def _scale_min_k4(s):
+    """llama.cpp's 6-bit scales and mins of a Q4_K super-block: [..., 12] -> ([..., 8], [..., 8])."""
+    sc = np.empty(s.shape[:-1] + (8,), np.int32)
     mn = np.empty_like(sc)
     for j in range(8):
         if j < 4:
@@ -184,6 +180,15 @@ def _dq_q4_k(raw) -> np.ndarray:
         else:
             sc[..., j] = (s[..., j + 4] & 0xF) | ((s[..., j - 4] >> 6) << 4)
             mn[..., j] = (s[..., j + 4] >> 4) | ((s[..., j] >> 6) << 4)
+    return sc, mn
+
+
+def _dq_q4_k(raw) -> np.ndarray:
+    """[..., 144] super-blocks -> [..., 256] f32, as gguf_file.cpp (d1 = d * sc; d1 * q - m1)."""
+    d = np.ascontiguousarray(raw[..., 0:2]).view(np.float16)[..., 0].astype(np.float32)
+    dmin = np.ascontiguousarray(raw[..., 2:4]).view(np.float16)[..., 0].astype(np.float32)
+    qs = raw[..., 16:144].astype(np.int32)
+    sc, mn = _scale_min_k4(raw[..., 4:16].astype(np.int32))
     out = np.empty(raw.shape[:-1] + (256,), np.float32)
     for g in range(4):
         q = qs[..., 32 * g:32 * g + 32]
@@ -239,6 +244,7 @@ def to_q4nx_chunks(g: GgufReader, name, rows, cols, row_of=None, blk_of=None, he
     bmap = np.arange(nb) if blk_of is None else np.asarray(blk_of)
     live = rmap < src_rows
     q4 = not head and t in ("Q4_0", "Q4_1")
+    q4k = not head and t == "Q4_K"
     q8 = t == "Q8_0"
     ch = CHUNK_Q8 if (head or q8) else CHUNK_Q4
     out = np.zeros((nrb, ncol, ch), np.uint8)
@@ -247,7 +253,18 @@ def to_q4nx_chunks(g: GgufReader, name, rows, cols, row_of=None, blk_of=None, he
         rr = rmap[r0:r1]
         ok = live[r0:r1]
         nrw = r1 - r0
-        if q4 or q8:
+        if q4k:
+            # a Q4_K sub-block is q4_1's per-32 scale and min already: only their products round
+            sb = g.raw(name).reshape(src_rows, cols // 256, 144)[np.where(ok, rr, 0)]
+            sb = np.where(ok[:, None, None], sb, 0).astype(np.uint8)
+            dd = np.ascontiguousarray(sb[..., 0:2]).view(np.float16)[..., 0].astype(np.float32)
+            dm = np.ascontiguousarray(sb[..., 2:4]).view(np.float16)[..., 0].astype(np.float32)
+            sc, mn = _scale_min_k4(sb[..., 4:16].astype(np.int32))                   # [n, nsb, 8]
+            d1 = (dd[..., None] * sc.astype(np.float32)).astype(np.float32).reshape(nrw, nb)[:, bmap]
+            m1 = (dm[..., None] * mn.astype(np.float32)).astype(np.float32).reshape(nrw, nb)[:, bmap]
+            qs = sb[..., 16:144].reshape(nrw, cols // 256, 4, 32)
+            qk = np.stack([qs & 0xF, qs >> 4], 3).reshape(nrw, nb, 32)[:, bmap]        # sub-block 2g + h
+        elif q4 or q8:
             bpb = BLOCK[t][0]
             blocks = g.raw(name).reshape(src_rows, nb, bpb)[np.where(ok, rr, 0)][:, bmap]   # [n, nb, bpb]
             blocks = np.where(ok[:, None, None], blocks, 0).astype(np.uint8)
@@ -289,6 +306,12 @@ def to_q4nx_chunks(g: GgufReader, name, rows, cols, row_of=None, blk_of=None, he
                     c[512:1024].view(np.uint16)[:] = bf16_rne(m).T.reshape(-1)
                     flat = np.zeros(8192, np.uint8)
                     flat[_CODE_AT.reshape(-1)] = q.reshape(-1)
+                    c[1024:] = flat[0::2] | (flat[1::2] << 4)
+                elif q4k:
+                    c[:512].view(np.uint16)[:] = bf16_rne(d1[rl, bs]).T.reshape(-1)
+                    c[512:1024].view(np.uint16)[:] = bf16_rne(-m1[rl, bs]).T.reshape(-1)
+                    flat = np.zeros(8192, np.uint8)
+                    flat[_CODE_AT.reshape(-1)] = qk[rl, bs].reshape(-1)
                     c[1024:] = flat[0::2] | (flat[1::2] << 4)
                 else:
                     v = vals[rl, bs]                                                   # [32 r, 8 kb, 32]

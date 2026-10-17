@@ -34,7 +34,7 @@ namespace {
 
 // ---- OPEN-GGUF-Q4NX-VIEW: a synthetic qwen35 GGUF, built the same way by
 // specs/open-engine/tests/test_gguf_q4nx_view.py, whose view must hash the same.
-constexpr uint64_t VIEW_FNV1A = 0xe255b1cf09155467ull;
+constexpr uint64_t VIEW_FNV1A = 0xbbe4818c9288d59cull;
 
 uint64_t fnv1a(uint64_t h, const void* p, size_t n) {
     const auto* b = static_cast<const uint8_t*>(p);

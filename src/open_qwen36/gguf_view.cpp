@@ -20,6 +20,17 @@ constexpr size_t Q4 = 5120, Q8 = 8704;
 
 inline unsigned code_at(unsigned r, unsigned k) { return (r / 16) * 4096 + k * 16 + (r % 16); }
 
+// llama.cpp's 6-bit scale / min unpacking of a Q4_K super-block (gguf_file.cpp's embed_row reads the same)
+inline void scale_min_k4(unsigned j, const uint8_t* q, uint8_t* d, uint8_t* m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
 uint64_t key(const GgufFile& g, const std::string& arch, const std::string& k) {
     if (!g.kv_has(arch + "." + k)) fail(g.kv_str("general.architecture") + " GGUF lacks " + arch + "." + k);
     return g.kv_u64(arch + "." + k);
@@ -115,18 +126,20 @@ size_t gguf_view::to_q4nx_chunks(const GgufFile& g, const std::string& name, uin
     const uint64_t src_rows = t.dims[1], nb = cols / 32, ncol = cols / 256;
     using T = GgufFile::Type;
     const bool q4 = !head && (t.type == T::Q4_1 || t.type == T::Q4_0);
+    const bool q4k = !head && t.type == T::Q4_K;
     const bool q8 = t.type == T::Q8_0;
     const size_t ch = (head || q8) ? Q8 : Q4;
     out.assign((rows / 32) * ncol * ch, 0);
     size_t n = 0;
     const uint8_t* base = g.raw(name, &n);
     const size_t blk = t.type == T::Q4_1 ? 20 : t.type == T::Q4_0 ? 18 : 34;
+    const size_t row_bytes = q4k ? (cols / 256) * 144 : nb * blk;
     std::vector<float> rowv(cols);
     for (uint64_t r = 0; r < rows; ++r) {
         const uint64_t sr = row_of ? (*row_of)[r] : r;
         if (sr >= src_rows) continue;
-        if (!q4 && !q8) g.embed_row(name, sr, cols, rowv.data());
-        const uint8_t* srow = base + sr * nb * blk;
+        if (!q4 && !q4k && !q8) g.embed_row(name, sr, cols, rowv.data());
+        const uint8_t* srow = base + sr * row_bytes;
         const unsigned rl = static_cast<unsigned>(r % 32);
         for (uint64_t b = 0; b < nb; ++b) {
             const uint64_t sb = blk_of ? (*blk_of)[b] : b;
@@ -165,6 +178,20 @@ size_t gguf_view::to_q4nx_chunks(const GgufFile& g, const std::string& name, uin
                         q[i] = qs[i] & 0xF;
                         q[i + 16] = qs[i] >> 4;
                     }
+                } else if (q4k) {
+                    // a Q4_K sub-block is already q4_1's per-32 scale and min: only their products round
+                    const uint8_t* sbk = srow + (sb / 8) * 144;
+                    const unsigned s = static_cast<unsigned>(sb % 8);
+                    uint16_t d16, m16;
+                    std::memcpy(&d16, sbk, 2);
+                    std::memcpy(&m16, sbk + 2, 2);
+                    uint8_t sc, mn;
+                    scale_min_k4(s, sbk + 4, &sc, &mn);
+                    const float d1 = fp16_to_f32(d16) * sc, m1 = fp16_to_f32(m16) * mn;
+                    du = f32_to_bf16(d1);
+                    mu = f32_to_bf16(-m1);
+                    const uint8_t* qs = sbk + 16 + 32 * (s / 2);
+                    for (unsigned i = 0; i < 32; ++i) q[i] = static_cast<uint8_t>((qs[i] >> (4 * (s % 2))) & 0xF);
                 } else {
                     pools::requant_block_q4_1(rowv.data() + sb * 32, &du, &mu, q);
                 }

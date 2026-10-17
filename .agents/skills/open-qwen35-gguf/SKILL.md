@@ -24,9 +24,11 @@ view undoes (OPEN-GGUF-Q4NX-VIEW in `specs/open-engine/spec.md`):
 - `ssm_a` (already `-exp(A_log)`), `ssm_dt.bias` and the `1 + w` norms pass unchanged.
 
 Weight formats: Q4_1 / Q4_0 pack exactly (codes untouched, d / m narrowed fp16 -> bf16 RNE);
-Q8_0 stays q8 (a q8 role streams it natively, else `requant_q4_1_chunks`); everything else is
-re-quantized by `requant_q4_1`'s law; the head is always q8 (Q8_0 exact, else per 32 values
-s = max|v|/127 toward +inf, code = floor(v/s + 1/2)), rows padded to 256.
+Q8_0 stays q8 (a q8 role streams it natively, else `requant_q4_1_chunks`); Q4_K is transcoded
+(each sub-block's `d * sc` / `-dmin * m` rounded to bf16, codes kept); everything else (Q6_K,
+F16, ...) is re-quantized by `requant_q4_1`'s law; the head is always q8 (Q8_0 exact, else per
+32 values s = max|v|/127 toward +inf, code = floor(v/s + 1/2)), rows padded to 256. Q5_K is not
+read yet (unsloth's Qwen3.5 Q4_K_M files carry it; oflm-add refuses them).
 
 ## The spec, and why a fine-tune may need its own
 
@@ -69,5 +71,5 @@ wrapper, `minicpmv4_7`). Then `oflm serve minicpm-v-4.7:1b` and
 
 ## Not covered yet
 
-Vision (the mmproj GGUF), `qwen35moe` (expert tensors), a Q4_K transcode (Q4_K re-quantizes
-today), and the release export list (the MiniCPM set is not in it).
+Vision (the mmproj GGUF), `qwen35moe` (expert tensors), Q5_K, and the release export list (the
+MiniCPM set is not in it).

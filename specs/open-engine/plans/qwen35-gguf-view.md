@@ -23,8 +23,9 @@ replica read the same view (`open_kernels/model/gguf_q4nx.py`). What the view do
 
 Q4_1 and Q4_0 files pack exactly into the 5120-byte chunk (codes untouched, d / m narrowed once).
 Q8_0 stays q8 (8704-byte chunks), streamed at q8 where the derived quant map says so and
-re-quantized to q4_1 by `requant_q4_1_chunks` otherwise. Everything else is re-quantized to q4_1 by
-that law. The head is always the q8 head (the family's `lm_head_q8` kernel).
+re-quantized to q4_1 by `requant_q4_1_chunks` otherwise. Q4_K is transcoded (its per-32 scale and
+min carried over, rounded to bf16, the codes kept). Everything else is re-quantized to q4_1 by
+`requant_q4_1`'s law. The head is always the q8 head (the family's `lm_head_q8` kernel).
 
 ## The spec-hash finding
 
@@ -37,7 +38,6 @@ so it is the maintainer's call.
 
 ## Not in this plan
 
-Vision (the mmproj GGUF and MiniCPM-V's own tower), the MoE line (`qwen35moe`: expert tensors), a
-Q4_K transcode (Q4_K is re-quantized today; its per-32 scale and min could be carried over exactly
-as `q4k_to_q4_1` does for OFLM's Q4_K chunks), and the release export list (the MiniCPM set is
-exported locally only).
+Vision (the mmproj GGUF and MiniCPM-V's own tower), the MoE line (`qwen35moe`: expert tensors),
+Q5_K (unsloth's Qwen3.5 Q4_K_M files use it for qkv and out_proj), and the release export list
+(the MiniCPM set is exported locally only).

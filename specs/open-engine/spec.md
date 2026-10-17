@@ -1500,8 +1500,10 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
   narrowed fp16 -> bf16 by round-to-nearest-even, Q4_0's min written `-8d`: the one rounding the
   f32-scale kernels do on the way in (`plans/gguf-scale-width.md`). Q8_0 stays q8 (8704-byte
   chunks, codes exact, scale narrowed the same way); the plan streams it at q8 where the derived
-  quant map says so and `requant_q4_1_chunks` re-quantizes it otherwise. Every other type is
-  re-quantized from its exact values by `requant_q4_1`'s law (m toward -inf, d toward +inf).
+  quant map says so and `requant_q4_1_chunks` re-quantizes it otherwise. Q4_K is transcoded as
+  OPEN-QUANT-Q4K transcodes OFLM's: each 32-value sub-block's `d * sc` and `-dmin * m` become d and
+  m (rounded to bf16), the codes kept. Every other type is re-quantized from its exact values by
+  `requant_q4_1`'s law (m toward -inf, d toward +inf).
 - **The head is the q8 head.** A Q8_0 head is exact; any other is re-quantized per 32 values with
   s = max|v| / 127 rounded toward +inf in bf16 and code = floor(v / s + 1/2) in [-127, 127], so
   every value lands within s/2. Rows are padded to a multiple of 256 with zeros (the spec's vocab).
@@ -1513,12 +1515,13 @@ container's names (`linear_attn.qkv_proj` from `attn_qkv`, `self_attn.gate_proj`
 
 **Acceptance criteria:**
 - The C++ view and the NumPy view give byte-identical tensors on the synthetic qwen35 GGUF both
-  tests build from the same LCG (FNV-1a `0xe255b1cf09155467` over 22 view tensors): Q4_1, Q4_0,
+  tests build from the same LCG (FNV-1a `0xbbe4818c9288d59c` over 22 view tensors): Q4_1, Q4_0,
   Q8_0, F16, Q4_K, Q6_K and F32 sources, 4 value heads over 2 key heads.
 - Independently of either view: qkv's value rows, z's rows, out_proj's columns, alpha's rows,
   `ssm_a` and conv1d's value channels come back in grouped order (the tiling rule written as a
   reshape); q_proj's rows are all q then all gate; a re-quantized tensor is within d/2 of its
-  source; the q8 head within s/2 with its padded rows zero.
+  source; a transcoded Q4_K one within 2^-8 of (15 d + |m|); the q8 head within s/2 with its
+  padded rows zero.
 - `oflm-add` treats a `qwen35` manifest at 5120-byte chunks as GGUF-capable without a nested
   section, and a `qwen36moe` one or a 6144-byte one as not; `qwen35` maps to family `qwen3.5`; a
   qwen3.5 GGUF install is text only (`vlm: false`, no `vision` label).

@@ -16,7 +16,7 @@ from gguf_q4nx import GgufAsQ4nx, GgufReader, file_head, requant_q8_blocks
 from q4nx import bf16_to_f32
 from recipes import pack
 
-VIEW_FNV1A = 0xE255B1CF09155467
+VIEW_FNV1A = 0xBBE4818C9288D59C
 
 GEOMETRY = {"qwen35.block_count": 4, "qwen35.embedding_length": 256, "qwen35.feed_forward_length": 256,
             "qwen35.attention.head_count": 4, "qwen35.attention.head_count_kv": 2,
@@ -218,14 +218,24 @@ def test_conv1d_back_to_taps_by_channels(view):
 
 
 def test_requantized_tensor_within_half_a_step(view):
-    """A Q6_K / Q4_K tensor is re-quantized by requant_q4_1's law: every value within d/2."""
-    for name, src in (("model.layers.0.mlp.up_proj.weight", "blk.0.ffn_up.weight"),
-                      ("model.layers.0.mlp.gate_proj.weight", "blk.0.ffn_gate.weight")):
-        exact = view.g.rows_f32(src)
-        got = view.matmul_w(name, 256, 256)
-        chunks = np.frombuffer(view.raw(name), np.uint8).reshape(-1, 5120)
-        d = bf16_to_f32(np.ascontiguousarray(chunks[:, :512]).view(np.uint16)).max()
-        assert np.abs(got - exact).max() <= d / 2 * (1 + 1e-6)
+    """A Q6_K tensor is re-quantized by requant_q4_1's law: every value within d/2."""
+    exact = view.g.rows_f32("blk.0.ffn_up.weight")
+    got = view.matmul_w("model.layers.0.mlp.up_proj.weight", 256, 256)
+    chunks = np.frombuffer(view.raw("model.layers.0.mlp.up_proj.weight"), np.uint8).reshape(-1, 5120)
+    d = bf16_to_f32(np.ascontiguousarray(chunks[:, :512]).view(np.uint16)).max()
+    assert np.abs(got - exact).max() <= d / 2 * (1 + 1e-6)
+
+
+def test_q4_k_is_transcoded_not_requantized(view):
+    """A Q4_K sub-block keeps its codes; only d * sc and dmin * m round to bf16 (2^-8 relative)."""
+    exact = view.g.rows_f32("blk.0.ffn_gate.weight")
+    got = view.matmul_w("model.layers.0.mlp.gate_proj.weight", 256, 256)
+    chunks = np.frombuffer(view.raw("model.layers.0.mlp.gate_proj.weight"), np.uint8).reshape(-1, 5120)
+    d = bf16_to_f32(np.ascontiguousarray(chunks[:, :512]).view(np.uint16)).max()
+    m = np.abs(bf16_to_f32(np.ascontiguousarray(chunks[:, 512:1024]).view(np.uint16))).max()
+    err = np.abs(got - exact).max()
+    assert err <= (15 * d + m) * 2 ** -8
+    assert err < d / 8                                     # far inside what a re-quantization would leave
 
 
 def test_head_q8_law(view):
