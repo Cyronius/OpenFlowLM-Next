@@ -5,8 +5,10 @@ namespace utils { std::string getenv_oflm(const char* oflm_name); }
 #include <iostream>
 
 // POSIX: the environment block. Declared at global scope, so it is not
-// resolved inside the oflm::config namespace.
+// resolved inside the oflm::config namespace. MSVC's <cstdlib> makes it a macro instead.
+#ifndef _WIN32
 extern char** environ;
+#endif
 
 namespace oflm::config {
 
@@ -15,7 +17,7 @@ std::set<std::string> g_external_env_vars;
 void capture_external_env_vars() {
     // The environment as it was before we wrote anything into it. Anything
     // named OFLM_* that is here now is the user's.
-    for (char** e = ::environ; e && *e; ++e) {
+    for (char** e = environ; e && *e; ++e) {
         std::string entry(*e);
         size_t eq = entry.find('=');
         if (eq == std::string::npos) continue;
